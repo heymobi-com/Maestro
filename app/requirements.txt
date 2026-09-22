@@ -35,7 +35,12 @@ mutagen==1.47.0
 pyloudnorm==0.2.0
 librosa==0.11.0
 faster-whisper==1.2.1
+# ctranslate2 (used by faster-whisper) imports pkg_resources, which setuptools
+# dropped in v81. Without this pin every transcription is skipped and the
+# Director UI reports "No speaker was detected".
+setuptools<81
 openai-whisper==20250625  # Required by Scenema audio for Whisper-medium alignment (separate namespace from faster-whisper)
+whisperx==3.3.4
 speechbrain==1.0.3
 audio-separator==0.36.1
 pyannote.audio==3.3.2

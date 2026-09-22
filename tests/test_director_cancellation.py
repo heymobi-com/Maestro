@@ -805,10 +805,9 @@ class TestDirectorCancellation(unittest.TestCase):
         saved = pipeline.load_pipeline_state(self.temp_dir.name, pid)
         self.assertEqual(saved["clips"][0]["video_filename"], "new-video.mp4")
         self.assertFalse(saved["clips"][0]["video_stale"])
-        self.assertEqual(
-            saved["output_files"],
-            ["old-video.mp4", "new-video.mp4"],
-        )
+        # The regenerated clip replaces its own entry; it is not appended.
+        self.assertEqual(saved["output_files"], ["new-video.mp4"])
+        self.assertEqual(saved["_clip_video_files"], ["new-video.mp4"])
 
     def test_image_rerun_marks_backfilled_legacy_video_stale(self):
         pid = "pipe-legacy-image-rerun"
@@ -888,9 +887,10 @@ class TestDirectorCancellation(unittest.TestCase):
             [clip["video_filename"] for clip in saved["clips"]],
             ["new-one.mp4", "old-two.mp4"],
         )
+        # Clip 1 keeps its own entry, so the other mapping is not disturbed.
         self.assertEqual(
             saved["output_files"],
-            ["old-one.mp4", "old-two.mp4", "new-one.mp4"],
+            ["new-one.mp4", "old-two.mp4"],
         )
 
     def test_music_rerun_uses_editorial_audio_offset_and_trims_native_padding(self):
@@ -2802,6 +2802,233 @@ class TestDirectorCancellation(unittest.TestCase):
             "_clip_video_files=completed_clip_videos",
             fallback,
         )
+
+    def test_completed_clip_prefix_only_trusts_media_on_disk(self):
+        """A state file can outlive the clip videos it names."""
+
+        pid = "pipe-resume"
+        record = self._add_pipeline(pid, status="cancelled")
+        record["clip_plans"] = [{}] * 4
+        record["_clip_video_files"] = [
+            "clip0.mp4", "clip1.mp4", None, "clip3.mp4",
+        ]
+        self._write_media("clip0.mp4")
+        self._write_media("clip3.mp4")
+
+        slots = pipeline._completed_clip_video_prefix(
+            pid, 4, self.temp_dir.name,
+        )
+
+        self.assertEqual(slots, ["clip0.mp4", None, None, "clip3.mp4"])
+
+    def test_completed_clip_prefix_is_empty_for_an_unknown_pipeline(self):
+        self.assertEqual(
+            pipeline._completed_clip_video_prefix(
+                "pipe-absent", 3, self.temp_dir.name,
+            ),
+            [],
+        )
+
+    def test_resumed_outputs_keep_finished_clips_in_their_own_slots(self):
+        """The tail batch numbers its clips from zero.
+
+        Without the offset the shots rendered before the resume would be filed
+        under the first clip slots, so the Dashboard and the join would show the
+        wrong video for the wrong shot.
+        """
+
+        tail = pipeline._DirectorOutputs(
+            ["tail0.mp4", "tail1.mp4", "joined_MULTICLIP.mp4"],
+            {0: "tail0.mp4", 1: "tail1.mp4"},
+        )
+
+        merged = pipeline._merge_resumed_clip_outputs(
+            tail, ["done0.mp4", "done1.mp4", "done2.mp4"], 3,
+        )
+
+        self.assertEqual(
+            list(merged),
+            ["done0.mp4", "done1.mp4", "done2.mp4", "tail0.mp4", "tail1.mp4"],
+        )
+        self.assertEqual(
+            pipeline._clip_video_slots(merged, 5),
+            ["done0.mp4", "done1.mp4", "done2.mp4", "tail0.mp4", "tail1.mp4"],
+        )
+
+    def test_a_partial_join_from_the_tail_batch_is_not_returned(self):
+        tail = pipeline._DirectorOutputs(
+            ["tail0.mp4", "joined_MULTICLIP.mp4"],
+            {0: "tail0.mp4"},
+        )
+
+        merged = pipeline._merge_resumed_clip_outputs(tail, ["done0.mp4"], 1)
+
+        self.assertNotIn("joined_MULTICLIP.mp4", list(merged))
+
+    def test_merging_is_a_noop_without_a_resumed_prefix(self):
+        tail = pipeline._DirectorOutputs(["a.mp4"], {0: "a.mp4"})
+
+        self.assertIs(
+            pipeline._merge_resumed_clip_outputs(tail, [], 0),
+            tail,
+        )
+
+    def test_the_video_phase_resubmits_only_the_missing_tail(self):
+        source = inspect.getsource(pipeline._run_video_generation)
+
+        self.assertIn("_completed_clip_video_prefix(", source)
+        self.assertIn("_merge_resumed_clip_outputs(", source)
+        # A seamless run is one rolling window with no per-clip boundary.
+        self.assertIn("if not seamless:", source)
+
+    def test_finished_clips_are_saved_while_the_job_still_runs(self):
+        """A power loss must not throw away clips that already rendered."""
+
+        source = inspect.getsource(pipeline._submit_and_wait)
+
+        self.assertIn("_persist_finished_clips(_dir_pid, j)", source)
+
+    def test_a_resumed_tail_is_recorded_under_the_slots_it_belongs_to(self):
+        """The tail batch numbers its clips from zero; the film does not."""
+
+        pid = "pipe-offset"
+        record = self._add_pipeline(pid, status="running")
+        record["clip_plans"] = [{}] * 5
+        record["_clip_video_files"] = [
+            "done0.mp4", "done1.mp4", None, None, None,
+        ]
+        job = {
+            "params": {"_director_clip_offset": 2},
+            "output_files": ["tail0.mp4"],
+            "clip_output_files": {0: "tail0.mp4"},
+        }
+
+        pipeline._persist_finished_clips(pid, job)
+
+        self.assertEqual(
+            record["_clip_video_files"],
+            ["done0.mp4", "done1.mp4", "tail0.mp4", None, None],
+        )
+
+    def test_a_recorded_clip_never_overwrites_one_already_finished(self):
+        pid = "pipe-noclobber"
+        record = self._add_pipeline(pid, status="running")
+        record["clip_plans"] = [{}] * 2
+        record["_clip_video_files"] = ["keep.mp4", None]
+        job = {
+            "params": {},
+            "output_files": ["other.mp4"],
+            "clip_output_files": {0: "other.mp4"},
+        }
+
+        pipeline._persist_finished_clips(pid, job)
+
+        self.assertEqual(record["_clip_video_files"], ["keep.mp4", None])
+
+    def test_a_resumed_tail_reports_film_clip_numbers(self):
+        """The restarted shot must not be presented as "clip 1"."""
+
+        pid = "pipe-numbering"
+        record = self._add_pipeline(pid, status="running")
+        record["progress"] = {"current": 0, "total": 150}
+        self.assertEqual(
+            pipeline._job_clip_positioning({
+                "params": {
+                    "_director_clip_offset": 26,
+                    "_director_clip_total": 150,
+                },
+            }),
+            (26, 150),
+        )
+        self.assertEqual(
+            pipeline._job_clip_positioning({"params": {}}), (0, 0),
+        )
+
+    def test_a_resumed_batch_does_not_publish_a_partial_join(self):
+        """wgp concatenates a finished group into a _multiclip file."""
+
+        source = inspect.getsource(pipeline._run_video_generation)
+
+        self.assertIn('gen_params["multi_clip_defer_concat"] = True', source)
+        with open(
+            os.path.join(_APP_DIR, "launch.py"), "r", encoding="utf-8",
+        ) as handle:
+            launch_source = handle.read()
+        self.assertIn(
+            'raw_params.pop("multi_clip_defer_concat", False)', launch_source,
+        )
+        self.assertIn('"defer_concat": multi_clip_defer_concat', launch_source)
+
+    def test_a_resumed_run_is_compiled_once_every_shot_exists(self):
+        """Deferring the tail join must not leave the film un-compiled."""
+
+        merged = pipeline._merge_resumed_clip_outputs(
+            pipeline._DirectorOutputs(["tail0.mp4"], {0: "tail0.mp4"}),
+            ["done0.mp4"],
+            1,
+        )
+        self.assertEqual(merged.resumed_from, 1)
+
+        ordinary = pipeline._DirectorOutputs(["a.mp4"], {0: "a.mp4"})
+        self.assertEqual(ordinary.resumed_from, 0)
+
+        source = inspect.getsource(pipeline._run_pipeline)
+        self.assertIn("getattr(output_files, \"resumed_from\", 0)", source)
+        self.assertIn("rejoin_clips(pipeline_out_dir, pid)", source)
+
+    def test_a_regenerated_clip_replaces_its_own_entry(self):
+        """A rerun must not move the clip to the start or the end of the film."""
+
+        state = {
+            "output_files": ["a.mp4", "b.mp4", "c.mp4"],
+            "clips": [{"video_filename": name} for name in ("a.mp4", "b.mp4", "c.mp4")],
+        }
+
+        pipeline._record_regenerated_clip(state, 1, "b.mp4", "new.mp4")
+
+        self.assertEqual(state["output_files"], ["a.mp4", "new.mp4", "c.mp4"])
+        self.assertEqual(
+            state["_clip_video_files"], [None, "new.mp4", None],
+        )
+
+    def test_a_regenerated_clip_takes_its_own_position_when_it_had_no_name(self):
+        state = {
+            "output_files": ["a.mp4", "b.mp4"],
+            "clips": [{"video_filename": None}, {"video_filename": "b.mp4"}],
+        }
+
+        pipeline._record_regenerated_clip(state, 0, None, "first.mp4")
+
+        self.assertEqual(state["output_files"], ["first.mp4", "b.mp4"])
+        self.assertEqual(state["_clip_video_files"], ["first.mp4", None])
+
+    def test_a_regenerated_clip_past_the_end_of_the_list_is_appended(self):
+        state = {"output_files": ["a.mp4"], "clips": [{}, {}]}
+
+        pipeline._record_regenerated_clip(state, 1, None, "later.mp4")
+
+        self.assertEqual(state["output_files"], ["a.mp4", "later.mp4"])
+        self.assertEqual(state["_clip_video_files"], [None, "later.mp4"])
+
+    def test_the_slot_list_stays_aligned_with_the_clip_count(self):
+        state = {
+            "output_files": [],
+            "clips": [{}, {}, {}, {}],
+        }
+
+        pipeline._record_regenerated_clip(state, 0, None, "only.mp4")
+
+        self.assertEqual(
+            state["_clip_video_files"], ["only.mp4", None, None, None],
+        )
+
+    def test_a_single_clip_rerun_does_not_write_the_progress_mirror(self):
+        """The mirror files a batch by index, which a one-clip rerun lacks."""
+
+        source = inspect.getsource(pipeline._submit_and_wait)
+
+        self.assertIn("if not _detached_operation:", source)
+        self.assertIn("_persist_finished_clips(_dir_pid, j)", source)
 
     def test_concurrent_saves_leave_latest_live_snapshot_as_valid_json(self):
         pid = "pipe-writers"

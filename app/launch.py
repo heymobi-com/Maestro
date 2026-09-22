@@ -9989,6 +9989,43 @@ async def save_pipeline_clip_prompt(pid: str, clip_index: int, request: Request)
     return {"status": "ok"}
 
 
+@api.post("/api/v1/director/pipelines/{pid}/clips/{clip_index}/revise-prompt")
+async def revise_pipeline_clip_prompt(pid: str, clip_index: int, request: Request):
+    """Rewrite one shot's prompt from a director's correction note.
+
+    The director says what is wrong in plain language; the LLM returns the
+    corrected prompt, which the UI shows for review before it is saved. The
+    note is deliberately combined with the adjacent shots' prompts so the
+    rewrite stays continuous with the rest of the sequence.
+    """
+    from services.director_pipeline import revise_clip_prompt
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Request body must be valid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "Request body must be a JSON object"}, status_code=400)
+    instruction = body.get("instruction")
+    if not isinstance(instruction, str):
+        return JSONResponse({"error": "instruction must be text"}, status_code=400)
+    current = body.get("prompt")
+    if current is not None and not isinstance(current, str):
+        return JSONResponse({"error": "prompt must be text"}, status_code=400)
+    base = wgp.server_config.get("save_path", "outputs")
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: revise_clip_prompt(
+                base, pid, clip_index, instruction, current or "",
+            ),
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:  # LLM/backend failure: report it, never a silent no-op
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return result
+
+
 # ── Director Pipeline Re-run ──────────────────────────────────────────────
 
 @api.post("/api/v1/director/pipelines/{pid}/repair")
@@ -10165,6 +10202,24 @@ async def director_v2_plan(request: Request):
     }
     skill_type = skill_map.get(skill_type, skill_type)
 
+    # A long timeline is planned in batches that can take ten minutes, and the
+    # planner already publishes real batch counters through this pair of
+    # callbacks. The pipeline has always passed them; this endpoint did not, so
+    # the same pass was a silent request with no progress and no way to stop it
+    # short of restarting the backend, which threw the plan away.
+    from services.director import plan_operation
+    operation = plan_operation.begin(
+        "plan",
+        label=skill_type,
+        total=len(body.get("clips") or []),
+    )
+
+    def _publish_plan_progress(event: dict) -> None:
+        plan_operation.publish(operation, event)
+
+    def _plan_was_cancelled() -> bool:
+        return plan_operation.is_cancelled(operation)
+
     try:
         from services.director_pipeline import prepare_director_timeline
         if body.get("clips"):
@@ -10198,6 +10253,12 @@ async def director_v2_plan(request: Request):
         provider = services.get("llm_provider", "local")
         planner_kwargs["nsfw"] = services.get("nsfw_mode", False) and provider not in _PUBLIC_LLM_PROVIDERS
 
+        # The planner checks the cancellation callback at every batch boundary
+        # and whenever it publishes progress, so these two are what turn a Stop
+        # click into an actual interruption.
+        planner_kwargs["_planning_progress_callback"] = _publish_plan_progress
+        planner_kwargs["_planning_cancelled_callback"] = _plan_was_cancelled
+
         # Prompt polish mode: off | full_guide | light_guide | third_pass.
         # The default third pass is model-aware — see /api/v1/services GET
         # for the current routing behavior.
@@ -10229,6 +10290,16 @@ async def director_v2_plan(request: Request):
         rendered = director.render_plan(plan, prompt_type=prompt_type, has_reference=has_reference)
         clip_plans = director.plan_to_clip_plans(rendered)
 
+        # Planning is done; the polish pass is announced so the progress card
+        # names the phase the user is actually waiting on.
+        if clip_plans:
+            plan_operation.publish(operation, {
+                "message": "Polishing the planned prompts...",
+                "current": len(clip_plans),
+                "total": len(clip_plans),
+                "stage": "polish",
+            })
+
         # Third-pass polish: run each prompt through the enhance pipeline
         if polish_mode == "third_pass" and clip_plans:
             from services.director.prompt_polish import polish_prompts_third_pass
@@ -10245,6 +10316,12 @@ async def director_v2_plan(request: Request):
                 )
             )
 
+        # A Stop pressed during the polish pass would otherwise be ignored: the
+        # polish step has no cancellation hook of its own, so honour it here
+        # rather than handing back a plan the user just cancelled.
+        if plan_operation.is_cancelled(operation):
+            raise InterruptedError("Director planning cancelled")
+
         return {
             "clip_plans": clip_plans,
             "planned_clips": body.get("clips", []),
@@ -10252,10 +10329,58 @@ async def director_v2_plan(request: Request):
             "skill_type": skill_type,
         }
 
+    except InterruptedError:
+        # Stopping is a state, not a failure: the pipeline reports its own Stop
+        # as a cancelled status rather than an error, and the UI reads this
+        # answer the same way.
+        return {
+            "cancelled": True,
+            "clip_plans": [],
+            "planned_clips": [],
+            "production_plan": None,
+            "skill_type": skill_type,
+        }
+
     except Exception as e:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        # The card disappears the moment the pass stops, whether it finished,
+        # failed or was cancelled.
+        plan_operation.finish(operation)
+
+
+@api.get("/api/v1/director/plan-operation")
+def director_plan_operation_status():
+    """Report the interactive planning pass the main screen should display."""
+    from services.director import plan_operation
+    return plan_operation.active() or {}
+
+
+@api.post("/api/v1/director/plan-operation/cancel")
+async def director_plan_operation_cancel(request: Request):
+    """Stop the interactive planning pass after the batch being planned.
+
+    Planning runs in an executor thread, so this answer is served while the pass
+    is still running — which is what makes a Stop button reachable at all.
+    """
+    from services.director import plan_operation
+    body: dict = {}
+    if request.headers.get("content-length", "0") != "0":
+        try:
+            parsed = await request.json()
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            body = parsed
+    operation_id = str(body.get("operation_id") or "")
+    if not plan_operation.request_cancel(operation_id):
+        raise HTTPException(
+            status_code=404, detail="No Director planning pass is running",
+        )
+    return {"status": "cancelling", "operation_id": operation_id}
 
 
 def _generation_request_uses_serial_auto_planner(body: dict) -> bool:
@@ -25308,6 +25433,13 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     "multi_clip_concat_audio", None,
                 )
                 multi_clip_audio_start_sec = raw_params.pop("multi_clip_audio_start_sec", 0.0)
+                # A Director resume submits only the clips that never rendered.
+                # Concatenating that tail would publish a partial film under a
+                # _multiclip name, so the batch defers the join and the finished
+                # clips are rejoined once every shot exists.
+                multi_clip_defer_concat = bool(
+                    raw_params.pop("multi_clip_defer_concat", False)
+                )
                 omni_sequence_continuity = bool(
                     raw_params.pop("_omni_sequence_continuity", False)
                 )
@@ -25485,6 +25617,7 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                         "concat_audio_path": multi_clip_concat_audio,
                         "omni_sequence_continuity": omni_sequence_continuity,
                         "target_total_frames": omni_sequence_target_frames,
+                        "defer_concat": multi_clip_defer_concat,
                     }
                     # Director supplies the prompt mode explicitly so normal
                     # paragraph breaks cannot be mistaken for window prompts.
@@ -25562,6 +25695,9 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                         "cumulative_offset": True,
                         "audio_start_sec": multi_clip_audio_start_sec,
                         "concat_audio_path": multi_clip_concat_audio,
+                        # The tail task is last in the group, so it is the one
+                        # that would trigger the join.
+                        "defer_concat": multi_clip_defer_concat,
                     }
                     tail_params["multi_prompts_gen_type"] = 0
 
@@ -25850,8 +25986,27 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 dpid = job["params"].get("_director_pipeline_id")
                 if dpid:
                     sidecar["director_pipeline_id"] = dpid
+                # A single-clip rerun publishes one output and no
+                # clip_output_files map, so it states its own position.
+                detached_clip_index = job["params"].get("_director_clip_index")
+                # The clip this rerun replaces. The gallery stacks the new take
+                # directly above it so the two can be compared, and the older
+                # one can be deleted once the new take is accepted.
+                supersedes = job["params"].get("_director_supersedes")
+                # A resumed Director run submits only the shots that were still
+                # missing, so the batch numbers them from zero again. The film
+                # position is the batch index plus this offset; without it every
+                # shot of a resumed run was filed 26 places early, which put its
+                # sidecar in the wrong slot and made a later "regenerate this
+                # clip" rewrite a different shot.
+                try:
+                    clip_index_offset = int(
+                        job["params"].get("_director_clip_offset") or 0
+                    )
+                except (TypeError, ValueError):
+                    clip_index_offset = 0
                 clip_index_by_filename = {
-                    filename: index
+                    filename: index + clip_index_offset
                     for index, filename in clip_output_files.items()
                 }
                 for fname in file_names:
@@ -25873,8 +26028,14 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                         file_sidecar["director_clip_index"] = (
                             clip_index_by_filename[fname]
                         )
+                    elif isinstance(detached_clip_index, int):
+                        file_sidecar["director_clip_index"] = detached_clip_index
                     else:
                         file_sidecar.pop("director_clip_index", None)
+                    if supersedes and fname != supersedes:
+                        file_sidecar["director_supersedes"] = supersedes
+                    else:
+                        file_sidecar.pop("director_supersedes", None)
                     file_sidecar["output_filename"] = fname
                     meta_path = os.path.join(
                         out_dir, os.path.splitext(fname)[0] + ".meta.json",
@@ -28797,8 +28958,42 @@ async def move_output(name: str, request: Request, workspace: str = ""):
     return {"moved": name, "to": target_ws}
 
 
+def _director_slot_using(out_dir: str, name: str):
+    """The Director shot that currently uses ``name``, if any.
+
+    Returns ``(pipeline_id, clip_index, kind)``. Deleting the take a slot is
+    using leaves a stale filename behind, and the rejoin then refuses that shot
+    with "Regenerate missing or invalid video clip(s) N before rejoining" --
+    which reads as "re-render it" for what was only a deleted file. Warning here
+    is cheaper than discovering it at rejoin time.
+    """
+    try:
+        entries = os.listdir(out_dir)
+    except OSError:
+        return None
+    for entry in entries:
+        if not (entry.startswith("_director_pipeline_") and entry.endswith(".json")):
+            continue
+        try:
+            with open(os.path.join(out_dir, entry), encoding="utf-8") as handle:
+                state = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(state, dict):
+            continue
+        pid = str(state.get("pipeline_id") or entry)
+        for index, clip in enumerate(state.get("clips") or []):
+            if not isinstance(clip, dict):
+                continue
+            if clip.get("video_filename") == name:
+                return pid, index, "clip"
+            if clip.get("start_image_filename") == name:
+                return pid, index, "start image"
+    return None
+
+
 @api.delete("/api/v1/outputs/{name}")
-def delete_output(name: str, workspace: str = ""):
+def delete_output(name: str, workspace: str = "", force: bool = False):
     """Delete an output file and its sidecar metadata.
 
     Uses safe_delete() which handles Windows file-lock edge cases:
@@ -28819,6 +29014,22 @@ def delete_output(name: str, workspace: str = ""):
         raise HTTPException(status_code=400, detail="Invalid filename")
     if not os.path.isfile(filepath):
         return {"deleted": name}
+
+    # Warn before removing the take a Director shot is using. The caller can
+    # still go through with force=true; the rejoin re-points the shot at a
+    # surviving take of the same shot when it can.
+    in_use = _director_slot_using(out_dir, name)
+    if in_use and not force:
+        pid, index, kind = in_use
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"This file is the {kind} that Director project {pid} is using "
+                f"for shot {index + 1}. If you delete it, the rejoin will use an "
+                "earlier take of that shot when one exists, and will otherwise "
+                "ask you to regenerate that shot. Delete it anyway?"
+            ),
+        )
 
     # Hint the GC to drop any lingering references (e.g. PIL image
     # objects from a recent metadata read) BEFORE we try to delete.

@@ -13,6 +13,7 @@ export function VideoInfoBar() {
   const metadataLoading = useStore(s => s.metadataLoading)
   const loadSettingsFromOutput = useStore(s => s.loadSettingsFromOutput)
   const rerollGeneration = useStore(s => s.rerollGeneration)
+  const rerunClipVideo = useStore(s => s.rerunClipVideo)
   const deleteSelectedOutput = useStore(s => s.deleteSelectedOutput)
   const rejoinClipGroup = useStore(s => s.rejoinClipGroup)
   const quickUpscaleClip = useStore(s => s.quickUpscaleClip)
@@ -25,6 +26,8 @@ export function VideoInfoBar() {
   const timeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined)
   const [copied, setCopied] = useState(false)
   const [rejoining, setRejoining] = useState(false)
+  const [rerolling, setRerolling] = useState(false)
+  const [rerollError, setRerollError] = useState<string | null>(null)
   const [upscaling, setUpscaling] = useState(false)
 
   const selected = outputs[selectedOutput]
@@ -93,6 +96,28 @@ export function VideoInfoBar() {
       await rejoinClipGroup(groupId)
     } finally {
       setRejoining(false)
+    }
+  }
+
+  // A Director clip regenerates through its pipeline's per-clip rerun, which
+  // replaces it in its own position. Falling back to the Studio reroll for one
+  // loaded the Director project and then started a Studio generation with
+  // unrelated params, so the button appeared to do nothing.
+  const handleReroll = async () => {
+    setRerollError(null)
+    setRerolling(true)
+    try {
+      const directorPid = meta?.director_pipeline_id
+      const directorClipIndex = meta?.director_clip_index
+      if (directorPid && typeof directorClipIndex === 'number') {
+        await rerunClipVideo(directorPid, directorClipIndex)
+      } else {
+        await rerollGeneration()
+      }
+    } catch (e) {
+      setRerollError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setRerolling(false)
     }
   }
 
@@ -174,11 +199,14 @@ export function VideoInfoBar() {
               <Pencil size={14} />
             </button>
             <button
-              onClick={rerollGeneration}
-              className="p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors"
-              title="Re-generate with same settings"
+              onClick={handleReroll}
+              disabled={rerolling}
+              className="p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors disabled:opacity-50"
+              title={rerollError || 'Re-generate with same settings'}
             >
-              <RefreshCw size={14} />
+              {rerolling
+                ? <Loader2 size={14} className="animate-spin text-accent-blue" />
+                : <RefreshCw size={14} className={rerollError ? 'text-chip-red' : undefined} />}
             </button>
             {groupId && (
               <button

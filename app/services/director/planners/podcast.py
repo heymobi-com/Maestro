@@ -167,6 +167,40 @@ class PodcastPlanner(BasePlanner):
         """Plan shots from pre-segmented clips (similar to audio-driven short film)."""
         speaker_names = {sid: info.get("name", sid) for sid, info in (speaker_mappings or {}).items()}
 
+        # The transcript carries raw pyannote ids (SPEAKER_00) while the user's
+        # mapping is keyed by stable labels ((S1)). Looking the raw id up in the
+        # mapping always missed, so the model only ever saw opaque tokens and
+        # invented its own speaker numbering. Resolve them up front and inject
+        # the closed cast vocabulary.
+        from ..speaker_binding import (
+            SPEAKER_LABEL_RULES,
+            cast_vocabulary,
+            format_speaker,
+            speaker_cast_block,
+            speaker_label_order,
+        )
+        from ..voice_gender import declared_gender_for_labels
+
+        raw_to_label = speaker_label_order(transcript)
+        vocabulary = cast_vocabulary(speaker_mappings, transcript)
+        cast_genders = declared_gender_for_labels(
+            "",
+            [{"speakerId": label, "name": name} for label, name in vocabulary.items()],
+            sorted(vocabulary),
+        )
+        cast_block = speaker_cast_block(vocabulary, cast_genders)
+        cast_section = (
+            "CANONICAL SPEAKER CAST — the complete and closed set of speakers "
+            f"for this project:\n{cast_block}\n\n{SPEAKER_LABEL_RULES}\n\n"
+            if cast_block else ""
+        )
+
+        def speaker_display(raw_speaker) -> str:
+            label = raw_to_label.get(str(raw_speaker or "").strip().upper(), "")
+            if label:
+                return format_speaker(label, vocabulary.get(label))
+            return str(speaker_names.get(raw_speaker) or raw_speaker or "")
+
         clip_contexts = []
         for i, clip in enumerate(clips):
             start_sec = clip.get("start", 0)
@@ -182,14 +216,14 @@ class PodcastPlanner(BasePlanner):
                         spk = l.get("speaker", "")
                         text = l.get("text", "")
                         if text.strip():
-                            spk_name = speaker_names.get(spk, spk)
+                            spk_name = speaker_display(spk)
                             dialogue_lines.append(f'{spk_name}: "{text}"' if spk_name else f'"{text}"')
                             if spk:
                                 speakers_here.add(spk)
 
             char_info = ""
             if speakers_here:
-                on_screen = [speaker_names.get(s, s) for s in speakers_here]
+                on_screen = [speaker_display(s) for s in speakers_here]
                 char_info = f" Speakers: {', '.join(on_screen)}."
 
             dial_text = f" Dialogue: {' / '.join(dialogue_lines[:3])}" if dialogue_lines else " (no dialogue)"
@@ -220,19 +254,19 @@ PODCAST PLANNING RULES:
 - Keep visual complexity LOW during crucial discussion points.
 - Speaker changes are natural visual transitions.
 
-OUTPUT FORMAT — respond with ONLY a JSON array:
+{cast_section}OUTPUT FORMAT — respond with ONLY a JSON array:
 [
   {{
     "scene_goal": "Active speaker segment",
     "scene_type": "speaker|reaction|b_roll|transition",
-    "subjects_on_screen": [{{"visual_description": "the host in the blue shirt"}}],
+    "subjects_on_screen": [{{"visual_description": "<Subject 1> (S1), the host in the blue shirt"}}],
     "spatial_setup": "seated at desk, facing camera",
     "environment": "podcast studio",
     "visual_style": "{visual_style}",
     "lighting": "soft studio lighting",
     "mood": "conversational",
     "action_beats": ["host gestures while speaking"],
-    "dialogue_beats": [{{"speaker_id": "host_0", "spoken_text": "key line", "delivery": "animated"}}],
+    "dialogue_beats": [{{"speaker_id": "(S1)", "spoken_text": "key line", "delivery": "animated"}}],
     "camera_plan": {{"framing": "medium shot", "movement": "static", "movement_intensity": "static"}},
     "audio_plan": {{"mode": "dialogue_driven", "lip_sync_critical": true}},
     "ending_beat": "host nods thoughtfully"

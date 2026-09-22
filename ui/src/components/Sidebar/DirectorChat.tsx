@@ -270,6 +270,12 @@ function LlmThinkingStream({ stage }: { stage: string }) {
   // bottom as new tokens arrive so the user always sees the latest
   // generation, just like a terminal tail.
   const streamScrollRef = useRef<HTMLDivElement>(null)
+  // The tail follows the stream only while the reader is already at its
+  // bottom. The box used to jump on every token, so nothing inside it could be
+  // read or copied while the LLM streamed. Scrolling up detaches the follow; a
+  // fresh stream re-attaches it.
+  const streamFollowRef = useRef(true)
+  const previousStreamRef = useRef('')
 
   // Poll the stream-status endpoint continuously for the lifetime of
   // the component. Two failure modes have to be handled:
@@ -339,12 +345,19 @@ function LlmThinkingStream({ stage }: { stage: string }) {
     return () => { active = false }
   }, [stage, appendLlmLog])
 
-  // Auto-scroll the inner preview box to its bottom whenever new
-  // tokens arrive. Uses scrollTop (NOT scrollIntoView) so we don't
-  // also drag the outer chat panel — this is a self-contained tail.
+  // Tail the inner preview box, but only while the reader is at its bottom.
+  // Uses scrollTop (NOT scrollIntoView) so we don't also drag the outer chat
+  // panel — this is a self-contained tail.
   useEffect(() => {
     const el = streamScrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
+    if (!el) return
+    // Text that no longer extends the previous chunk belongs to a new stream,
+    // which renders from the top and should be followed again.
+    if (!streamText.startsWith(previousStreamRef.current)) {
+      streamFollowRef.current = true
+    }
+    previousStreamRef.current = streamText
+    if (streamFollowRef.current) el.scrollTop = el.scrollHeight
   }, [streamText])
 
   // Separate thinking from output
@@ -373,6 +386,12 @@ function LlmThinkingStream({ stage }: { stage: string }) {
         // streamScrollRef effect above).
         <div
           ref={streamScrollRef}
+          onScroll={() => {
+            const el = streamScrollRef.current
+            if (!el) return
+            streamFollowRef.current =
+              el.scrollHeight - el.scrollTop - el.clientHeight <= 24
+          }}
           className="mt-1 rounded bg-bg-primary/50 border border-border/30 p-2 max-h-32 overflow-y-auto"
         >
           {thinking && (
@@ -511,10 +530,7 @@ export function DirectorChat() {
   const directorGenerate = useStore(s => s.directorGenerate)
   const editClipPlan = useStore(s => s.directorEditClipPlan)
   const reset = useStore(s => s.directorReset)
-  const speakers = useStore(s => s.directorSpeakers)
   const speakerMappings = useStore(s => s.directorSpeakerMappings)
-  const setSpeakerMapping = useStore(s => s.directorSetSpeakerMapping)
-  const insertSpeakerMention = useStore(s => s.directorInsertSpeakerMention)
   const autoMode = useStore(s => s.directorAutoMode)
   const skill = useStore(s => s.directorSkill)
   const setSkill = useStore(s => s.setDirectorSkill)
@@ -588,21 +604,6 @@ export function DirectorChat() {
     [referenceImage]
   )
 
-  const speakerSamples = useMemo(() => {
-    const samples: Record<string, string[]> = {}
-    if (analysis?.lyrics) {
-      for (const seg of analysis.lyrics) {
-        if (seg.speaker && !samples[seg.speaker]) {
-          samples[seg.speaker] = []
-        }
-        if (seg.speaker && samples[seg.speaker].length < 2) {
-          samples[seg.speaker].push(seg.text)
-        }
-      }
-    }
-    return samples
-  }, [analysis?.lyrics])
-
   const currentIndex = STEP_ORDER.indexOf(step)
   const pastStep = (s: DirectorStep) => currentIndex > STEP_ORDER.indexOf(s)
   const atStep = (s: DirectorStep) => step === s
@@ -653,14 +654,29 @@ export function DirectorChat() {
       .join(', ')
   }, [plannedClips])
 
-  // Auto-scroll to bottom on step/loading changes. loadingMessage and error
-  // are included so progress-text updates (e.g. "Generating music track…",
-  // analyze phases) and new errors pull the view down to the newest content.
+  // Auto-scroll follows the newest content only while the reader is already at
+  // the bottom. Automatic clip generation rewrites loadingMessage for every
+  // clip, and the old unconditional scrollTo yanked the view to the end each
+  // time, so the prompt history could not be read or copied while it rendered.
+  // Scrolling up detaches the follow; returning to the bottom re-attaches it.
+  const followBottomRef = useRef(true)
+
+  const handleMessagesScroll = useCallback(() => {
+    const el = messagesRef.current
+    if (!el) return
+    followBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight <= 48
+  }, [])
+
   useEffect(() => {
     // Keep progress scrolling inside Director. scrollIntoView also scrolls
     // ancestor surfaces, which can move the drawer or the gallery behind it.
     const messages = messagesRef.current
-    messages?.scrollTo({ top: messages.scrollHeight, left: 0, behavior: 'smooth' })
+    if (!messages || !followBottomRef.current) return
+    // 'auto', not 'smooth': the next progress update interrupts the animation,
+    // and an animation's intermediate scrollTop reads as "the reader scrolled
+    // away", which would switch the follow off by itself.
+    messages.scrollTo({ top: messages.scrollHeight, left: 0, behavior: 'auto' })
   }, [step, loading, loadingMessage, error, clipPlans.length, clipImages.length, skill])
 
   const handleChatSubmit = () => {
@@ -740,7 +756,7 @@ export function DirectorChat() {
       ? 'Describe the story... e.g., Two detectives argue over evidence in a dark office.'
       : isShortFilm
         ? 'Describe the story setting and mood... e.g., A tense interrogation in a dimly lit room.'
-        : speakers.length >= 2
+        : speakerMappings.length >= 2
           ? 'Describe the scene... e.g., Rap music video in a gym. Neon lights and grunge aesthetic.'
           : 'Describe the scene and characters...'
     : step === 'structure'
@@ -750,7 +766,7 @@ export function DirectorChat() {
   return (
     <div data-testid="director-chat" className="director-chat flex-1 flex flex-col min-h-0 min-w-0 [overflow-wrap:anywhere]">
       {/* Message list */}
-      <div ref={messagesRef} data-testid="director-messages" className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-4 space-y-3">
+      <div ref={messagesRef} onScroll={handleMessagesScroll} data-testid="director-messages" className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-4 space-y-3">
         {/* Header with Start Over */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-1.5">
@@ -1022,6 +1038,17 @@ export function DirectorChat() {
         {/* Structure step — hidden for story path */}
         {!isStoryPath && (atStep('structure') || pastStep('structure')) && (
           <>
+            {isShortFilm && shortFilmPath === 'audio' && (audioFile || analysis) && (
+              <SystemBubble>
+                <p className="text-xs text-text-secondary">
+                  {speakerMappings.length > 0
+                    ? `${speakerMappings.length} voice${speakerMappings.length > 1 ? 's' : ''} detected. The speaker-labelled transcript is under the transcription summary above.`
+                    : analysis?.lyrics?.length
+                    ? 'The transcript carries no speaker labels, so the voices could not be mapped.'
+                    : 'No transcription was produced for this audio, so no voices could be detected. The backend log says why (a missing transcription dependency is the usual cause).'}
+                </p>
+              </SystemBubble>
+            )}
             <SystemBubble>
               <StructureView
                 plannedClips={plannedClips}
@@ -1102,11 +1129,6 @@ export function DirectorChat() {
             )}
             <SystemBubble>
               <StyleForm
-                speakers={speakers}
-                speakerMappings={speakerMappings}
-                speakerSamples={speakerSamples}
-                setSpeakerMapping={setSpeakerMapping}
-                insertSpeakerMention={insertSpeakerMention}
                 isActive={atStep('style')}
                 isShortFilm={isShortFilm}
                 isStoryPath={isStoryPath}
@@ -1984,6 +2006,22 @@ function AdditionalRefsSection() {
   )
 }
 
+/** Map raw diarization ids to the stable (S1), (S2) labels.
+
+ * Uses first-seen order in the timeline, exactly like the backend, so the two
+ * transcript views in the UI can never disagree about who is who.
+ */
+function buildSpeakerLabelOrder(
+  lyrics: Array<{ speaker?: string | null }> | null | undefined,
+): Map<string, string> {
+  const order = new Map<string, string>()
+  for (const segment of lyrics || []) {
+    const raw = (segment?.speaker ?? '').toString().trim().toUpperCase()
+    if (raw && !order.has(raw)) order.set(raw, `(S${order.size + 1})`)
+  }
+  return order
+}
+
 function AnalysisSummary({
   analysis, showDetails, setShowDetails, isShortFilm,
 }: {
@@ -1997,6 +2035,7 @@ function AnalysisSummary({
   const speakerCount = new Set(
     (analysis.lyrics || []).map(l => l.speaker).filter(Boolean)
   ).size
+  const speakerLabels = buildSpeakerLabelOrder(analysis.lyrics)
 
   return (
     <div className="space-y-1">
@@ -2062,7 +2101,9 @@ function AnalysisSummary({
                             </span>
                             <span className="text-text-secondary">
                               {seg.speaker && (
-                                <span className="text-accent-blue text-[9px] mr-1">[{seg.speaker}]</span>
+                                <span className="text-accent-blue text-[9px] mr-1">
+                                  [{speakerLabels.get(String(seg.speaker).toUpperCase()) ?? seg.speaker}]
+                                </span>
                               )}
                               {seg.text}
                             </span>
@@ -2082,7 +2123,9 @@ function AnalysisSummary({
                       </span>
                       <span className="text-text-secondary">
                         {seg.speaker && (
-                          <span className="text-accent-blue text-[9px] mr-1">[{seg.speaker}]</span>
+                          <span className="text-accent-blue text-[9px] mr-1">
+                            [{speakerLabels.get(String(seg.speaker).toUpperCase()) ?? seg.speaker}]
+                          </span>
                         )}
                         {seg.text}
                       </span>
@@ -2888,13 +2931,8 @@ function DirectorGenerationOptions() {
 }
 
 function StyleForm({
-  speakers, speakerMappings, speakerSamples, setSpeakerMapping, insertSpeakerMention, isActive, isShortFilm, isStoryPath,
+  isActive, isShortFilm, isStoryPath,
 }: {
-  speakers: string[]
-  speakerMappings: ReturnType<typeof useStore.getState>['directorSpeakerMappings']
-  speakerSamples: Record<string, string[]>
-  setSpeakerMapping: (speakerId: string, name: string, role: 'rapping' | 'singing' | 'speaking' | '') => void
-  insertSpeakerMention: (speakerId: string) => void
   isActive: boolean
   isShortFilm?: boolean
   isStoryPath?: boolean
@@ -2920,55 +2958,6 @@ function StyleForm({
             ? 'Describe the story setting, mood, and visual style for your short film.'
             : 'Describe the scene, characters, and visual style.'}
       </p>
-
-      {/* Speaker Mapping — hidden for story path (no audio = no detected speakers) */}
-      {!isStoryPath && speakers.length >= 1 && (
-        <div>
-          <label className="text-[11px] text-text-muted uppercase tracking-wider block mb-1">Speakers Detected</label>
-          <div className="space-y-2">
-            {speakerMappings.map((mapping) => (
-              <div key={mapping.speakerId} className="bg-bg-tertiary rounded-lg p-2 space-y-1">
-                <div className="flex items-center gap-1.5">
-                  <button
-                    onClick={() => insertSpeakerMention(mapping.speakerId)}
-                    className="text-[10px] px-1.5 py-0.5 rounded-full bg-accent-blue/20 text-accent-blue hover:bg-accent-blue/30 shrink-0 transition-colors"
-                    title={`Insert @${mapping.speakerId} into description`}
-                  >
-                    {mapping.speakerId}
-                  </button>
-                  <input
-                    type="text"
-                    value={mapping.name}
-                    onChange={e => setSpeakerMapping(mapping.speakerId, e.target.value, mapping.role)}
-                    placeholder="e.g. man in green hoodie"
-                    className="min-w-0 flex-1 bg-bg-secondary border border-border rounded px-2 py-1 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-blue transition-colors"
-                  />
-                  <select
-                    value={mapping.role}
-                    onChange={e => setSpeakerMapping(mapping.speakerId, mapping.name, e.target.value as typeof mapping.role)}
-                    className="bg-bg-secondary border border-border rounded px-1.5 py-1 text-[10px] text-text-secondary focus:outline-none focus:border-accent-blue transition-colors"
-                  >
-                    <option value="">role</option>
-                    {!isShortFilm && <option value="rapping">rapping</option>}
-                    {!isShortFilm && <option value="singing">singing</option>}
-                    <option value="speaking">speaking</option>
-                  </select>
-                </div>
-                {speakerSamples[mapping.speakerId] && (
-                  <div className="text-[9px] text-text-muted pl-1 italic">
-                    {speakerSamples[mapping.speakerId].map((line, li) => (
-                      <div key={li} className="truncate">&ldquo;{line}&rdquo;</div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-          <span className="text-[10px] text-text-muted mt-1 block">
-            Name each speaker so the director knows who to show. Click a chip to insert into description.
-          </span>
-        </div>
-      )}
 
       <p className="text-[11px] text-text-muted">
         {isStoryPath
@@ -3028,7 +3017,7 @@ function ImagePromptsReview({
                     {!isShortFilm && <EnergyDot energy={clip.energy} />}
                     {clip.dominant_speaker && (
                       <span className="text-accent-blue">
-                        {speakerMappings.find(m => m.speakerId === clip.dominant_speaker)?.name || clip.dominant_speaker}
+                        {speakerMappings.find(m => m.speakerId === clip.dominant_speaker)?.name || (clip.dominant_speaker.startsWith('SPEAKER') ? `(${clip.dominant_speaker.replace(/^SPEAKER_?0*/i, 'S').replace(/^(S\d+)$/i, '$1')})` : clip.dominant_speaker)}
                       </span>
                     )}
                   </>
@@ -3268,7 +3257,7 @@ function VideoPromptsReview({
                     <SectionBadge label={clip.section_label} />
                     {clip.dominant_speaker && (
                       <span className="text-accent-blue">
-                        {speakerMappings.find(m => m.speakerId === clip.dominant_speaker)?.name || clip.dominant_speaker}
+                        {speakerMappings.find(m => m.speakerId === clip.dominant_speaker)?.name || (clip.dominant_speaker.startsWith('SPEAKER') ? `(${clip.dominant_speaker.replace(/^SPEAKER_?0*/i, 'S').replace(/^(S\d+)$/i, '$1')})` : clip.dominant_speaker)}
                       </span>
                     )}
                   </>

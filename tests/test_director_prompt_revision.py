@@ -1,0 +1,197 @@
+"""Correcting one shot's prompt from a plain-language note, with the LLM.
+
+Hand-editing a compiled H3 prompt is impractical, and saying what is wrong is
+what a director actually knows. The note is combined with the adjacent shots so
+the rewrite stays continuous, and the result is returned for review rather than
+saved, because the rewrite is a suggestion.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_APP_DIR = os.path.abspath(os.path.join(_HERE, "..", "app"))
+if _APP_DIR not in sys.path:
+    sys.path.insert(0, _APP_DIR)
+
+from services import director_pipeline as pipeline  # noqa: E402
+
+_UI_DIR = os.path.abspath(os.path.join(_HERE, "..", "ui", "src"))
+
+
+def _read(*parts: str) -> str:
+    with open(os.path.join(_UI_DIR, *parts), encoding="utf-8") as handle:
+        return handle.read()
+
+
+class PromptRevisionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.out_dir = self.temp.name
+        self.pid = "revision01"
+
+    def _save(self, clips):
+        state = {
+            "pipeline_id": self.pid,
+            "status": "completed",
+            "video_model": "minimax_h3_ref2va_fused_turbo",
+            "clips": clips,
+            "_params_snapshot": {"scene_description": "PROJECT: a studio"},
+        }
+        with open(
+            os.path.join(self.out_dir, f"_director_pipeline_{self.pid}.json"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(state, handle)
+        return state
+
+    def _stub_llm(self, answer):
+        """Patch the model load and the completion, and return what was sent."""
+
+        captured = {}
+
+        def fake_enhance(**kwargs):
+            captured.update(kwargs)
+            return answer
+
+        loader = patch.object(pipeline, "_ensure_llm_loaded", lambda params: None)
+        completion = patch("services.llm_service.enhance_prompt", fake_enhance)
+        loader.start()
+        completion.start()
+        self.addCleanup(loader.stop)
+        self.addCleanup(completion.stop)
+        return captured
+
+    def test_a_note_is_required(self):
+        self._save([{"index": 0, "video_prompt": "a shot"}])
+
+        with self.assertRaises(ValueError) as caught:
+            pipeline.revise_clip_prompt(self.out_dir, self.pid, 0, "   ")
+
+        self.assertIn("Describe what should be corrected", str(caught.exception))
+
+    def test_an_out_of_range_shot_is_refused(self):
+        self._save([{"index": 0, "video_prompt": "a shot"}])
+
+        with self.assertRaises(ValueError):
+            pipeline.revise_clip_prompt(self.out_dir, self.pid, 7, "fix it")
+
+    def test_a_missing_pipeline_is_refused(self):
+        with self.assertRaises(ValueError):
+            pipeline.revise_clip_prompt(
+                self.out_dir, "nosuchrun", 0, "fix it",
+            )
+
+    def test_the_llm_is_loaded_before_it_is_called(self):
+        # It used to call enhance_prompt with nothing loaded, which failed with
+        # "LLM not loaded. Call load_model() first."
+        self._save([{"index": 0, "video_prompt": "a shot body"}])
+        calls = []
+        with patch.object(
+            pipeline, "_ensure_llm_loaded", lambda params: calls.append(params),
+        ):
+            with patch("services.llm_service.enhance_prompt", lambda **kw: "rewritten"):
+                pipeline.revise_clip_prompt(self.out_dir, self.pid, 0, "fix it")
+
+        self.assertEqual(len(calls), 1)
+
+    def test_the_note_and_neighbours_reach_the_model(self):
+        self._save([
+            {"index": 0, "video_prompt": "first shot body"},
+            {"index": 1, "video_prompt": "middle shot body"},
+            {"index": 2, "video_prompt": "last shot body"},
+        ])
+        captured = self._stub_llm("corrected shot body")
+
+        result = pipeline.revise_clip_prompt(
+            self.out_dir, self.pid, 1,
+            "the line belongs to the man, not the woman",
+        )
+
+        sent = captured["prompt"]
+        self.assertIn("the line belongs to the man", sent)
+        self.assertIn("middle shot body", sent)
+        # Continuity comes from both neighbours, not just the previous shot.
+        self.assertIn("previous shot 1: first shot body", sent)
+        self.assertIn("next shot 3: last shot body", sent)
+        self.assertEqual(result["video_prompt"], "corrected shot body")
+        self.assertEqual(result["clip_index"], 1)
+
+    def test_the_system_prompt_forbids_reassigning_dialogue(self):
+        system = pipeline._REVISE_PROMPT_SYSTEM
+
+        self.assertIn("<d>", system)
+        self.assertIn("Never re-assign a line", system)
+        self.assertIn("Change ONLY what the note asks for", system)
+        self.assertEqual(system, pipeline._REVISE_PROMPT_SYSTEM)
+
+    def test_the_revision_is_not_saved(self):
+        self._save([{"index": 0, "video_prompt": "original body"}])
+        self._stub_llm("rewritten body")
+
+        pipeline.revise_clip_prompt(self.out_dir, self.pid, 0, "make it warmer")
+
+        reloaded = pipeline.load_pipeline_state(self.out_dir, self.pid)
+        self.assertEqual(reloaded["clips"][0]["video_prompt"], "original body")
+
+    def test_a_model_that_returns_nothing_is_an_error_not_a_blank_prompt(self):
+        self._save([{"index": 0, "video_prompt": "original body"}])
+        self._stub_llm("  ")
+
+        with self.assertRaises(ValueError) as caught:
+            pipeline.revise_clip_prompt(self.out_dir, self.pid, 0, "fix it")
+
+        self.assertIn("returned no revised prompt", str(caught.exception))
+
+
+class PromptRevisionWiringTests(unittest.TestCase):
+    """The panel must expose the box and the button that reach that endpoint."""
+
+    def test_the_api_exposes_the_revision_endpoint(self):
+        with open(
+            os.path.join(_APP_DIR, "launch.py"), encoding="utf-8",
+        ) as handle:
+            launch = handle.read()
+
+        self.assertIn(
+            '"/api/v1/director/pipelines/{pid}/clips/{clip_index}/revise-prompt"',
+            launch,
+        )
+        self.assertIn("revise_clip_prompt(", launch)
+
+    def test_the_client_calls_that_endpoint(self):
+        client = _read("api", "client.ts")
+
+        self.assertIn("export async function reviseClipPrompt(", client)
+        self.assertIn("/revise-prompt`", client)
+
+    def test_the_panel_has_the_correction_box_and_the_button(self):
+        dashboard = _read(
+            "components", "DirectorDashboard", "DirectorDashboard.tsx",
+        )
+
+        self.assertIn("Correct this shot", dashboard)
+        self.assertIn("Fix with AI", dashboard)
+        self.assertIn("reviseClipPrompt(", dashboard)
+
+    def test_the_rewrite_is_shown_for_review_instead_of_being_saved(self):
+        dashboard = _read(
+            "components", "DirectorDashboard", "DirectorDashboard.tsx",
+        )
+        start = dashboard.index("const runFixWithAi = async () => {")
+        body = dashboard[start:dashboard.index("}", dashboard.index("setFixing(false)", start))]
+
+        self.assertIn("setEditVideoPrompt(result.video_prompt)", body)
+        self.assertNotIn("onSavePrompt", body)
+
+
+if __name__ == "__main__":
+    unittest.main()

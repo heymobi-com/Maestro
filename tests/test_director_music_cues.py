@@ -83,7 +83,8 @@ class MusicCueTests(unittest.TestCase):
                    _mc_min_f=124, _mc_fs=17, has_end=False, _mc_trim_end_frames=False,
                    cumulative_offset=0, total_trimmed_frames=0, group_id='test', clip_count=3,
                    multi_clip_audio_start_sec=0, multi_clip_concat_audio='song.wav',
-                   omni_sequence_continuity=False, omni_sequence_target_frames=0)
+                   omni_sequence_continuity=False, omni_sequence_target_frames=0,
+                   multi_clip_defer_concat=False)
         offsets, trims = [], []
         for i in range(3):
             env.update(i=i, clip_params={})
@@ -93,6 +94,12 @@ class MusicCueTests(unittest.TestCase):
         self.assertEqual(offsets, [0, 180, 346])
         self.assertEqual(trims, [12, 9, 12])
         self.assertEqual(env['cumulative_offset'], 577)
+        # An ordinary batch still concatenates; only a resumed tail defers.
+        self.assertFalse(env['clip_params']['multi_clip_info']['defer_concat'])
+        env['clip_params'] = {}
+        env['multi_clip_defer_concat'] = True
+        exec(program, env)
+        self.assertTrue(env['clip_params']['multi_clip_info']['defer_concat'])
         compensation = next(n for n in ast.walk(tree) if isinstance(n, ast.If)
                             and 'total_trimmed_frames > 0' in ast.unparse(n.test))
         condition = compile(ast.Expression(compensation.test), '<compensation condition>', 'eval')

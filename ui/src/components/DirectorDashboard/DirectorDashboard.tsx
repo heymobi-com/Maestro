@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, Component, type ReactNode } from 'react'
-import { X, ChevronDown, ChevronRight, Play, ImageIcon, Check, AlertTriangle, Clock, Brain, Sparkles, Loader2, Camera, Film, Combine, Pencil, Trash2 } from 'lucide-react'
+import { X, ChevronDown, ChevronRight, Play, ImageIcon, Check, AlertTriangle, Clock, Brain, Sparkles, Loader2, Camera, Film, Combine, Pencil, Trash2, Maximize2 } from 'lucide-react'
+import { FloatingPanel } from './FloatingPanel'
 import { useStore } from '../../stores/useStore'
-import { getFileUrl, updateClipPrompt } from '../../api/client'
+import { getFileUrl, reviseClipPrompt, updateClipPrompt } from '../../api/client'
 import type { PipelineClipState, SavedPipelineState } from '../../types'
 
 /** Safely coerce any value to a displayable string */
@@ -189,8 +190,8 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
   pipeline: SavedPipelineState
   busy?: boolean
   onTag: (tag: 'good' | 'needs_work' | null) => void
-  onRerunImage: (clipIndex: number, prompt?: string) => void
-  onRerunVideo: (clipIndex: number, prompt?: string) => void
+  onRerunImage: (clipIndex: number, prompt?: string) => Promise<void>
+  onRerunVideo: (clipIndex: number, prompt?: string) => Promise<void>
   onSavePrompt: (clipIndex: number, update: { image_prompt?: string; video_prompt?: string; window_prompts?: string[] }) => Promise<void>
 }) {
   const [expandImage, setExpandImage] = useState(false)
@@ -203,6 +204,17 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
   const [editVideoPrompt, setEditVideoPrompt] = useState(clip.video_prompt || '')
   const [savingPrompt, setSavingPrompt] = useState(false)
   const [saveError, setSaveError] = useState('')
+  const [fixNote, setFixNote] = useState('')
+  const [fixing, setFixing] = useState(false)
+  const [fixError, setFixError] = useState('')
+  const [showPromptWindow, setShowPromptWindow] = useState(false)
+  const [showPreview, setShowPreview] = useState(false)
+  const [loadPreview, setLoadPreview] = useState(false)
+  // Which regeneration this shot has in flight. A clip rerun takes minutes, and
+  // the button used to give no sign at all that the click had landed, so it was
+  // impossible to tell a slow job from a missed click.
+  const [rerunKind, setRerunKind] = useState<null | 'image' | 'video'>(null)
+  const [rerunNotice, setRerunNotice] = useState('')
   const requiresShotImage = !pipeline.shot_image_policy
     || pipeline.shot_image_policy === 'generate'
 
@@ -219,6 +231,90 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
   const tagColor = clip.tag === 'good' ? 'border-green-500 bg-green-500/5'
     : clip.tag === 'needs_work' ? 'border-amber-500 bg-amber-500/5'
     : 'border-border'
+
+  const windowed = (clip.window_prompts?.length || 0) > 1
+
+  const runRerun = async (kind: 'image' | 'video', prompt?: string) => {
+    // One job at a time per shot: a second click while this is running is a
+    // duplicate job, and the backend would only answer 409 Conflict anyway.
+    if (rerunKind) return
+    setRerunKind(kind)
+    setRerunNotice('')
+    try {
+      if (kind === 'image') {
+        await onRerunImage(clip.index, prompt)
+        setRerunNotice('Start image regenerated.')
+      } else {
+        await onRerunVideo(clip.index, prompt)
+        setRerunNotice('Shot regenerated.')
+      }
+    } catch (error) {
+      setRerunNotice(error instanceof Error ? error.message : String(error))
+    } finally {
+      setRerunKind(null)
+    }
+  }
+
+  const beginPromptEdit = () => {
+    setEditingVideo(true)
+    setEditVideoPrompt(clip.video_prompt || '')
+    setEditWindowPrompts(clip.window_prompts || [])
+    setSaveError('')
+  }
+
+  const cancelPromptEdit = () => {
+    setShowPromptWindow(false)
+    setEditingVideo(false)
+    setEditVideoPrompt(clip.video_prompt || '')
+    setEditWindowPrompts(clip.window_prompts || [])
+    setSaveError('')
+  }
+
+  // One save path for the inline box and the floating window, so the two can
+  // never disagree about which text is authoritative.
+  const saveVideoPrompt = async () => {
+    setSavingPrompt(true)
+    setSaveError('')
+    try {
+      await onSavePrompt(
+        clip.index,
+        windowed
+          ? { window_prompts: editWindowPrompts }
+          : { video_prompt: editVideoPrompt },
+      )
+      setEditingVideo(false)
+      setShowPromptWindow(false)
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setSavingPrompt(false)
+    }
+  }
+
+  const runFixWithAi = async () => {
+    setFixing(true)
+    setFixError('')
+    try {
+      const windowed = (clip.window_prompts?.length || 0) > 1
+      const result = await reviseClipPrompt(
+        pipeline.pipeline_id,
+        clip.index,
+        fixNote,
+        windowed
+          ? clip.window_prompts.join('\n')
+          : (editingVideo ? editVideoPrompt : clip.video_prompt || ''),
+      )
+      // Show it in the editor instead of saving straight away: the rewrite is
+      // a suggestion, and the user stays the one who approves it.
+      setEditVideoPrompt(result.video_prompt)
+      setEditingVideo(true)
+      setFixNote('')
+    } catch (error) {
+      setFixError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setFixing(false)
+    }
+  }
 
   return (
     <div className={`rounded-lg border-2 ${tagColor} bg-bg-secondary overflow-hidden`}>
@@ -240,6 +336,29 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
           {clip.video_gen_time_sec && (
             <span className="text-[9px] text-text-muted ml-1"><Play size={8} className="inline" /> {formatTime(clip.video_gen_time_sec)}</span>
           )}
+          {rerunKind && (
+            <span className="ml-1.5 flex items-center gap-1 rounded bg-accent-blue/15 px-1 py-0.5 text-[9px] text-accent-blue whitespace-nowrap">
+              <Loader2 size={9} className="animate-spin" />
+              {rerunKind === 'image' ? 'Regenerating image…' : 'Regenerating shot…'}
+            </span>
+          )}
+          {!rerunKind && rerunNotice && (
+            <span
+              role="status"
+              className={`ml-1.5 rounded px-1 py-0.5 text-[9px] whitespace-nowrap ${/regenerated/i.test(rerunNotice) ? 'bg-green-500/15 text-indicator-success' : 'bg-amber-500/15 text-indicator-warning'}`}
+              title={rerunNotice}
+            >
+              {rerunNotice.length > 42 ? `${rerunNotice.slice(0, 42)}…` : rerunNotice}
+            </span>
+          )}
+          {clip.video_filename && (
+            <button onClick={() => { setLoadPreview(false); setShowPreview(true) }}
+              className="ml-1 p-0.5 rounded text-text-muted hover:text-accent-blue transition-colors"
+              title={`Watch shot ${clip.index + 1} to be sure you are editing the right one`}
+              aria-label={`Watch shot ${clip.index + 1}`}>
+              <Play size={12} />
+            </button>
+          )}
           {/* Tag buttons */}
           <button onClick={() => onTag(clip.tag === 'good' ? null : 'good')}
             disabled={busy}
@@ -260,23 +379,31 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
         {/* Image section */}
         <div className="flex gap-2">
           {/* Thumbnail */}
-          <div className="w-20 h-20 shrink-0 rounded overflow-hidden bg-bg-tertiary border border-border">
+          {/* A grid of 150 shots must not mount 150 video elements: that is
+              what had the browser holding tens of GB of media buffers. A card
+              shows its start image when there is one, and otherwise says where
+              the footage is and lets the user watch it on demand. */}
+          <div className="relative w-20 h-20 shrink-0 rounded overflow-hidden bg-bg-tertiary border border-border">
             {clip.start_image_filename ? (
-              <img src={getFileUrl(clip.start_image_filename)} alt={`Shot ${clip.index + 1}`}
+              <img src={getFileUrl(clip.start_image_filename, pipeline.workspace)} alt={`Shot ${clip.index + 1}`}
                 className="w-full h-full object-cover" loading="lazy" />
-            ) : clip.video_filename ? (
-              <video
-                src={`${getFileUrl(clip.video_filename)}#t=0.1`}
-                className="w-full h-full object-cover"
-                muted
-                playsInline
-                preload="metadata"
-                aria-label={`Shot ${clip.index + 1} video preview`}
-              />
             ) : (
-              <div className="w-full h-full flex items-center justify-center text-text-muted">
+              <div className="w-full h-full flex flex-col items-center justify-center gap-0.5 text-text-muted">
                 <ImageIcon size={16} />
+                <span className="text-[7px] text-center leading-tight px-0.5">
+                  {clip.video_filename ? 'clip ready\npress ▶' : 'no visual yet'}
+                </span>
               </div>
+            )}
+            {/* Always offer a way to watch the shot: a start image alone does
+                not prove which clip is about to be edited. */}
+            {clip.video_filename && (
+              <button onClick={() => { setLoadPreview(false); setShowPreview(true) }}
+                className="absolute bottom-0 right-0 m-0.5 rounded bg-black/65 text-white p-0.5 hover:bg-black/85 transition-colors"
+                title={`Review shot ${clip.index + 1} before editing it`}
+                aria-label={`Review shot ${clip.index + 1}`}>
+                <Play size={10} />
+              </button>
             )}
           </div>
           {/* Image prompt */}
@@ -300,11 +427,11 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                   }} className="p-0.5 rounded text-indicator-success disabled:opacity-40"><Check size={10} /></button>
                   <button disabled={savingPrompt} title="Cancel image prompt edit" onClick={() => { setEditingImage(false); setEditImagePrompt(clip.image_prompt || ''); setSaveError('') }} className="p-0.5 rounded text-text-muted disabled:opacity-40"><X size={10} /></button>
                 </>}
-                <button onClick={() => onRerunImage(clip.index, editingImage ? editImagePrompt : undefined)}
-                  disabled={busy}
-                  className="p-0.5 rounded text-text-muted hover:text-accent-blue transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                  title="Re-generate start image">
-                  <Camera size={10} />
+                <button onClick={() => runRerun('image', editingImage ? editImagePrompt : undefined)}
+                  disabled={busy || rerunKind !== null}
+                  className={`p-0.5 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${rerunKind === 'image' ? 'text-accent-blue' : 'text-text-muted hover:text-accent-blue'}`}
+                  title={rerunKind ? 'A regeneration for this shot is already running' : 'Re-generate start image'}>
+                  {rerunKind === 'image' ? <Loader2 size={10} className="animate-spin" /> : <Camera size={10} />}
                 </button>
               </div>}
             </div>
@@ -359,47 +486,43 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
               Video Prompt{clip.window_prompts?.length > 1 ? ` (${clip.window_prompts.length} windows)` : ''}
             </span>
             <div className="flex items-center gap-1">
-              <button disabled={editingVideo || savingPrompt} onClick={() => {
-                setEditingVideo(true)
-                setEditVideoPrompt(clip.video_prompt || '')
-                setEditWindowPrompts(clip.window_prompts || [])
-                setSaveError('')
-              }}
+              <button disabled={editingVideo || savingPrompt} onClick={beginPromptEdit}
                 className={`p-0.5 rounded transition-colors disabled:cursor-default ${editingVideo ? 'text-accent-blue' : 'text-text-muted hover:text-text-secondary'}`}
-                title="Edit prompt">
+                title="Quick edit in the card">
                 <Pencil size={9} />
               </button>
+              {/* A compiled prompt runs to thousands of characters, which the
+                  card cannot show. This opens it in a window the user sizes. */}
+              <button disabled={savingPrompt} onClick={() => { beginPromptEdit(); setShowPromptWindow(true) }}
+                className="p-0.5 rounded text-text-muted hover:text-accent-blue transition-colors disabled:opacity-40"
+                title="Edit in a window you can move and resize">
+                <Maximize2 size={9} />
+              </button>
               {editingVideo && <>
-                <button disabled={savingPrompt} title="Save video prompt" onClick={async () => {
-                  setSavingPrompt(true); setSaveError('')
-                  try {
-                    await onSavePrompt(clip.index, editWindowPrompts.length > 1
-                      ? { window_prompts: editWindowPrompts }
-                      : { video_prompt: editVideoPrompt })
-                    setEditingVideo(false)
-                  } catch (error) { setSaveError(error instanceof Error ? error.message : String(error)) }
-                  finally { setSavingPrompt(false) }
-                }} className="p-0.5 rounded text-indicator-success disabled:opacity-40"><Check size={10} /></button>
-                <button disabled={savingPrompt} title="Cancel video prompt edit" onClick={() => {
-                  setEditingVideo(false); setEditVideoPrompt(clip.video_prompt || '')
-                  setEditWindowPrompts(clip.window_prompts || []); setSaveError('')
-                }} className="p-0.5 rounded text-text-muted disabled:opacity-40"><X size={10} /></button>
+                <button disabled={savingPrompt} title="Save video prompt" onClick={saveVideoPrompt}
+                  className="p-0.5 rounded text-indicator-success disabled:opacity-40"><Check size={10} /></button>
+                <button disabled={savingPrompt} title="Cancel video prompt edit" onClick={cancelPromptEdit}
+                  className="p-0.5 rounded text-text-muted disabled:opacity-40"><X size={10} /></button>
               </>}
               <button onClick={() => {
                 if (editingVideo && editWindowPrompts.length > 1) {
-                  onRerunVideo(clip.index, editWindowPrompts.join('\n'))
+                  void runRerun('video', editWindowPrompts.join('\n'))
                 } else {
-                  onRerunVideo(clip.index, editingVideo ? editVideoPrompt : undefined)
+                  void runRerun('video', editingVideo ? editVideoPrompt : undefined)
                 }
               }}
-                disabled={busy || (requiresShotImage && !clip.start_image_filename)}
-                className="p-0.5 rounded text-text-muted hover:text-indicator-success transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                title={busy
-                  ? 'Wait for pipeline repair to finish'
-                  : requiresShotImage && !clip.start_image_filename
-                    ? 'Generate the start image first'
-                    : 'Re-generate video clip'}>
-                <Film size={10} />
+                disabled={busy || rerunKind !== null || (requiresShotImage && !clip.start_image_filename)}
+                className={`p-0.5 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${rerunKind === 'video' ? 'text-indicator-success' : 'text-text-muted hover:text-indicator-success'}`}
+                title={rerunKind === 'video'
+                  ? 'Regenerating this shot — one job at a time'
+                  : rerunKind
+                    ? 'Another regeneration for this shot is already running'
+                    : busy
+                      ? 'Wait for pipeline repair to finish'
+                      : requiresShotImage && !clip.start_image_filename
+                        ? 'Generate the start image first'
+                        : 'Re-generate video clip'}>
+                {rerunKind === 'video' ? <Loader2 size={10} className="animate-spin" /> : <Film size={10} />}
               </button>
             </div>
           </div>
@@ -449,6 +572,141 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
             )
           )}
           {saveError && <p role="alert" className="mt-1 text-[9px] text-indicator-warning">{saveError}</p>}
+
+          {/* A plain-language correction for this one shot. Saying what is
+              wrong is far easier than hand-editing a compiled H3 prompt, and
+              the rewrite is given the neighbouring shots so the sequence
+              stays continuous. The result lands in the editor above, unsaved. */}
+          <div className="mt-1.5 rounded border border-border bg-bg-tertiary/60 p-1.5">
+            <div className="text-[8px] text-text-muted uppercase tracking-wider mb-0.5">
+              Correct this shot
+            </div>
+            <textarea
+              value={fixNote}
+              onChange={e => setFixNote(e.target.value)}
+              placeholder="What is wrong? e.g. this line is delivered by (S2) but it is written for the woman"
+              className="w-full bg-bg-tertiary border border-border rounded px-1.5 py-1 text-[10px] text-text-primary resize-none focus:outline-none focus:border-accent-blue"
+              rows={2}
+              disabled={fixing}
+            />
+            <div className="flex items-center gap-1.5 mt-1">
+              <button
+                onClick={runFixWithAi}
+                disabled={fixing || !fixNote.trim() || busy}
+                className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] bg-accent-blue/15 text-accent-blue hover:bg-accent-blue/25 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                title="Rewrite this shot's prompt with the LLM, keeping the rest of the sequence consistent">
+                <Sparkles size={9} />
+                {fixing ? 'Rewriting…' : 'Fix with AI'}
+              </button>
+              {fixing && (
+                <span className="text-[9px] text-text-muted">Rewriting shot {clip.index + 1}…</span>
+              )}
+            </div>
+            {fixError && <p role="alert" className="mt-1 text-[9px] text-indicator-warning">{fixError}</p>}
+          </div>
+
+          {/* The prompt, in a window that can be moved and resized. Kept in
+              sync with the inline box through the same edit state. */}
+          {showPromptWindow && (
+            <FloatingPanel
+              storageKey={`prompt-${pipeline.pipeline_id}-${clip.index}`}
+              title={`Shot ${clip.index + 1} — video prompt`}
+              subtitle={windowed
+                ? `${clip.window_prompts.length} window prompts, one per generation`
+                : `${editVideoPrompt.length} characters`}
+              onClose={() => setShowPromptWindow(false)}
+              fill
+              resizableFont
+              footer={<>
+                <button onClick={() => setShowPromptWindow(false)}
+                  className="px-2 py-1 rounded text-[10px] text-text-muted hover:text-text-primary transition-colors">Close</button>
+                <button onClick={saveVideoPrompt} disabled={savingPrompt}
+                  className="px-2 py-1 rounded text-[10px] bg-accent-blue/15 text-accent-blue hover:bg-accent-blue/25 transition-colors disabled:opacity-40">
+                  {savingPrompt ? 'Saving…' : 'Save prompt'}
+                </button>
+              </>}
+            >
+              {windowed ? (
+                <div className="flex-1 min-h-0 overflow-auto space-y-2">
+                  {editWindowPrompts.map((wp, wi) => (
+                    <div key={wi}>
+                      <div className="text-[10px] text-text-muted mb-0.5">Window {wi + 1}</div>
+                      <textarea
+                        value={wp}
+                        onChange={e => {
+                          const next = [...editWindowPrompts]
+                          next[wi] = e.target.value
+                          setEditWindowPrompts(next)
+                        }}
+                        rows={9}
+                        className="w-full bg-bg-tertiary border border-border rounded px-2 py-1.5 leading-relaxed text-text-primary resize-y focus:outline-none focus:border-accent-blue"
+                      />
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <textarea
+                  value={editVideoPrompt}
+                  onChange={e => setEditVideoPrompt(e.target.value)}
+                  className="w-full flex-1 min-h-0 bg-bg-tertiary border border-border rounded px-2 py-1.5 leading-relaxed text-text-primary resize-none focus:outline-none focus:border-accent-blue"
+                />
+              )}
+              {saveError && <p role="alert" className="mt-1.5 text-[10px] text-indicator-warning shrink-0">{saveError}</p>}
+            </FloatingPanel>
+          )}
+
+          {/* Watch the shot before touching it. Nothing is fetched until the
+              user asks: opening this window must never start a media load,
+              because that is what froze the page. */}
+          {showPreview && (
+            <FloatingPanel
+              storageKey={`clip-${pipeline.pipeline_id}-${clip.index}`}
+              title={`Shot ${clip.index + 1}`}
+              subtitle={clip.video_filename || 'no clip rendered yet'}
+              onClose={() => { setShowPreview(false); setLoadPreview(false) }}
+              initialWidth={880}
+              initialHeight={580}
+              fill
+            >
+              {clip.video_filename ? (
+                loadPreview ? (
+                  <video
+                    src={getFileUrl(clip.video_filename, pipeline.workspace)}
+                    className="w-full flex-1 min-h-0 bg-black rounded"
+                    controls
+                    preload="metadata"
+                    playsInline
+                    aria-label={`Shot ${clip.index + 1}`}
+                  />
+                ) : (
+                  <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-2 text-center px-4">
+                    <Film size={28} className="text-text-muted" />
+                    <p className="text-[11px] text-text-secondary break-all">{clip.video_filename}</p>
+                    <p className="text-[10px] text-text-muted">
+                      The file loads only when you ask, so opening this window cannot stall the app.
+                    </p>
+                    <button onClick={() => setLoadPreview(true)}
+                      className="flex items-center gap-1 px-2.5 py-1 rounded text-[11px] bg-accent-blue/15 text-accent-blue hover:bg-accent-blue/25 transition-colors">
+                      <Play size={12} /> Load video
+                    </button>
+                  </div>
+                )
+              ) : clip.start_image_filename ? (
+                <div className="flex-1 min-h-0 flex flex-col gap-2">
+                  <img src={getFileUrl(clip.start_image_filename, pipeline.workspace)}
+                    className="flex-1 min-h-0 w-full object-contain bg-black rounded"
+                    alt={`Shot ${clip.index + 1} planned start image`} />
+                  <p className="text-[10px] text-text-muted shrink-0">
+                    No clip rendered yet — this is the planned start image for this shot.
+                  </p>
+                </div>
+              ) : (
+                <p className="text-[11px] text-text-muted italic">
+                  This shot has no rendered clip and no start image yet, so there is nothing to show.
+                </p>
+              )}
+            </FloatingPanel>
+          )}
         </div>
 
         {/* Prompt polish diff */}
@@ -678,7 +936,9 @@ function DirectorDashboardInner() {
             <span className="text-text-muted">
               / {totalClips} clips
             </span>
-            {(selectedPipeline.status === 'crashed' || selectedPipeline.status === 'failed') && (
+            {(selectedPipeline.status === 'crashed'
+              || selectedPipeline.status === 'failed'
+              || selectedPipeline.status === 'cancelled') && (
               <button
                 onClick={async () => {
                   if (!selectedPipeline) return
@@ -693,7 +953,7 @@ function DirectorDashboardInner() {
                 }}
                 disabled={resuming || loading || repairBusy}
                 className="flex items-center gap-1 px-2 py-1 text-[10px] bg-green-500/10 border border-green-500/30 rounded text-indicator-success hover:bg-green-500/20 disabled:opacity-40 transition-colors"
-                title="Re-run this pipeline from where it crashed — reuses the planning and start images that already completed"
+                title="Re-run this pipeline from where it stopped — reuses the planning, the start images, and the clip videos that already completed"
               >
                 <Play size={10} />
                 {resuming ? 'Resuming…' : 'Resume'}
@@ -908,8 +1168,28 @@ function DirectorDashboardInner() {
                       await updateClipPrompt(selectedPipeline.pipeline_id, idx, update)
                       await loadPipeline(selectedPipeline.pipeline_id)
                     }}
-                    onRerunImage={(idx, prompt) => { setRegenError(null); rerunClipImage(selectedPipeline.pipeline_id, idx, prompt).catch(e => setRegenError(String(e instanceof Error ? e.message : e))) }}
-                    onRerunVideo={(idx, prompt) => { setRegenError(null); rerunClipVideo(selectedPipeline.pipeline_id, idx, prompt).catch(e => setRegenError(String(e instanceof Error ? e.message : e))) }}
+                    onRerunImage={async (idx, prompt) => {
+                      setRegenError(null)
+                      try {
+                        await rerunClipImage(selectedPipeline.pipeline_id, idx, prompt)
+                      } catch (e) {
+                        const message = String(e instanceof Error ? e.message : e)
+                        setRegenError(message)
+                        // Rethrown so the card can show it too: the failure has
+                        // to reach the shot the user clicked, not only a banner.
+                        throw new Error(message)
+                      }
+                    }}
+                    onRerunVideo={async (idx, prompt) => {
+                      setRegenError(null)
+                      try {
+                        await rerunClipVideo(selectedPipeline.pipeline_id, idx, prompt)
+                      } catch (e) {
+                        const message = String(e instanceof Error ? e.message : e)
+                        setRegenError(message)
+                        throw new Error(message)
+                      }
+                    }}
                   />
                 ))}
               </div>
