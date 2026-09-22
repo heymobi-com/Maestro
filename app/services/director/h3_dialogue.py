@@ -1564,6 +1564,20 @@ _H3_BEHIND_POSITION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# The action a compiled body attaches to a spoken line: "... </d>. While speaking,
+# nodding slowly.". The prompt already tells every speaker to lip-sync globally, so
+# when a note asks for lip-sync the only thing left to change is here -- and the
+# assistant cannot see it unless it is measured.
+_H3_SPEAKING_GESTURE_RE = re.compile(r"While speaking,\s*([^.]{3,90})\.", re.IGNORECASE)
+
+# Head and face movements read as the primary motion and suppress the mouth. Hand
+# gestures are left alone: they do not stop a speaker from forming words.
+_H3_COMPETING_GESTURE_RE = re.compile(
+    r"\bnod|look(?:s|ing)? (?:down|away)|shak(?:e|es|ing)\s+(?:his|her|their)\s+head|"
+    r"\btilt|\bblink|eyes (?:close|closed|shut)|turn(?:s|ing)? away",
+    re.IGNORECASE,
+)
+
 
 def h3_dialogue_blocks(prompt: str) -> list[str]:
     """The spoken lines of a compiled prompt, in order, byte for byte."""
@@ -1672,6 +1686,28 @@ def diagnose_h3_clip_prompt(
     blocks = h3_dialogue_blocks(text)
     findings.append(f"The body carries {len(blocks)} spoken <d> line(s).")
 
+    # The gesture paired with each line, because the global lip-sync instruction is
+    # already in the prompt: a note that asks for lip-sync has nothing to add until
+    # the action competing with the mouth is named. Clip 13 of a real project told
+    # Valeria to lip-sync her one line and, in the same sentence, to nod slowly.
+    gestures = [
+        match.group(1).strip()
+        for match in _H3_SPEAKING_GESTURE_RE.finditer(text)
+    ]
+    competing = [
+        gesture for gesture in gestures
+        if _H3_COMPETING_GESTURE_RE.search(gesture)
+    ]
+    if competing:
+        findings.append(
+            "A spoken line is paired with a head movement that competes with the "
+            "mouth: "
+            + "; ".join(f'"{gesture}"' for gesture in competing[:3])
+            + ". The prompt already tells every speaker to lip-sync, so this is the "
+            "part that has to change: let the speaking mouth do the work and move "
+            "the gesture to a beat where that person is silent."
+        )
+
     # Lips turn is decided by the plan, not by the prompt: the orchestrator picks
     # the audio-to-video path only for an audio/dialogue-driven shot marked
     # lip-sync critical. Three notes on clip 13 of a real project -- "the woman
@@ -1688,9 +1724,7 @@ def diagnose_h3_clip_prompt(
             f"the prompt carries {len(blocks)} spoken line(s). The renderer "
             "reconciles that before choosing the source mode, so the lips can "
             "follow the voice track, but the stored plan is stale and a re-plan "
-            "would write the right mode. A gesture that competes with a speaker's "
-            "mouth -- \"while speaking, nodding slowly\" -- still belongs in the "
-            "prompt."
+            "would write the right mode."
         )
 
     errors = validate_h3_prompt_contract(

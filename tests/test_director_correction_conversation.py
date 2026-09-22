@@ -37,7 +37,9 @@ from services.director.h3_dialogue import (  # noqa: E402
 )
 from services.director_pipeline import (  # noqa: E402
     _NO_OP_CHANGE_CHARS,
+    _NO_OP_CHANGE_WORDS,
     _changed_characters,
+    _changed_words,
     _parse_revision_envelope,
 )
 
@@ -211,13 +213,14 @@ class CorrectionConversationWiringTests(unittest.TestCase):
 
     def test_a_refused_rewrite_never_becomes_the_prompt(self):
         start = self.pipeline.index("def _candidate_problems(")
-        tail = self.pipeline[start:start + 2600]
-        self.assertIn('result["errors"] = [', tail)
+        end = self.pipeline.index("def _record_regenerated_clip(", start)
+        body = self.pipeline[start:end]
+        self.assertIn('result["errors"] = [', body)
         # The errors are recorded and the turn ends there: the rewrite is only
         # assigned after the checks passed.
         self.assertLess(
-            tail.index('result["errors"] = ['),
-            tail.index('result["video_prompt"] = parts["prompt"]'),
+            body.index('result["errors"] = ['),
+            body.index('result["video_prompt"] = parts["prompt"]'),
         )
 
     def test_the_assistant_is_told_to_explain_and_may_ask(self):
@@ -346,6 +349,31 @@ class NoOpRewriteTests(unittest.TestCase):
             _changed_characters(PROBLEM_PROMPT, FIXED_PROMPT),
             _NO_OP_CHANGE_CHARS,
         )
+
+    def test_a_gesture_rewrite_is_not_a_no_op(self):
+        """Deleting the competing gesture is small but real.
+
+        "While speaking, nodding slowly." is 38 characters, under the character
+        rule, so a character count alone would have thrown away the only edit that
+        could have helped. Words keep it.
+        """
+
+        asking = PROBLEM_PROMPT.replace(
+            "Valeria speaks, with Ricardo visible in the periphery.",
+            "Valeria speaks, with Ricardo visible in the periphery. "
+            "While speaking, nodding slowly.",
+        )
+        fixed = asking.replace(" While speaking, nodding slowly.", "")
+
+        self.assertLess(_changed_characters(asking, fixed), _NO_OP_CHANGE_CHARS)
+        self.assertGreaterEqual(_changed_words(asking, fixed), 3)
+
+    def test_moving_a_comma_is_a_no_op(self):
+        asking = PROBLEM_PROMPT
+        fixed = asking.replace("Valeria speaks,", "Valeria speaks")
+
+        # One word out, one word in: still a reshuffle, never a correction.
+        self.assertLess(_changed_words(asking, fixed), _NO_OP_CHANGE_WORDS)
 
     def test_a_rewrite_that_touches_the_spoken_words_is_retried_then_refused(self):
         # The gate protects the dialogue lines: the words the audio carries
@@ -501,6 +529,49 @@ class AudioPlanFindingTests(unittest.TestCase):
         body = source[start:source.index('return "a2v"', start)]
         self.assertIn("reconcile_audio_plan_with_dialogue(", body)
         self.assertIn("shot.audio_plan.mode =", body)
+
+
+class GestureFindingTests(unittest.TestCase):
+    """Name what competes with the mouth, or a lip-sync note has nothing to change.
+
+    Clip 13's prompt already told every speaker to lip-sync their lines, so three
+    notes asking for exactly that came back as a 2-character edit, then 55, then 1,
+    and the render never changed: the part that had to move was "While speaking,
+    nodding slowly" on Valeria's single line, and nothing measured it.
+    """
+
+    def test_the_head_movement_on_a_line_is_named(self):
+        diagnosis = diagnose_h3_clip_prompt(
+            _prompt(
+                "Valeria speaks to camera. While speaking, nodding slowly.",
+            ),
+            duration_seconds=7.29,
+        )
+
+        joined = " ".join(diagnosis["findings"])
+        self.assertIn("nodding slowly", joined)
+        self.assertIn("competes with the mouth", joined)
+
+    def test_a_hand_gesture_is_not_reported(self):
+        # A hand gesture does not stop anyone from forming words.
+        diagnosis = diagnose_h3_clip_prompt(
+            _prompt(
+                "Valeria speaks to camera. While speaking, gesturing slightly.",
+            ),
+            duration_seconds=7.29,
+        )
+
+        self.assertNotIn("competes with the mouth", " ".join(diagnosis["findings"]))
+
+    def test_the_finding_says_what_to_do_about_it(self):
+        diagnosis = diagnose_h3_clip_prompt(
+            _prompt("Valeria speaks to camera. While speaking, looking down."),
+            duration_seconds=7.29,
+        )
+
+        joined = " ".join(diagnosis["findings"])
+        self.assertIn("let the speaking mouth do the work", joined)
+        self.assertIn("move the gesture to a beat where that person is silent", joined)
 
 
 if __name__ == "__main__":

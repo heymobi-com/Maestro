@@ -2811,14 +2811,35 @@ def _parse_revision_envelope(text: str) -> dict:
     return parts
 
 
-# A rewrite that moves fewer characters than this is a reshuffle rather than a
+# A rewrite that moves fewer words than this is a reshuffle rather than a
 # correction. Three notes on clip 13 of a real project -- "the woman must
 # faithfully lip-sync the dialogue assigned to S1" -- came back as 2, 55 and 1
 # changed characters while the render stayed wrong: the assistant explained the
 # problem and handed the same prompt back, and the loop offered it as a fix.
+#
+# Words, not characters: the gesture such a note has to rewrite is a handful of
+# words, and a comma moved is none.
 _NO_OP_CHANGE_CHARS = 40
+_NO_OP_CHANGE_WORDS = 3
 
 _REVISE_NUDGE_HEADER = "Your FIXED_PROMPT was rejected for these reasons:"
+
+
+def _changed_words(before: str, after: str) -> int:
+    """How many words actually moved between two prompts.
+
+    Characters are a poor proxy: the gesture a lip-sync note has to rewrite
+    ("nodding slowly") is 20 characters, and a comma moved is 1. Words separate
+    the two.
+    """
+
+    split = lambda text: str(text or "").split()  # noqa: E731
+    matcher = difflib.SequenceMatcher(None, split(before), split(after))
+    return sum(
+        (i2 - i1) + (j2 - j1)
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes()
+        if tag != "equal"
+    )
 
 
 def _revise_problem_nudge(problems: list[str]) -> str:
@@ -3030,10 +3051,12 @@ def revise_clip_prompt(
 
         text = str(candidate.get("prompt") or "")
         moved = _changed_characters(prompt, text) if text else 0
-        if moved < _NO_OP_CHANGE_CHARS:
+        moved_words = _changed_words(prompt, text) if text else 0
+        if moved < _NO_OP_CHANGE_CHARS and moved_words < _NO_OP_CHANGE_WORDS:
             return [
                 "the rewrite changed almost nothing "
-                f"({moved} character(s)), so it does not answer the note",
+                f"({moved} character(s), {moved_words} word(s)), so it does not "
+                "answer the note",
             ]
         return review_h3_revision(
             prompt,
@@ -3065,6 +3088,10 @@ def revise_clip_prompt(
                 f"[Pipeline {pid}] Shot {clip_index + 1}: the rewrite was refused "
                 f"({len(problems)} problem(s)); the prompt is unchanged."
             )
+            # The reasons went into the response, which is gone by the time anyone
+            # asks why the dashboard showed an error and no correction.
+            for problem in problems:
+                print(f"[Pipeline {pid}] Shot {clip_index + 1}:   - {problem}")
             return result
 
     # The spoken lines, the single shot and the contract are checked here rather
