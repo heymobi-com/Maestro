@@ -32,6 +32,7 @@ from services import director_pipeline as pipeline  # noqa: E402
 from services.director.h3_dialogue import (  # noqa: E402
     diagnose_h3_clip_prompt,
     h3_dialogue_blocks,
+    reconcile_audio_plan_with_dialogue,
     review_h3_revision,
 )
 from services.director_pipeline import (  # noqa: E402
@@ -381,12 +382,14 @@ class NoOpRewriteTests(unittest.TestCase):
 
 
 class AudioPlanFindingTests(unittest.TestCase):
-    """The measurement has to name what stops the mouths moving.
+    """The plan is made to agree with the dialogue the shot carries.
 
-    Clip 13's plan said "ambient_only", so the orchestrator never selected the
-    audio-to-video path: no prompt wording could make the woman lip-sync. The
-    assistant blamed pronouns and gestures for three turns because nothing told
-    it where to look.
+    Clip 13's plan said "ambient_only" while its prompt carried four spoken
+    lines, and the orchestrator selects the audio-to-video path only for an
+    audio/dialogue-driven shot marked lip-sync critical -- so nothing drove the
+    mouths from the voice track. 104 of that project's 177 clips were in that
+    state, 275 of 1422 across all projects. No prompt edit could bring the path
+    back, which is why three notes on that clip changed 2, 55 and 1 characters.
     """
 
     def test_a_plan_that_skips_the_audio_path_is_named(self):
@@ -398,8 +401,8 @@ class AudioPlanFindingTests(unittest.TestCase):
 
         joined = " ".join(diagnosis["findings"])
         self.assertIn("ambient_only", joined)
-        self.assertIn("audio-to-video", joined)
-        self.assertIn("No wording in this prompt can change that", joined)
+        self.assertIn("reconciles that before choosing the source mode", joined)
+        self.assertIn("stale", joined)
 
     def test_a_dialogue_driven_plan_raises_nothing(self):
         diagnosis = diagnose_h3_clip_prompt(
@@ -408,7 +411,7 @@ class AudioPlanFindingTests(unittest.TestCase):
             audio_plan={"mode": "dialogue_driven", "lip_sync_critical": True},
         )
 
-        self.assertNotIn("audio-to-video", " ".join(diagnosis["findings"]))
+        self.assertNotIn("stored audio plan", " ".join(diagnosis["findings"]))
 
     def test_a_plan_without_lip_sync_critical_is_named_too(self):
         diagnosis = diagnose_h3_clip_prompt(
@@ -417,7 +420,7 @@ class AudioPlanFindingTests(unittest.TestCase):
             audio_plan={"mode": "dialogue_driven", "lip_sync_critical": False},
         )
 
-        self.assertIn("audio-to-video", " ".join(diagnosis["findings"]))
+        self.assertIn("stored audio plan", " ".join(diagnosis["findings"]))
 
     def test_a_silent_clip_raises_nothing(self):
         silent = _prompt("Valeria looks at the camera.").replace(
@@ -429,7 +432,75 @@ class AudioPlanFindingTests(unittest.TestCase):
             audio_plan={"mode": "ambient_only", "lip_sync_critical": False},
         )
 
-        self.assertNotIn("audio-to-video", " ".join(diagnosis["findings"]))
+        self.assertNotIn("stored audio plan", " ".join(diagnosis["findings"]))
+
+    def test_an_ambient_plan_with_dialogue_becomes_a_dialogue_shot(self):
+        resolved = reconcile_audio_plan_with_dialogue(
+            {"mode": "ambient_only", "timing_anchor": "audio", "lip_sync_critical": True},
+            prompt=_prompt("Valeria speaks to camera."),
+        )
+
+        self.assertEqual(resolved["mode"], "dialogue_driven")
+        self.assertTrue(resolved["lip_sync_critical"])
+        self.assertEqual(resolved["timing_anchor"], "audio")
+
+    def test_the_dialogue_beats_alone_are_enough(self):
+        # A prompt the director edited can be saved before the beats are rebuilt,
+        # and the beats can be cleared while the prompt still speaks.
+        resolved = reconcile_audio_plan_with_dialogue(
+            {"mode": "ambient_only"},
+            dialogue_beats=[{"speaker_id": "(S1)", "spoken_text": "Hola."}],
+        )
+
+        self.assertEqual(resolved["mode"], "dialogue_driven")
+
+    def test_a_dialogue_plan_without_lip_sync_critical_is_marked(self):
+        resolved = reconcile_audio_plan_with_dialogue(
+            {"mode": "dialogue_driven", "lip_sync_critical": False},
+            prompt=_prompt("Valeria speaks to camera."),
+        )
+
+        self.assertTrue(resolved["lip_sync_critical"])
+
+    def test_a_silent_plan_is_left_alone(self):
+        plan = {"mode": "ambient_only", "timing_anchor": "video"}
+        # _prompt() always writes one spoken line, so the silent case removes it.
+        silent = _prompt("Valeria looks at the camera.").replace(
+            "Dialogue: <d>[Spanish] Hola.</d>. ", "",
+        )
+
+        self.assertEqual(
+            reconcile_audio_plan_with_dialogue(plan, prompt=silent),
+            plan,
+        )
+
+    def test_a_music_plan_is_left_alone(self):
+        # generated_audio synthesizes its own speech, and music_driven is a
+        # deliberate workflow whose audio drives everything: neither is a
+        # contradiction to repair.
+        for mode in ("music_driven", "generated_audio"):
+            with self.subTest(mode=mode):
+                plan = {"mode": mode}
+                self.assertEqual(
+                    reconcile_audio_plan_with_dialogue(
+                        plan, prompt=_prompt("Valeria sings."),
+                    ),
+                    plan,
+                )
+
+    def test_the_render_mode_choice_reconciles_before_deciding(self):
+        """The fix has to sit where the audio-to-video path is selected."""
+
+        with open(
+            os.path.join(_APP_DIR, "services", "director", "orchestrator.py"),
+            encoding="utf-8",
+        ) as handle:
+            source = handle.read()
+
+        start = source.index("def _choose_video_mode(")
+        body = source[start:source.index('return "a2v"', start)]
+        self.assertIn("reconcile_audio_plan_with_dialogue(", body)
+        self.assertIn("shot.audio_plan.mode =", body)
 
 
 if __name__ == "__main__":

@@ -1684,10 +1684,13 @@ def diagnose_h3_clip_prompt(
         plan_mode in ("audio_driven", "dialogue_driven") and lip_critical
     ):
         findings.append(
-            f"The clip's audio plan says {plan_mode or '(no mode)'!r}, so the "
-            "renderer does not take the audio-to-video path for this shot: nothing "
-            "drives the mouths from the voice track. No wording in this prompt can "
-            "change that -- the plan has to be fixed."
+            f"The clip's stored audio plan says {plan_mode or '(no mode)'!r} while "
+            f"the prompt carries {len(blocks)} spoken line(s). The renderer "
+            "reconciles that before choosing the source mode, so the lips can "
+            "follow the voice track, but the stored plan is stale and a re-plan "
+            "would write the right mode. A gesture that competes with a speaker's "
+            "mouth -- \"while speaking, nodding slowly\" -- still belongs in the "
+            "prompt."
         )
 
     errors = validate_h3_prompt_contract(
@@ -1710,6 +1713,45 @@ def diagnose_h3_clip_prompt(
         "errors": list(errors),
         "findings": findings,
     }
+
+
+def reconcile_audio_plan_with_dialogue(
+    audio_plan: Mapping[str, Any] | None,
+    *,
+    prompt: str = "",
+    dialogue_beats: Sequence[Any] | None = None,
+) -> dict[str, Any]:
+    """Make the plan agree with the dialogue the shot actually carries.
+
+    The planner marks a shot "ambient_only" and then writes four spoken lines
+    into it: clip 13 of a real project did exactly that, and 104 of that project's
+    177 clips carried dialogue under a plan that never asked for lip-sync. The
+    orchestrator selects the audio-to-video path only for an audio/dialogue-driven
+    shot marked lip-sync critical, so nothing drove the mouths from the voice
+    track -- and no wording in the prompt could bring the path back, which is why
+    three correction notes on that clip changed 2, 55 and 1 characters and the
+    render stayed wrong.
+
+    A shot whose prompt speaks is a dialogue shot, so the plan is corrected rather
+    than the prompt. ``generated_audio`` and ``music_driven`` are left alone: the
+    first synthesizes its own speech, and the second is a deliberate music
+    workflow whose audio drives everything.
+    """
+
+    resolved = dict(audio_plan or {})
+    speaks = bool(h3_dialogue_blocks(prompt)) or bool(dialogue_beats)
+    if not speaks:
+        return resolved
+    mode = str(_field(resolved, "mode", "") or "").strip().casefold()
+    lip_critical = bool(_field(resolved, "lip_sync_critical", False))
+    if mode in ("audio_driven", "dialogue_driven") and lip_critical:
+        return resolved
+    if mode not in ("", "ambient_only", "audio_driven", "dialogue_driven"):
+        return resolved
+    resolved["mode"] = "dialogue_driven"
+    resolved["lip_sync_critical"] = True
+    resolved.setdefault("timing_anchor", "audio")
+    return resolved
 
 
 def review_h3_revision(

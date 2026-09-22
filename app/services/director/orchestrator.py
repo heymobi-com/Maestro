@@ -17,6 +17,7 @@ import os
 from typing import Optional, Any
 
 from .schema import ProductionPlan, ShotPlan, RenderedPrompts
+from .h3_dialogue import reconcile_audio_plan_with_dialogue
 from .planners import MusicVideoPlanner, ShortFilmPlanner, PodcastPlanner, ViralVideoPlanner
 from .renderers import (
     LtxT2VRenderer, LtxI2VRenderer, LtxA2VRenderer,
@@ -310,6 +311,25 @@ class DirectorOrchestrator:
         has_reference: bool,
     ) -> str:
         """Auto-select the best render mode for a shot's video prompt."""
+        # The plan is not trusted over the shot itself. 104 of one project's 177
+        # clips were marked "ambient_only" while their prompt carried four spoken
+        # lines each, and the check below is the only thing that selects the
+        # audio-to-video path: their mouths were never driven by the voice track,
+        # and no prompt edit could bring the path back. Reconciled here rather
+        # than in the planner so every render, including one of a clip planned
+        # long ago, takes the path its dialogue asks for.
+        reconciled = reconcile_audio_plan_with_dialogue(
+            shot.audio_plan.to_dict(),
+            prompt=shot.video_prompt or "",
+            dialogue_beats=shot.dialogue_beats,
+        )
+        shot.audio_plan.mode = str(reconciled.get("mode") or shot.audio_plan.mode)
+        shot.audio_plan.lip_sync_critical = bool(
+            reconciled.get("lip_sync_critical", shot.audio_plan.lip_sync_critical)
+        )
+        shot.audio_plan.timing_anchor = str(
+            reconciled.get("timing_anchor") or shot.audio_plan.timing_anchor
+        )
         # Explicit preference takes priority
         if shot.source_mode_preference and shot.source_mode_preference != "image_gen":
             return shot.source_mode_preference
