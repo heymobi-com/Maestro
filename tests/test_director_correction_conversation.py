@@ -30,6 +30,8 @@ if _APP_DIR not in sys.path:
 
 from services import director_pipeline as pipeline  # noqa: E402
 from services.director.h3_dialogue import (  # noqa: E402
+    _build_stable_speaker_registry,
+    _speaker_registry_entry,
     compile_h3_clip_plans,
     diagnose_h3_clip_prompt,
     h3_dialogue_blocks,
@@ -793,6 +795,65 @@ class SavedPromptKeepsTheSpeechPlan(unittest.TestCase):
         )
         self.assertEqual(
             [beat["speaker_id"] for beat in beats], ["(S2)", "(S1)"],
+        )
+
+
+class SpeakerAliasesShareOneLabel(unittest.TestCase):
+    """One label per participant, not one per key.
+
+    A saved registry can carry a number per key: a two-person project stored
+    ``director_identity_s1 -> (S1)``, ``(s1) -> (S2)``, ``(s2) -> (S3)`` and
+    ``director_identity_s2 -> (S4)``. Every line then reached the model with the
+    next participant's face -- and because a beat whose key did not resolve was
+    numbered by its position in the shot, the third line of a 2-person shot
+    became ``(S3)``. Measured on one real project: 135 of its 177 clips had a
+    line bound to a speaker the cast does not contain.
+    """
+
+    CORRUPT = {
+        "director_identity_s1": {"stable_id": "(S1)", "speaker_name": "(S1)"},
+        "(s1)": {"stable_id": "(S2)", "speaker_name": "(S1)"},
+        "(s2)": {"stable_id": "(S3)", "speaker_name": "(S2)"},
+        "director_identity_s2": {"stable_id": "(S4)", "speaker_name": "(S2)"},
+    }
+
+    def _registry(self, beats, subjects):
+        return _build_stable_speaker_registry([{
+            "_director_dialogue_beats": beats,
+            "_director_subjects_on_screen": subjects,
+            "_director_speaker_registry": self.CORRUPT,
+        }])
+
+    def test_the_aliases_of_one_participant_collapse_to_one_label(self):
+        registry = self._registry([], [])
+
+        self.assertEqual(registry["director_identity_s1"]["stable_id"], "(S1)")
+        self.assertEqual(registry["(s1)"]["stable_id"], "(S1)")
+        self.assertEqual(registry["(s2)"]["stable_id"], "(S2)")
+        self.assertEqual(registry["director_identity_s2"]["stable_id"], "(S2)")
+
+    def test_every_beat_resolves_to_the_speaker_its_plan_named(self):
+        beats = [
+            {"spoken_text": "Hace unos dias me paso algo.", "speaker_id": "(S1)"},
+            {"spoken_text": "A ver, que te paso?", "speaker_id": "(S2)"},
+            {"spoken_text": "Pues tuve una crisis.", "speaker_id": "(S1)"},
+        ]
+
+        registry = self._registry(beats, [])
+
+        resolved = [
+            _speaker_registry_entry(registry, beat["speaker_id"])[0]
+            for beat in beats
+        ]
+        self.assertEqual(resolved, ["(S1)", "(S2)", "(S1)"])
+
+    def test_a_beat_key_that_spells_out_a_label_is_that_participant(self):
+        beats = [{"spoken_text": "Hola.", "speaker_id": "(s2)"}]
+
+        registry = self._registry(beats, [])
+
+        self.assertEqual(
+            _speaker_registry_entry(registry, "(s2)")[0], "(S2)",
         )
 
 

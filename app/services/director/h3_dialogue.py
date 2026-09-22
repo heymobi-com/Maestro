@@ -2768,66 +2768,109 @@ def _label_encoded_in_key(key: str) -> str:
 def _build_stable_speaker_registry(
     clip_plans: Sequence[Mapping[str, Any]],
 ) -> dict[str, dict[str, str]]:
-    """Assign speaker IDs once per Director project, not once per shot."""
+    """Assign one label per participant, not one per key.
+
+    A saved registry can carry a number per *key* instead of per person: a
+    two-person project stored ``director_identity_s1 -> (S1)``, ``(s1) -> (S2)``,
+    ``(s2) -> (S3)`` and ``director_identity_s2 -> (S4)``. Every line then reached
+    the model with the next participant's face: a beat whose plan said ``(S1)``
+    was rendered as ``(S2)``, and a shot whose third line bound to ``(s2)``
+    invented an ``(S3)`` nobody plays. Measured on one project: 135 of its 177
+    clips had a line bound to a speaker the cast does not contain.
+
+    Keys are therefore grouped into the participant they belong to -- through the
+    label a key spells out, or through the subject rows -- and every key of that
+    participant shares its label. A registry compiled before this rule keeps its
+    participants: only the aliases of one person are collapsed.
+    """
+
+    existing: dict[str, dict[str, str]] = {}
+    all_subjects: list[Any] = []
+    keys: list[str] = []
+
+    def remember(raw_key: Any) -> None:
+        key = _normalized_space(raw_key).casefold()
+        if key and key not in keys:
+            keys.append(key)
+
+    # First-speaking order decides the numbers: the participant who speaks first
+    # in the project is (S1), which is how the UI and the audio analysis number
+    # them too. Reading the cast rows first would renumber a project whose rows
+    # simply arrive in a different order in a later shot.
+    for plan in clip_plans:
+        for beat in plan.get("_director_dialogue_beats") or []:
+            remember(_field(beat, "speaker_id", ""))
+    for plan in clip_plans:
+        for subject in plan.get("_director_subjects_on_screen") or []:
+            all_subjects.append(subject)
+            remember(_field(subject, "character_id", ""))
+            remember(_field(subject, "speaker_name", ""))
+        saved = plan.get("_director_speaker_registry") or {}
+        if isinstance(saved, Mapping):
+            for raw_key in saved:
+                key = _normalized_space(raw_key).casefold()
+                entry = _speaker_registry_entry(saved, str(raw_key))
+                if key and entry and entry[0]:
+                    existing[key] = {"stable_id": entry[0], "speaker_name": entry[1]}
+                remember(raw_key)
+
+    def identity_of(key: str) -> str:
+        """The participant a key belongs to, as a label when one exists."""
+
+        encoded = _label_encoded_in_key(key)
+        if encoded:
+            return encoded.upper()
+        known = _speaker_label_for_identity(all_subjects, key)
+        if known:
+            return known.upper()
+        return key
+
+    groups: dict[str, list[str]] = {}
+    for key in keys:
+        groups.setdefault(identity_of(key), []).append(key)
 
     registry: dict[str, dict[str, str]] = {}
     used_numbers: set[int] = set()
-    for plan in clip_plans:
-        existing = plan.get("_director_speaker_registry") or {}
-        if not isinstance(existing, Mapping):
-            continue
-        for raw_key, raw_value in existing.items():
-            key = _normalized_space(raw_key).casefold()
-            entry = _speaker_registry_entry(existing, str(raw_key))
-            if not key or not entry or not entry[0]:
-                continue
-            match = re.fullmatch(r"\(S(\d+)\)", entry[0], re.IGNORECASE)
-            if not match:
-                continue
-            used_numbers.add(int(match.group(1)))
+    for identity, group in groups.items():
+        encoded = _label_encoded_in_key(identity)
+        stable_id = encoded.upper() if encoded else ""
+        if not stable_id:
+            # An opaque key: keep the number a saved registry already gave it,
+            # so a project's existing cast is not renumbered.
+            for key in group:
+                candidate = str(existing.get(key, {}).get("stable_id") or "")
+                if re.fullmatch(r"\(S\d+\)", candidate, re.IGNORECASE):
+                    stable_id = candidate.upper()
+                    break
+        if stable_id:
+            match = re.fullmatch(r"\(S(\d+)\)", stable_id, re.IGNORECASE)
+            if match:
+                used_numbers.add(int(match.group(1)))
+        for key in group:
             registry[key] = {
-                "stable_id": f"(S{int(match.group(1))})",
-                "speaker_name": entry[1],
+                "stable_id": stable_id,
+                "speaker_name": (
+                    _normalized_space(_subject_name_for_key(all_subjects, key))
+                    if _subject_name_for_key(all_subjects, key) != key
+                    else ""
+                )
+                or str(existing.get(key, {}).get("speaker_name") or ""),
             }
 
     next_number = 1
-    for plan in clip_plans:
-        subjects = plan.get("_director_subjects_on_screen") or []
-        for beat in plan.get("_director_dialogue_beats") or []:
-            raw_key = _normalized_space(_field(beat, "speaker_id", ""))
-            name = _subject_name_for_key(subjects, raw_key)
-            key = (raw_key or name).casefold()
-            if not key or key in registry:
-                continue
-            # A beat's speaker_id is often the character's identity id
-            # ("director_identity_valeria") rather than a label, and the person
-            # already has a label in their own subject row. Resolve through that
-            # instead of minting a number: minting one per identity id gave every
-            # participant a second name, so a project whose audio analysis
-            # detected two speakers compiled prompts containing S1..S5 and
-            # <Subject 3>/<Subject 4> -- a phantom cast the planner never wrote.
-            known_label = _speaker_label_for_identity(subjects, key)
-            if known_label:
-                registry[key] = {"stable_id": known_label, "speaker_name": name}
-                continue
-            # Before minting anything: a key that already spells out a label is
-            # that participant, not a new one. This runs after the subject-row
-            # lookup so a row's own label always wins.
-            encoded = _label_encoded_in_key(raw_key or name)
-            if encoded:
-                registry[key] = {"stable_id": encoded, "speaker_name": name}
-                continue
-            while next_number in used_numbers:
-                next_number += 1
-            registry[key] = {
-                "stable_id": f"(S{next_number})",
-                "speaker_name": name,
-            }
-            used_numbers.add(next_number)
+    for key in keys:
+        entry = registry[key]
+        if entry["stable_id"]:
+            continue
+        while next_number in used_numbers:
             next_number += 1
-    # Existing saved projects may carry a registry compiled before a later
-    # shot supplied the character's complete canonical name. The project-wide
-    # subject ledger above is authoritative for labels while stable IDs remain.
+        entry["stable_id"] = f"(S{next_number})"
+        used_numbers.add(next_number)
+        next_number += 1
+        # Every alias of this participant now shares one label.
+        for alias in groups[identity_of(key)]:
+            registry[alias] = dict(entry)
+
     for plan in clip_plans:
         for subject in plan.get("_director_subjects_on_screen") or []:
             character_id = _normalized_space(_field(subject, "character_id", ""))
@@ -3059,7 +3102,22 @@ def _compile_official_dialogue(
             stable_id, speaker_name = entry
         else:
             speaker_name = _subject_name_for_key(subjects, speaker_key)
-            stable_id = f"(S{len(valid_beats) + 1})"
+            # Never mint a number from the line's position: that is how the
+            # third line of a two-person shot became "(S3)" and how a podcast
+            # reached "(S9)". A beat's key usually spells out the participant
+            # it belongs to ("(s2)", "director_identity_s2"), and the subject
+            # rows name the rest, so resolve through those instead.
+            stable_id = _label_encoded_in_key(speaker_key)
+            if not stable_id:
+                stable_id = _speaker_label_for_identity(subjects, speaker_key)
+            if not stable_id:
+                # Say it where the log is read. A line with no resolvable
+                # speaker is a planning defect, not something to guess at.
+                print(
+                    "[MiniMax H3] A spoken line has no resolvable speaker "
+                    f"(speaker key {speaker_key!r}); it is left unnamed instead "
+                    "of being numbered by its position in the shot."
+                )
         valid_beats.append({
             "words": normalize_h3_text(words),
             "tag": h3_dialogue_tag(spoken, default_language),
