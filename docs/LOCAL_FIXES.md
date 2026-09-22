@@ -70,6 +70,44 @@ hundred KB). Bundles stack: applying a second bundle to an install that already 
 first is a fast-forward, and each one keeps its history, so upstream Updates continue to
 merge normally.
 
+## Shipping fixes through a fork
+
+The bundle above needs a file transfer and a terminal on the receiving machine. A fork
+removes both: the receiving install pulls the fixes with the Update button it already has,
+and Pinokio supplies git and npm from its own folder, so that machine needs neither
+installed.
+
+Setup, once, from the repository that holds the fixes:
+
+```
+git remote add fork https://github.com/<owner>/Maestro.git
+git push fork main
+```
+
+Every delivery after that is the same push: merge upstream into `main` here, then
+`git push fork main`. On the receiving machine, Update does the rest — it sees new commits,
+so it takes its build path and rebuilds the interface, which is exactly what a bundle has to
+force by hand.
+
+### Pointing an existing install at the fork without a terminal
+
+Replace that install's `install.js` with the drop-in in `dist/drop-in/`. It does three
+things and then gets out of the way:
+
+1. `git remote set-url origin <fork>`, so every future Update pulls the fixes.
+2. Restores the real installer with `git checkout -- install.js`, leaving the working tree
+   clean and the Install button normal again.
+3. Asks the user to press Update.
+
+Why `install.js` and not `pinokio.js`: the Install button exists in every Maestro version,
+so the drop-in cannot break a menu whose shape depends on the version installed, and the
+pull and the interface build are left to that machine's own `update.js`. It also sets a
+repo-local git identity when none exists, because a merge commit needs an author and an
+install that has only ever fast-forwarded may never have needed one.
+
+The drop-in is generated per fork: the fork URL is substituted into it, so it is not
+committed. `dist/` is ignored by git.
+
 ## What it does not touch
 
 - No environment is created or reinstalled, and no model or component is downloaded. The
@@ -77,8 +115,9 @@ merge normally.
   left exactly as they are.
 - No project or render output is modified. Projects live in `app/outputs/`, which is not
   part of the repository.
-- Nothing is pushed anywhere. The bundle is fetched into a local branch named
-  `maestro-local-fixes` and merged into `main`; the `origin` remote is untouched.
+- The bundle path pushes nothing anywhere: it is fetched into a local branch named
+  `maestro-local-fixes` and merged into `main`, leaving the `origin` remote alone. The fork
+  path is the opposite by design — pushing to the fork is how the fixes travel.
 
 ## Consequences
 
