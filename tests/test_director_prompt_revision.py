@@ -243,6 +243,35 @@ class PromptComparisonTests(unittest.TestCase):
         self.assertIn("leftTokens[leftEnd - 1] === rightTokens[rightEnd - 1]", self.diff)
         self.assertIn("MAX_CELLS", self.diff)
 
+    def test_the_comparison_opens_on_the_changes_not_the_whole_prompt(self):
+        # Measured on a real shot: changing one word marks 0.1% of 6,184
+        # characters, and the six fields repeat verbatim in every shot. Two columns
+        # of near-identical text with one marked word in them is a hunt, not a
+        # comparison, so the window opens on the change regions.
+        self.assertIn("const [showAll, setShowAll] = useState(false)", self.view)
+        self.assertIn("const pruned = !showAll && diff.regions.length > 0", self.view)
+        self.assertIn("Solo cambios", self.view)
+        self.assertIn("Todo el prompt", self.view)
+
+    def test_each_change_says_which_field_it_lands_in(self):
+        self.assertIn("region.field", self.view)
+        self.assertIn("en ${region.field}", self.view)
+        # Labelled from the first CHANGED token, not from the start of the context
+        # window: that one opens up to sixteen words earlier and can sit in the
+        # previous field, which labelled a change in detailed_description as one in
+        # retention_analysis.
+        self.assertIn("fieldAt(original, columns.leftOffset[first])", self.diff)
+        self.assertIn("H3_FIELDS", self.diff)
+        # The field list is explicit because the body has lines such as
+        # "Dialogue: <d>..." which are not fields.
+        self.assertIn("retention_analysis", self.diff)
+
+    def test_the_unchanged_context_around_a_change_is_trimmed(self):
+        self.assertIn("CONTEXT_TOKENS", self.diff)
+        self.assertIn("MERGE_GAP", self.diff)
+        self.assertIn("truncatedBefore: from > 0", self.diff)
+        self.assertIn("truncatedAfter: to < aligned.length", self.diff)
+
     def test_nothing_reaches_the_editor_until_it_is_applied(self):
         self.assertIn("const applyProposal = () => {", self.dashboard)
         self.assertIn(
