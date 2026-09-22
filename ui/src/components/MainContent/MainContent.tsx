@@ -4,6 +4,7 @@ import { Film, Play, Square, FolderOpen, Plus, Check, Loader2, X, BookMarked, Up
 import { TabFilter } from './TabFilter'
 import { ThumbnailGallery } from './ThumbnailGallery'
 import { MediaFeedItem } from './MediaFeedItem'
+import { PlanProgressCard } from './PlanProgressCard'
 import { GlobalQueuePopover } from '../GlobalQueuePopover'
 import { useStore } from '../../stores/useStore'
 import { useIsMobile } from '../../lib/useIsMobile'
@@ -922,6 +923,7 @@ export function MainContent() {
         >
           {/* Pipeline + Job placeholders at top (not virtualized — small count) */}
           <div className="space-y-3 mb-3">
+            <PlanProgressCard />
             <PipelinePlaceholder />
             {galleryJobs.map((j, i) => (
               <JobPlaceholder

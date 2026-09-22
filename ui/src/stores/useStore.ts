@@ -77,6 +77,20 @@ function _saveStudioVideoRoutePreferences(preferences: StudioVideoRoutePreferenc
   } catch { /* private browsing or blocked storage */ }
 }
 
+function _normalizeDirectorSpeakerId(value: string | null | undefined): string {
+  const text = (value ?? '').toString().trim()
+  if (!text) return '(S1)'
+  const upper = text.toUpperCase()
+  if (upper.startsWith('(S') && upper.endsWith(')')) return text
+  if (upper.startsWith('SPEAKER_') || upper.startsWith('SPEAKER')) {
+    const match = /\d+/.exec(text)
+    const speakerIndex = match ? Number(match[0]) + 1 : 1
+    return `(S${speakerIndex})`
+  }
+  if (/^S\d+$/i.test(text)) return `(${text})`
+  return text
+}
+
 const _initialStudioVideoRoutePreferences = _loadStudioVideoRoutePreferences()
 
 function _adaptiveEtaJobFields(status: api.ApiJobStatus): Partial<GenerationJob> {
@@ -9939,18 +9953,20 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   directorSetSpeakerMapping: (speakerId, name, role) => {
+    const normalizedSpeakerId = _normalizeDirectorSpeakerId(speakerId)
     set(s => ({
       directorSpeakerMappings: s.directorSpeakerMappings.map(m =>
-        m.speakerId === speakerId ? { ...m, name, role } : m
+        m.speakerId === speakerId || m.speakerId === normalizedSpeakerId ? { ...m, speakerId: normalizedSpeakerId, name, role } : m
       ),
     }))
   },
 
   directorInsertSpeakerMention: (speakerId) => {
+    const normalizedSpeakerId = _normalizeDirectorSpeakerId(speakerId)
     set(s => ({
       directorSceneDescription: s.directorSceneDescription
-        ? `${s.directorSceneDescription} @${speakerId}`
-        : `@${speakerId}`,
+        ? `${s.directorSceneDescription} @${normalizedSpeakerId}`
+        : `@${normalizedSpeakerId}`,
     }))
   },
 
@@ -10056,20 +10072,24 @@ export const useStore = create<AppState>((set, get) => ({
 
       set({ directorAnalysis: analysis })
 
-      // Extract unique speakers from diarized lyrics
+      // Extract unique speakers from diarized lyrics and normalize to stable
+      // Maestro/H3 labels so the UI never shows the raw pyannote IDs.
       const speakers: string[] = []
       if (analysis.lyrics) {
         const seen = new Set<string>()
         for (const seg of analysis.lyrics) {
-          if (seg.speaker && !seen.has(seg.speaker)) {
-            seen.add(seg.speaker)
-            speakers.push(seg.speaker)
+          const speakerId = _normalizeDirectorSpeakerId(seg.speaker)
+          if (!seen.has(speakerId)) {
+            seen.add(speakerId)
+            speakers.push(speakerId)
           }
         }
       }
       const speakerMappings: SpeakerMapping[] = speakers.map(s => ({
         speakerId: s,
-        name: '',
+        // Pre-fill from the pitch this same analysis measured, so the user
+        // never has to run diarization again just to name the voices.
+        name: analysis.voice_profiles?.[s]?.gender || '',
         role: '' as const,
       }))
       set({ directorSpeakers: speakers, directorSpeakerMappings: speakerMappings })
@@ -10423,6 +10443,12 @@ export const useStore = create<AppState>((set, get) => ({
           speaker_mappings: Object.keys(speakerMappings).length > 0 ? speakerMappings : undefined,
           prompt_type: promptType,
         })
+        if (result.cancelled) {
+          // Stop pressed on the planning card is a state, not a failure: bail out
+          // before this pass's empty result replaces the plans under review.
+          set({ directorLoading: false, directorError: null })
+          return
+        }
         plans = result.clip_plans
         timeline = result.planned_clips || timeline
       } else {
@@ -10886,14 +10912,17 @@ export const useStore = create<AppState>((set, get) => ({
 
       set({ directorAnalysis: analysis })
 
-      // Extract unique speakers from diarized lyrics
+      // Extract unique speakers from diarized lyrics and normalize to the
+      // stable Maestro/H3 labels used throughout the app. This prevents the
+      // raw pyannote speaker_00 / speaker_01 values from surfacing in the UI.
       const speakers: string[] = []
       if (analysis.lyrics) {
         const seen = new Set<string>()
         for (const seg of analysis.lyrics) {
-          if (seg.speaker && !seen.has(seg.speaker)) {
-            seen.add(seg.speaker)
-            speakers.push(seg.speaker)
+          const speakerId = _normalizeDirectorSpeakerId(seg.speaker)
+          if (!seen.has(speakerId)) {
+            seen.add(speakerId)
+            speakers.push(speakerId)
           }
         }
       }
@@ -10990,6 +11019,12 @@ export const useStore = create<AppState>((set, get) => ({
           characters: shortFilmCharacters.length > 0 ? shortFilmCharacters : undefined,
           prompt_type: promptType,
         })
+        if (result.cancelled) {
+          // Stop pressed on the planning card is a state, not a failure: bail out
+          // before this pass's empty result replaces the plans under review.
+          set({ directorLoading: false, directorError: null })
+          return
+        }
         plans = result.clip_plans.map(p => ({
           video_prompt: p.video_prompt || '',
           image_prompt: p.image_prompt || '',
@@ -11116,6 +11151,12 @@ export const useStore = create<AppState>((set, get) => ({
           frames_minimum: get().modelOptions?.frames_minimum ?? 5,
           prompt_type: promptType,
         })
+        if (result.cancelled) {
+          // Stop pressed on the planning card is a state, not a failure: bail out
+          // before this pass's empty result replaces the plans under review.
+          set({ directorLoading: false, directorError: null })
+          return
+        }
         plans = result.clip_plans.map(p => ({
           video_prompt: p.video_prompt || '',
           image_prompt: p.image_prompt || '',
@@ -12966,6 +13007,22 @@ export const useStore = create<AppState>((set, get) => ({
     // Await the (now async, self-healing) settings load before generating, so a
     // slow on-demand metadata fetch can't let the reroll fire with stale params.
     await get().loadSettingsFromOutput()
+    // That load aborts without a word when the sidecar carries no params, and
+    // for a Director clip it opens the Director project instead of applying
+    // Studio settings. Firing a Studio generation anyway is what made this
+    // action look like it did nothing, so say why instead of staying silent.
+    const meta = get().selectedOutputMeta
+    if (meta?.director_pipeline_id) {
+      throw new Error(
+        'This clip belongs to a Director pipeline. Regenerate it from the clip '
+        + 'actions or the Director Dashboard so it keeps its place in the film.',
+      )
+    }
+    if (!meta?.params) {
+      throw new Error(
+        'This file carries no saved settings, so there is nothing to regenerate.',
+      )
+    }
     // Small delay to let state settle, then generate
     setTimeout(() => get().startGeneration(), 100)
   },
@@ -12988,7 +13045,18 @@ export const useStore = create<AppState>((set, get) => ({
     if (!output) return
 
     try {
-      await api.deleteOutput(output.name, output.workspace)
+      try {
+        await api.deleteOutput(output.name, output.workspace)
+      } catch (e) {
+        // The server refuses to remove the take a Director shot is using. Ask
+        // before breaking the film: this used to be the silent step that left a
+        // slot pointing at a file that no longer existed, and the rejoin then
+        // refused the whole run.
+        const message = e instanceof Error ? e.message : String(e)
+        if (!/is using for shot/.test(message)) throw e
+        if (!window.confirm(message)) return
+        await api.deleteOutput(output.name, output.workspace, true)
+      }
       // Remove from local state
       const allOutputs = get().outputs.filter(o => outputIdentity(o) !== outputIdentity(output))
       const newIdx = Math.min(idx, Math.max(0, allOutputs.length - 1))

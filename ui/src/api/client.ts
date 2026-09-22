@@ -775,9 +775,18 @@ export async function fetchOutputMetadata(name: string, workspace?: string): Pro
   throw lastErr  // all attempts failed — loadOutputMetadata's catch sets meta null
 }
 
-export async function deleteOutput(name: string, workspace?: string): Promise<void> {
-  const res = await fetch(`${BASE}/api/v1/outputs/${encodeURIComponent(name)}${workspaceQuery(workspace)}`, { method: 'DELETE' })
-  if (!res.ok) throw new Error('Failed to delete output')
+export async function deleteOutput(name: string, workspace?: string, force = false): Promise<void> {
+  const params = new URLSearchParams()
+  if (workspace) params.set('workspace', workspace)
+  if (force) params.set('force', 'true')
+  const query = params.toString() ? `?${params}` : ''
+  const res = await fetch(`${BASE}/api/v1/outputs/${encodeURIComponent(name)}${query}`, { method: 'DELETE' })
+  if (!res.ok) {
+    // The server refuses when this file is the take a Director shot is using,
+    // and says which shot. Surface that instead of a generic failure.
+    const err = await res.json().catch(() => ({ detail: 'Failed to delete output' }))
+    throw new Error(err.detail || err.error || 'Failed to delete output')
+  }
 }
 
 export async function rejoinClips(groupId: string, audioFile?: string, workspace?: string): Promise<{ filename: string; clip_count: number }> {
@@ -1102,6 +1111,23 @@ export async function updateClipPrompt(pid: string, clipIndex: number, update: {
   }
 }
 
+/**
+ * Ask the LLM to rewrite one shot's prompt from a plain-language correction.
+ * Returns the revised text for review; nothing is saved until the user saves.
+ */
+export async function reviseClipPrompt(pid: string, clipIndex: number, instruction: string, prompt?: string): Promise<{ clip_index: number; video_prompt: string }> {
+  const res = await fetch(`${BASE}/api/v1/director/pipelines/${encodeURIComponent(pid)}/clips/${clipIndex}/revise-prompt`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ instruction, prompt: prompt || undefined }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Could not revise the prompt' }))
+    throw new Error(err.error || err.detail || 'Could not revise the prompt')
+  }
+  return res.json()
+}
+
 export async function startPipelineRepair(pid: string): Promise<{
   pipeline_id: string
   repair: import('../types').PipelineRepairState
@@ -1240,8 +1266,51 @@ export interface DirectorV2PlanRequest extends DirectorTimelineOptions {
 export interface DirectorV2PlanResponse {
   clip_plans: import('../types').ClipPlan[]
   planned_clips?: import('../types').PlannedClip[]
-  production_plan: ProductionPlan
+  production_plan: ProductionPlan | null
   skill_type: string
+  /** True when the user stopped the pass with the main-screen Stop button. */
+  cancelled?: boolean
+}
+
+export interface DirectorPlanOperation {
+  id: string
+  kind: string
+  label: string
+  stage: string
+  message: string
+  current: number
+  total: number
+  cancelling: boolean
+  elapsed_seconds: number
+  updated_at: number
+}
+
+/**
+ * Read the interactive planning pass that is running right now.
+ *
+ * A long timeline is planned in batches that can take ten minutes. Before this
+ * existed the only sign of progress was the planner's raw text output, so a
+ * reloaded window could not tell that anything was happening at all, let alone
+ * offer a way to stop it.
+ */
+export async function fetchDirectorPlanOperation(): Promise<DirectorPlanOperation | null> {
+  const res = await fetch(`${BASE}/api/v1/director/plan-operation`, { cache: 'no-store' })
+  if (!res.ok) throw new Error('Could not read the Director planning status')
+  const data = await res.json().catch(() => null)
+  return data && data.id ? (data as DirectorPlanOperation) : null
+}
+
+/** Ask the running planning pass to stop after the batch it is planning now. */
+export async function cancelDirectorPlanOperation(operationId: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/v1/director/plan-operation/cancel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ operation_id: operationId }),
+  })
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: 'Could not stop the planning pass' }))
+    throw new Error(detail.detail || 'Could not stop the planning pass')
+  }
 }
 
 export async function directorV2Plan(params: DirectorV2PlanRequest): Promise<DirectorV2PlanResponse> {
@@ -2236,6 +2305,8 @@ export async function analyzeAudio(params: {
   }
   return res.json()
 }
+
+export type DirectorVoiceProfile = import('../types').VoiceProfile
 
 /** Read live progress of the in-flight audio analyze call. Backed by
  *  audio_analysis._PROGRESS — updated at each phase boundary in the

@@ -78,6 +78,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const setSelectedOutput = useStore(s => s.setSelectedOutput)
   const loadSettingsFromOutput = useStore(s => s.loadSettingsFromOutput)
   const rerollGeneration = useStore(s => s.rerollGeneration)
+  const rerunClipVideo = useStore(s => s.rerunClipVideo)
   const deleteOutput = useStore(s => s.deleteSelectedOutput)
   const rejoinClipGroup = useStore(s => s.rejoinClipGroup)
   const toggleFavorite = useStore(s => s.toggleFavorite)
@@ -115,6 +116,8 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const [copied, setCopied] = useState(false)
   const [copiedOriginalPrompt, setCopiedOriginalPrompt] = useState(false)
   const [rejoining, setRejoining] = useState(false)
+  const [rerolling, setRerolling] = useState(false)
+  const [rerollError, setRerollError] = useState<string | null>(null)
   const [sentToInput, setSentToInput] = useState(false)
   const [showActionMenu, setShowActionMenu] = useState(false)
   const [actionMenuOpensDown, setActionMenuOpensDown] = useState(false)
@@ -373,10 +376,30 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     setTimeout(() => loadSettingsFromOutput(), 50)
   }, [index, setSelectedOutput, loadSettingsFromOutput])
 
-  const handleReroll = useCallback(() => {
+  const handleReroll = useCallback(async () => {
     setSelectedOutput(index)
-    setTimeout(() => rerollGeneration(), 50)
-  }, [index, setSelectedOutput, rerollGeneration])
+    setRerollError(null)
+    // A Director clip belongs to a pipeline, so regenerate it through the
+    // pipeline's per-clip rerun and it is replaced in its own position. The
+    // Studio reroll only restores Studio settings: for a Director output it
+    // loaded the Director project and then fired a Studio generation with
+    // whatever params the sidebar happened to hold, which is why the action
+    // looked like it did nothing.
+    const directorPid = meta?.director_pipeline_id
+    const directorClipIndex = meta?.director_clip_index
+    setRerolling(true)
+    try {
+      if (directorPid && typeof directorClipIndex === 'number') {
+        await rerunClipVideo(directorPid, directorClipIndex)
+      } else {
+        await rerollGeneration()
+      }
+    } catch (e) {
+      setRerollError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setRerolling(false)
+    }
+  }, [index, meta, setSelectedOutput, rerunClipVideo, rerollGeneration])
 
   const copyPromptText = (
     text: string,
@@ -682,6 +705,16 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
                 {clipIndex != null && clipTotal != null && (
                   <span className="text-accent-blue"> &middot; clip {clipIndex + 1}/{clipTotal}</span>
                 )}
+                {typeof meta?.director_clip_index === 'number' && (
+                  <span className="text-text-muted"> &middot; shot {meta.director_clip_index + 1}</span>
+                )}
+                {/* A regenerated take sits directly above the one it replaces, so
+                    say which is which: both carry the same shot number. */}
+                {meta?.director_supersedes && (
+                  <span className="text-accent-blue" title={`Replaces ${meta.director_supersedes}`}>
+                    {' '}&middot; new take
+                  </span>
+                )}
               </div>
               {cardPrompt && (
                 <div className="text-[11px] text-text-muted truncate mt-0.5" title={cardPrompt}>
@@ -707,6 +740,24 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
             title={`Open ${file.workspace}`}
             onClick={event => { event.stopPropagation(); void switchWorkspace(file.workspace!) }}
           >{file.workspace}</button>
+        )}
+
+        {/* Regeneration feedback. The action menu closes on click, so progress
+            and failures have to live on the card, or the action looks like it
+            did nothing at all. */}
+        {rerolling && (
+          <span className="flex shrink-0 items-center gap-1 rounded bg-accent-blue/15 px-1.5 py-0.5 text-[10px] text-accent-blue">
+            <Loader2 size={10} className="animate-spin" />
+            Regenerating
+          </span>
+        )}
+        {rerollError && (
+          <span
+            className="max-w-[220px] shrink-0 truncate rounded bg-red-500/15 px-1.5 py-0.5 text-[10px] text-chip-red"
+            title={rerollError}
+          >
+            {rerollError}
+          </span>
         )}
 
         {/* Four persistent controls; secondary actions are labeled in More. */}
@@ -824,14 +875,15 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
               {params && (
                 <button
                   role="menuitem"
+                  disabled={rerolling}
                   onClick={() => {
                     setShowActionMenu(false)
-                    handleReroll()
+                    void handleReroll()
                   }}
-                  className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
+                  className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary disabled:opacity-50"
                 >
-                  <RefreshCw size={14} />
-                  <span>Regenerate with same settings</span>
+                  <RefreshCw size={14} className={rerolling ? 'animate-spin' : undefined} />
+                  <span>{rerolling ? 'Regenerating\u2026' : 'Regenerate with same settings'}</span>
                 </button>
               )}
               {params && file.type === 'video' && (

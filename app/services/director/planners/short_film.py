@@ -2666,7 +2666,9 @@ def _h3_planner_token_budget(target_duration: float) -> int:
     # its complete world, cast, blocking, audio, and prompt context. The prior
     # 200-token/second allowance hit its exact ceiling on a valid 90-second
     # plan and left the final object half-written.
-    return min(23000, max(12288, int(math.ceil(target_duration * 240))))
+    # Increased to 300 tokens/second (25% boost) and max 32000 to handle complex
+    # multi-act narratives with detailed blocking and dialogue coverage.
+    return min(32000, max(12288, int(math.ceil(target_duration * 300))))
 
 
 def _h3_dialogue_events(items: list[dict]) -> list[dict]:
@@ -6892,6 +6894,45 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
             for sid, info in speaker_mappings.items():
                 speaker_names[sid] = info.get("name", sid)
 
+        # The transcript carries raw pyannote ids (SPEAKER_00) while the user's
+        # mapping is keyed by the stable labels ((S1)). Looking the raw id up
+        # against the mapping therefore always missed, so the planner sent the
+        # model opaque "SPEAKER_00" tokens with no cast binding. The model then
+        # invented its own speaker numbering and omitted speaker_id on most
+        # beats. Resolve raw ids to the canonical labels before building any
+        # context, and hand the model the closed cast vocabulary up front.
+        from ..speaker_binding import (
+            SPEAKER_LABEL_RULES,
+            cast_vocabulary,
+            format_speaker,
+            speaker_cast_block,
+            speaker_label_order,
+        )
+        from ..voice_gender import declared_gender_for_labels
+
+        raw_to_label = speaker_label_order(lyrics)
+        vocabulary = cast_vocabulary(speaker_mappings, lyrics)
+        cast_genders = declared_gender_for_labels(
+            story_description,
+            [{"speakerId": label, "name": name} for label, name in vocabulary.items()],
+            sorted(vocabulary),
+        )
+        cast_block = speaker_cast_block(vocabulary, cast_genders)
+        cast_section = (
+            "CANONICAL SPEAKER CAST — the complete and closed set of speakers "
+            f"for this project:\n{cast_block}\n\n{SPEAKER_LABEL_RULES}\n\n"
+            if cast_block else ""
+        )
+
+        def speaker_display(raw_speaker) -> str:
+            """Render one transcript speaker as '(Sx) Name' consistently."""
+
+            label = raw_to_label.get(str(raw_speaker or "").strip().upper(), "")
+            if label:
+                return format_speaker(label, vocabulary.get(label))
+            name = speaker_names.get(raw_speaker)
+            return str(name or raw_speaker or "")
+
         # Build clip contexts
         clip_contexts = []
         for i, clip in enumerate(clips):
@@ -6909,7 +6950,7 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
                         spk = l.get("speaker", "")
                         text = l.get("text", "")
                         if text.strip():
-                            spk_name = speaker_names.get(spk, spk) if spk else ""
+                            spk_name = speaker_display(spk)
                             dialogue_lines.append(f'{spk_name}: "{text}"' if spk_name else f'"{text}"')
                             if spk:
                                 speakers_in_clip.add(spk)
@@ -6917,7 +6958,7 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
             # Characters on screen
             char_info = ""
             if speakers_in_clip and char_profiles:
-                on_screen = [speaker_names.get(s, s) for s in speakers_in_clip]
+                on_screen = [speaker_display(s) for s in speakers_in_clip]
                 char_info = f" On screen: {', '.join(on_screen)}."
 
             dialogue_text = ""
@@ -6935,7 +6976,7 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
                 spk = l.get("speaker", "")
                 text = l.get("text", "")
                 if text.strip():
-                    spk_name = speaker_names.get(spk, spk) if spk else ""
+                    spk_name = speaker_display(spk)
                     t_start = l.get("start", 0)
                     t_end = l.get("end", 0)
                     prefix = f"[{t_start:.1f}-{t_end:.1f}s] {spk_name}: " if spk_name else f"[{t_start:.1f}-{t_end:.1f}s] "
@@ -7030,7 +7071,7 @@ character actions, and facial expressions that bring the audio to life.
 FULL DIALOGUE TRANSCRIPT:
 {full_transcript if full_transcript else "(no transcript available)"}
 
-STORY CONCEPT: {story_description}
+{cast_section}STORY CONCEPT: {story_description}
 
 Plan each shot as a structured scene — deciding visuals, camera, action, mood,
 and how dialogue is staged. Write a DETAILED {"video_prompt and image_prompt" if uses_generated_images else "video_prompt"} for each shot.

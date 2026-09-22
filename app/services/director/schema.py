@@ -189,8 +189,17 @@ class DialogueBeat:
         # contract truthful so downstream prompt formatters and validators do
         # not discover a None value hours later during final plan assembly.
         d = d if isinstance(d, dict) else {}
+        spoken = str(d.get("spoken_text") or "").strip()
+        if spoken:
+            # Normalize at the boundary that every planner beat crosses, so the
+            # H3 wrapper and any repeated speaker never reach the saved plan or
+            # the review UI. Imported lazily to keep schema free of a hard
+            # dependency on the prompt compiler.
+            from services.director.h3_dialogue import strip_dialogue_markup
+
+            spoken = strip_dialogue_markup(spoken)
         return DialogueBeat(
-            spoken_text=str(d.get("spoken_text") or "").strip(),
+            spoken_text=spoken,
             speaker_id=d.get("speaker_id"),
             delivery=d.get("delivery"),
             physical_cue=d.get("physical_cue"),

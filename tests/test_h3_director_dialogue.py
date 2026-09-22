@@ -15,6 +15,7 @@ if _APP_DIR not in sys.path:
 
 from services.director.h3_dialogue import (  # noqa: E402
     H3DialogueContractError,
+    _clean_h3_metadata,
     compile_h3_clip_plans,
     compile_h3_official_prompt,
     compile_h3_vocal_contract,
@@ -159,13 +160,139 @@ class TestH3DirectorDialogueCompiler(unittest.TestCase):
         self.assertNotIn("<d><d>", compiled)
         self.assertEqual(validate_h3_vocal_contract(compiled, self.beats[:1]), [])
 
-    def test_unbalanced_dialogue_is_rejected_before_generation(self):
+    def test_missing_tags_are_inserted_when_beat_words_are_not_in_prompt(self):
+        prompt = (
+            "A tense exchange unfolds in a small apartment kitchen. "
+            "overall_soundscape: Clinking dishes and a low refrigerator hum."
+        )
+        beats = [
+            {
+                "speaker_id": "joey",
+                "spoken_text": "I told you to stay home.",
+                "delivery": "urgent",
+            },
+            {
+                "speaker_id": "monica",
+                "spoken_text": "I am home, and I am not leaving.",
+                "delivery": "steady",
+            },
+        ]
+
+        compiled, _ = compile_h3_vocal_contract(prompt, self.subjects, beats)
+
+        self.assertEqual(compiled.count("<d>"), 2)
+        self.assertEqual(validate_h3_vocal_contract(compiled, beats), [])
+
+    def test_unbalanced_dialogue_is_salvaged_before_generation(self):
+        compiled, _ = compile_h3_vocal_contract(
+            "Joey says <d>[English] This never closes.",
+            self.subjects,
+            self.beats[:1],
+        )
+
+        self.assertEqual(compiled.count("<d>"), 1)
+        self.assertEqual(compiled.count("</d>"), 1)
+        self.assertIn(self.beats[0]["spoken_text"], compiled)
+        self.assertEqual(validate_h3_vocal_contract(compiled, self.beats[:1]), [])
+
+    def test_unterminated_block_keeps_its_words_without_metadata(self):
+        compiled, _ = compile_h3_vocal_contract(
+            "Monica turns away. DIALOGUE AND VOCAL PERFORMANCE: Monica says "
+            "<d>[English] I am done talking about this. "
+            "overall_soundscape: Quiet room tone.",
+            [],
+            [],
+        )
+
+        self.assertIn(
+            "<d>[English] I am done talking about this.</d>",
+            compiled,
+        )
+        self.assertEqual(compiled.count("<d>"), 1)
+        self.assertEqual(validate_h3_vocal_contract(compiled), [])
+
+    def test_stray_closing_tag_is_removed_without_losing_the_line(self):
+        compiled, _ = compile_h3_vocal_contract(
+            "Joey shrugs. </d> overall_soundscape: Cup clinks.",
+            self.subjects,
+            self.beats[:1],
+        )
+
+        self.assertEqual(compiled.count("<d>"), 1)
+        self.assertEqual(compiled.count("</d>"), 1)
+        self.assertIn(self.beats[0]["spoken_text"], compiled)
+        self.assertEqual(validate_h3_vocal_contract(compiled, self.beats[:1]), [])
+
+    def test_empty_dialogue_beat_is_still_rejected(self):
         with self.assertRaises(H3DialogueContractError):
             compile_h3_vocal_contract(
-                "Joey says <d>[English] This never closes.",
+                "Joey shrugs.",
                 self.subjects,
-                self.beats[:1],
+                [{"speaker_id": "joey", "spoken_text": "<d>[English] </d>"}],
             )
+
+    def test_leaked_dialogue_markup_in_delivery_is_removed(self):
+        beats = [{
+            "speaker_id": "joey",
+            "spoken_text": "It was rustic shepherd pie.",
+            "delivery": "The second part of s1: <d>completely invisible.</d>",
+        }]
+
+        compiled, _ = compile_h3_vocal_contract(
+            "Joey shrugs. overall_soundscape: Room tone.",
+            self.subjects,
+            beats,
+        )
+
+        self.assertEqual(compiled.count("<d>"), 1)
+        self.assertEqual(compiled.count("</d>"), 1)
+        self.assertNotIn("completely invisible", compiled)
+        self.assertEqual(validate_h3_vocal_contract(compiled, beats), [])
+
+    def test_leaked_reasoning_in_physical_cue_is_removed(self):
+        beats = [{
+            "speaker_id": "joey",
+            "spoken_text": "It was rustic shepherd pie.",
+            "physical_cue": "he shrugs <d>and the planner keeps talking</d>",
+        }]
+
+        compiled, _ = compile_h3_vocal_contract(
+            "Joey shrugs. overall_soundscape: Room tone.",
+            self.subjects,
+            beats,
+        )
+
+        self.assertEqual(compiled.count("<d>"), 1)
+        self.assertEqual(validate_h3_vocal_contract(compiled, beats), [])
+
+    def test_leaked_reasoning_in_speaker_id_cannot_break_the_prompt(self):
+        beats = [{
+            "speaker_id": (
+                "}, // Note: split between windows if needed but the text "
+                "belongs to S1. Let's map it as one segment and assign "
+                "speaker IDs correctly."
+            ),
+            "spoken_text": "It was rustic shepherd pie.",
+            "delivery": "sharp",
+        }]
+
+        compiled, _ = compile_h3_vocal_contract(
+            "Joey shrugs. overall_soundscape: Room tone.",
+            self.subjects,
+            beats,
+        )
+
+        self.assertEqual(compiled.count("<d>"), 1)
+        self.assertEqual(validate_h3_vocal_contract(compiled, beats), [])
+
+    def test_metadata_cleaner_caps_leaked_reasoning(self):
+        cleaned = _clean_h3_metadata(
+            "note: " + ("reasoning " * 60) + "<d>a leaked line</d>",
+        )
+
+        self.assertLessEqual(len(cleaned), 163)
+        self.assertNotIn("<d>", cleaned)
+        self.assertNotIn("a leaked line", cleaned)
 
     def test_music_driven_prompt_discards_unbalanced_generated_dialogue(self):
         compiled, contract = compile_h3_official_prompt(
@@ -250,6 +377,25 @@ class TestH3DirectorDialogueCompiler(unittest.TestCase):
         self.assertIn(self.beats[0]["spoken_text"], plans[0]["video_prompt"])
         self.assertEqual(plans[0]["video_prompt"].count("<d>"), 1)
         self.assertNotIn("cafe chatter", plans[0]["video_prompt"].lower())
+
+    def test_render_recompile_repairs_unbalanced_source_prompt(self):
+        plans = [{
+            "video_prompt": (
+                "Joey points at the open door while Monica sets down the "
+                "groceries. overall_soundscape: Kitchen room tone."
+            ) + " Joey says <d>[English] the door never closed",
+            "_director_subjects_on_screen": self.subjects,
+            "_director_dialogue_beats": self.beats,
+        }]
+
+        compile_h3_clip_plans(plans)
+
+        prompt = plans[0]["video_prompt"]
+        self.assertEqual(prompt.count("<d>"), len(self.beats))
+        self.assertEqual(prompt.count("</d>"), len(self.beats))
+        for beat in self.beats:
+            self.assertIn(beat["spoken_text"], prompt)
+        self.assertEqual(validate_h3_vocal_contract(prompt, self.beats), [])
 
     def test_long_visual_plan_keeps_dialogue_inside_h3_text_limit(self):
         spoken = "You float all day. Save the cape for church."
@@ -661,6 +807,91 @@ class TestH3DirectorDialogueCompiler(unittest.TestCase):
             ),
             [],
         )
+
+    def test_subject_definitions_use_the_planners_own_subject_numbering(self):
+        """A shot that lists <Subject 2> first must not relabel the two people.
+
+        The short-film planner emits ``subjects_on_screen`` rows whose only
+        fields are ``visual_description`` and ``position_or_relation``, and it
+        names each participant inline. Those rows are not ordered by Subject
+        number, so numbering the compiled definitions by list position bound
+        ``<Subject 1>`` to ``(S2)`` in ``subject_definitions`` while the action
+        text bound it to ``(S1)``. H3 resolved that contradiction by giving one
+        participant the other's reference appearance -- the man rendered with
+        the woman's hair and makeup.
+        """
+
+        subjects = [
+            {
+                "visual_description": "<Subject 2> (S2), speaking authoritatively.",
+                "position_or_relation": "left",
+            },
+            {
+                "visual_description": "<Subject 1> (S1), reacting to S2's input.",
+                "position_or_relation": "right",
+            },
+        ]
+        prompt, _ = compile_h3_official_prompt(
+            "[Shot 1] <Subject 2> (S2) speaks with a deep tone. "
+            "Then <Subject 1> (S1) interjects. "
+            "overall_soundscape: Room tone. non_diegetic_music: N/A.",
+            subjects,
+            [
+                {"speaker_id": "S2", "spoken_text": "First."},
+                {"speaker_id": "S1", "spoken_text": "Second."},
+            ],
+            mode="ref2va",
+            references=[
+                {"type": "image", "role": "S1", "image_intent": "identity"},
+                {"type": "image", "role": "S2", "image_intent": "identity"},
+            ],
+        )
+
+        definitions = prompt.split("subject_definitions: ", 1)[1].split(
+            "\n\nsummary:", 1,
+        )[0]
+        self.assertIn("<Subject 1> (S1):", definitions)
+        self.assertIn("<Subject 2> (S2):", definitions)
+        # The speaker token belongs in the identity slot, never in the prose.
+        self.assertNotIn("(S1),", definitions)
+        self.assertNotIn("(S2),", definitions)
+        # The old fallback printed the placeholder as if it were a name.
+        self.assertNotIn("is subject", definitions)
+
+    def test_identity_picture_binds_to_the_planner_subject_not_a_new_number(self):
+        """One participant must own one label, not one for acting and one for identity.
+
+        When the reference could not be matched to a Subject, it was given a
+        brand-new ``<Subject 3>``/``<Subject 4>`` slot. The action text kept
+        using ``<Subject 1>``/``<Subject 2>``, which carried no appearance, so
+        the identity reference never reached the participant it described.
+        """
+
+        subjects = [
+            {"visual_description": "<Subject 1> (S1), the woman in a cream A-dress."},
+            {"visual_description": "<Subject 2> (S2), the man in a grey suit."},
+        ]
+        prompt, _ = compile_h3_official_prompt(
+            "[Shot 1] <Subject 1> (S1) leans in toward <Subject 2> (S2). "
+            "overall_soundscape: Room tone. non_diegetic_music: N/A.",
+            subjects,
+            [{"speaker_id": "S1", "spoken_text": "Hola."}],
+            mode="ref2va",
+            references=[
+                {"type": "image", "role": "S1", "image_intent": "identity"},
+                {"type": "image", "role": "S2", "image_intent": "identity"},
+            ],
+        )
+
+        definitions = prompt.split("subject_definitions: ", 1)[1].split(
+            "\n\nsummary:", 1,
+        )[0]
+        self.assertNotIn("<Subject 3>", prompt)
+        self.assertNotIn("<Subject 4>", prompt)
+        self.assertIn("identity come from <Picture 1>", definitions)
+        self.assertIn("identity come from <Picture 2>", definitions)
+        self.assertIn("<Subject 1> (S1):", definitions)
+        self.assertIn("<Subject 2> (S2):", definitions)
 
     def test_project_speaker_ids_remain_stable_when_cast_order_changes(self):
         plans = [
@@ -2752,8 +2983,8 @@ INT. APARTMENT - DAY
         self.assertNotIn("video_prompt", unsafe_tail)
 
     def test_long_h3_plan_gets_tail_completion_headroom(self):
-        self.assertEqual(_h3_planner_token_budget(90), 21600)
-        self.assertEqual(_h3_planner_token_budget(120), 23000)
+        self.assertEqual(_h3_planner_token_budget(90), 27000)
+        self.assertEqual(_h3_planner_token_budget(120), 32000)
 
     def test_truncated_first_plan_repairs_without_shifting_dialogue_early(self):
         screenplay = """INT. APARTMENT - DAY

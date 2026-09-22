@@ -20,6 +20,83 @@ from dataclasses import dataclass, field, asdict
 logger = logging.getLogger(__name__)
 
 
+def _ensure_torchaudio_compatibility() -> None:
+    """Restore legacy torchaudio symbols expected by pyannote.
+
+    pyannote 3.3 still imports ``torchaudio.AudioMetaData`` and calls
+    ``torchaudio.info()`` / ``torchaudio.list_audio_backends()``. TorchAudio
+    2.10 removed those APIs, but the rest of Maestro's stack still works
+    with the modern ``soundfile`` backend. This shim gives pyannote the
+    small compatibility layer it expects without changing the runtime
+    behavior of the rest of the app.
+    """
+    try:
+        import torchaudio
+    except ImportError:
+        return
+
+    if hasattr(torchaudio, "AudioMetaData") and hasattr(torchaudio, "info"):
+        return
+
+    import soundfile as sf
+
+    class AudioMetaData(dict):
+        def __init__(self, *, sample_rate, num_frames, num_channels, bits_per_sample, encoding=None, **kwargs):
+            super().__init__(
+                sample_rate=sample_rate,
+                num_frames=num_frames,
+                num_channels=num_channels,
+                bits_per_sample=bits_per_sample,
+                encoding=encoding,
+                **kwargs,
+            )
+
+        def __getattr__(self, name):
+            try:
+                return self[name]
+            except KeyError as exc:
+                raise AttributeError(name) from exc
+
+        def __setattr__(self, name, value):
+            self[name] = value
+
+    def _list_audio_backends():
+        if sf is not None:
+            return ["soundfile"]
+        return []
+
+    def _info(file_or_path, *, backend=None, **kwargs):
+        if hasattr(file_or_path, "read"):
+            handle = file_or_path
+            pos = None
+            try:
+                pos = handle.tell()
+            except (AttributeError, OSError):
+                pos = None
+            if pos is not None:
+                handle.seek(0)
+            info = sf.info(handle.name if hasattr(handle, "name") else handle)
+            if pos is not None:
+                handle.seek(pos)
+        else:
+            info = sf.info(file_or_path)
+
+        return AudioMetaData(
+            sample_rate=int(info.samplerate),
+            num_frames=int(info.frames),
+            num_channels=int(info.channels),
+            bits_per_sample=int(info.subtype.replace("PCM_", "").replace("FLOAT", "32").replace("DOUBLE", "64") if "PCM_" in info.subtype or "FLOAT" in info.subtype or "DOUBLE" in info.subtype else 16),
+            encoding=info.subtype,
+        )
+
+    torchaudio.AudioMetaData = AudioMetaData
+    torchaudio.list_audio_backends = _list_audio_backends
+    torchaudio.info = _info
+
+
+_ensure_torchaudio_compatibility()
+
+
 # ---------------------------------------------------------------------------
 # Live progress reporting
 # ---------------------------------------------------------------------------
@@ -93,6 +170,10 @@ class AudioAnalysis:
     onset_envelope: List[float]
     lyrics: Optional[List[LyricSegment]] = None
     vocals_path: Optional[str] = None
+    # Measured pitch per stable speaker label, keyed "(S1)"/"(S2)". Emitted by
+    # the normal analysis so the Director voice panel does not need a second
+    # diarization pass over the same audio to suggest a gender.
+    voice_profiles: dict = field(default_factory=dict)
     percussion_activity: Optional[List[dict]] = None
     music_cues: List[dict] = field(default_factory=list)
 
@@ -235,11 +316,18 @@ def _get_whisper_model(device: str = "cuda"):
 
     try:
         from faster_whisper import WhisperModel
-    except ImportError:
+    except ImportError as exc:
+        # Report the real failure. Calling this "not installed" hid the case
+        # where faster-whisper IS installed but a module it imports is not:
+        # ctranslate2 does ``import pkg_resources``, which setuptools >= 81 no
+        # longer ships. Transcription was then skipped for every project and
+        # the Director UI could only say "No speaker was detected".
         raise ImportError(
-            "faster-whisper is required for transcription. "
-            "Install with: uv pip install faster-whisper"
-        )
+            "faster-whisper could not be imported: %s. "
+            "If it is already installed, a module it needs is missing -- most "
+            "often pkg_resources, which requires 'setuptools<81'. "
+            "Install with: uv pip install faster-whisper" % exc
+        ) from exc
 
     cache_dir = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
@@ -335,6 +423,46 @@ def unload_whisper():
     _whisper_model = None
     _whisper_device = ""
     gc.collect()
+
+
+def _speaker_label_order(raw_speaker_ids: list[object] | tuple[object, ...] | None) -> dict[str, str]:
+    """Map raw pyannote IDs to the stable Maestro/H3 labels used by the app.
+
+    We intentionally use first-seen order rather than the raw speaker_00 /
+    speaker_01 numbering because PyAnnote can emit labels in a different order
+    than the UI expects. The first speaker found in the diarized timeline becomes
+    (S1), the second becomes (S2), and so on.
+    """
+    mapping: dict[str, str] = {}
+    for raw in raw_speaker_ids or []:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        key = text.upper()
+        if key not in mapping:
+            mapping[key] = f"(S{len(mapping) + 1})"
+    return mapping
+
+
+def _normalize_speaker_id(value: object, *, label_order: Optional[dict[str, str]] = None) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "(S1)"
+    upper = text.upper()
+    if upper.startswith("(S") and upper.endswith(")"):
+        return text
+
+    candidate = label_order.get(upper) if label_order else None
+    if candidate is not None:
+        return candidate
+
+    match = re.search(r"(\d+)", text)
+    if upper.startswith("SPEAKER_") or upper.startswith("SPEAKER"):
+        if match:
+            return f"(S{int(match.group(1)) + 1})"
+        return "(S1)"
+
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -670,6 +798,35 @@ def _diarize(audio_path: str, lyrics: List[LyricSegment]) -> List[LyricSegment]:
     return lyrics
 
 
+def _voice_profiles(audio_path: str, segments: list) -> dict:
+    """Measure each detected speaker's pitch so the UI can suggest a gender.
+
+    Advisory only: a failure to profile never breaks the diarization result.
+    """
+
+    try:
+        from services.director.voice_gender import (
+            estimate_gender_from_pitch,
+            measure_pitch_per_label,
+        )
+
+        measurements = measure_pitch_per_label(
+            audio_path, segments, max_seconds_per_label=20.0,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[VoiceAnalysis] Pitch profiling skipped: {exc}")
+        return {}
+
+    profiles: dict[str, dict] = {}
+    for label, row in measurements.items():
+        profiles[label] = {
+            "median_f0": round(float(row["median_f0"]), 1),
+            "gender": estimate_gender_from_pitch(row["median_f0"]),
+            "seconds_analyzed": row.get("seconds_analyzed", 0),
+        }
+    return profiles
+
+
 def unload_diarizer():
     """Free the diarization pipeline and reclaim VRAM."""
     global _diarizer_pipe, _diarizer_profile
@@ -795,9 +952,20 @@ def analyze(
                 _set_progress("identifying_speakers", "Identifying speakers")
                 result.lyrics = _diarize(audio_path, result.lyrics)
                 unload_diarizer()  # Free VRAM immediately
+                # Measure each speaker's pitch in the same pass. The UI uses it
+                # to pre-fill the voice mapping, and it must not require the
+                # user to run diarization a second time by hand.
+                result.voice_profiles = _voice_profiles(audio_path, result.lyrics)
             unload_whisper()  # Free Whisper VRAM before LLM loads
         except ImportError as e:
-            print(f"[AudioAnalysis] Transcription skipped (faster-whisper not installed): {e}")
+            # Not necessarily "not installed": this is also where a broken
+            # transitive import lands (ctranslate2 -> pkg_resources). Say what
+            # actually happened, because the UI can only report the consequence
+            # ("No speaker was detected in this audio").
+            print(
+                "[AudioAnalysis] Transcription UNAVAILABLE, so no speaker "
+                f"diarization can run for this project: {e}"
+            )
         except Exception as e:
             print(f"[AudioAnalysis] Transcription failed, continuing without lyrics: {e}")
 

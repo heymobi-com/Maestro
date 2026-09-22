@@ -1130,6 +1130,8 @@ export interface OutputMetadata {
    *  the clip into an unrelated Studio job. */
   director_pipeline_id?: string
   director_clip_index?: number
+  /** Filename this take replaces, set when the clip was regenerated. */
+  director_supersedes?: string
   generation_time?: number
   generation_time_basis?: 'active' | 'elapsed'
   /** Exact native-window render timings captured after each successfully
@@ -1505,6 +1507,15 @@ export interface AudioAnalysisResult {
   lyrics: LyricSegment[] | null
   vocals_path: string | null
   song_structure?: SongStructureEntry[] | null
+  /** Measured pitch per stable speaker label, keyed "(S1)"/"(S2)". */
+  voice_profiles?: Record<string, VoiceProfile> | null
+}
+
+/** Acoustic measurement of one detected speaker. Advisory only. */
+export interface VoiceProfile {
+  median_f0: number
+  gender: string
+  seconds_analyzed: number
 }
 
 export interface SuggestedClip {
@@ -1676,8 +1687,10 @@ export interface ProductionPlan {
 
 export interface DirectorV2PlanResponse {
   clip_plans: Array<{ video_prompt: string; image_prompt: string }>
-  production_plan: ProductionPlan
+  production_plan: ProductionPlan | null
   skill_type: DirectorSkill
+  /** True when the user stopped the pass with the main-screen Stop button. */
+  cancelled?: boolean
 }
 
 // ── Director Pipeline Dashboard ──────────────────────────────────────────

@@ -1236,6 +1236,68 @@ def _clip_video_slots(
     return _map_completed_clip_videos(output_files, clip_count)
 
 
+def _completed_clip_video_prefix(
+    pid: str, clip_count: int, out_dir: str,
+) -> list[Optional[str]]:
+    """Clip videos from a stopped run that still exist on disk.
+
+    A state file can outlive the media it references, so every entry is checked
+    before it is trusted to stand in for a clip that does not need rendering.
+    """
+
+    if not pid or clip_count <= 0:
+        return []
+    with _pipeline_lock:
+        pipeline = _pipelines.get(pid) or {}
+        saved = list(pipeline.get("_clip_video_files") or [])
+    if not saved:
+        return []
+    slots: list[Optional[str]] = [None] * clip_count
+    for index, filename in enumerate(saved[:clip_count]):
+        if filename and os.path.isfile(os.path.join(out_dir, filename)):
+            slots[index] = filename
+    return slots
+
+
+def _merge_resumed_clip_outputs(
+    output_files: list[str],
+    resume_prefix: list[Optional[str]],
+    clip_offset: int,
+) -> list[str]:
+    """Put the clips rendered before a resume back in front of the new ones.
+
+    The tail batch numbers its own clips from zero, so without the offset the
+    finished clips of a resumed run would be filed under the first clip slots.
+    A join the tail batch produced is deliberately dropped: it covers the tail
+    only, and presenting it as the film's final video would be wrong.
+    """
+
+    if not clip_offset:
+        return output_files
+    current = (
+        output_files if isinstance(output_files, _DirectorOutputs)
+        else _DirectorOutputs(output_files)
+    )
+    slots: dict[int, str] = {
+        index: name for index, name in enumerate(resume_prefix) if name
+    }
+    for raw_index, name in (getattr(current, "clip_output_files", {}) or {}).items():
+        if not name:
+            continue
+        try:
+            position = int(raw_index)
+        except (TypeError, ValueError):
+            continue
+        slots[position + clip_offset] = name
+    ordered = [slots[index] for index in sorted(slots)]
+    if len(current) > len(getattr(current, "clip_output_files", {}) or {}):
+        print(
+            "[Pipeline] Resumed run: dropping the partial join output; "
+            "rejoin the clips once every shot is rendered."
+        )
+    return _DirectorOutputs(ordered, slots, resumed_from=clip_offset)
+
+
 def _save_pipeline_state(pid: str) -> bool:
     """Serialize one live pipeline snapshot without racing other writers."""
     with _pipeline_file_lock:
@@ -2676,6 +2738,170 @@ def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: s
     return _rerun_clip_video_impl(out_dir, pid, clip_index, prompt_override)
 
 
+_REVISE_PROMPT_SYSTEM = """You are correcting exactly ONE shot of an already-planned film.
+
+The director read the rendered shot and wrote a note about what is wrong. Rewrite \
+the shot's video prompt so the note is satisfied and nothing else changes.
+
+Hard rules:
+- Keep the prompt's existing structure and field order (subject_definitions, \
+summary, retention_analysis, detailed_description, overall_soundscape, \
+non_diegetic_music). Edit the fields; do not reorganise them.
+- Change ONLY what the note asks for. Preserve every other instruction, every \
+subject definition, every wardrobe and lighting detail, and every <Picture N> / \
+<Video N> / <Subject N> binding.
+- Keep every <d>...</d> dialogue block exactly as written, including its \
+[Language] tag. Never re-assign a line to a different speaker and never change \
+the words. If the note asks about who speaks, follow the note for the delivery \
+and blocking text only.
+- Respect the speakers' declared gender and voice: a subject declared FEMALE must \
+never be given masculine delivery, wardrobe or features, and the reverse.
+- Keep the shot continuous with its neighbours: same studio, same lighting, same \
+colour palette, same wardrobe, and motion that flows out of the previous shot and \
+into the next one.
+- Return the corrected prompt ONLY. No commentary, no markdown fences, no \
+explanation."""
+
+
+def _revise_shot_neighbours(clips: list, clip_index: int) -> str:
+    """A short digest of the adjacent shots, for continuity."""
+
+    parts = []
+    for offset, label in ((-1, "previous"), (1, "next")):
+        index = clip_index + offset
+        if 0 <= index < len(clips):
+            text = " ".join(
+                str(clips[index].get("video_prompt") or "").split()
+            )[:600]
+            if text:
+                parts.append(f"{label} shot {index + 1}: {text}")
+    return "\n".join(parts)
+
+
+def revise_clip_prompt(
+    out_dir: str,
+    pid: str,
+    clip_index: int,
+    instruction: str,
+    current_prompt: str = "",
+) -> dict:
+    """Ask the LLM to rewrite one shot's prompt per a director's correction note.
+
+    Returns the revised text without saving it, so the user reviews the result
+    in the prompt editor before it becomes the shot's source of truth.
+    """
+
+    state = load_pipeline_state(out_dir, pid)
+    if not state:
+        raise ValueError(f"Pipeline {pid} not found")
+    clips = state.get("clips") or []
+    if clip_index < 0 or clip_index >= len(clips):
+        raise ValueError(f"Clip index {clip_index} out of range (0-{len(clips)-1})")
+    note = str(instruction or "").strip()
+    if not note:
+        raise ValueError("Describe what should be corrected first.")
+
+    clip = clips[clip_index]
+    prompt = str(current_prompt or "").strip() or str(
+        clip.get("video_prompt") or ""
+    ).strip()
+    if not prompt:
+        raise ValueError("This shot has no video prompt to correct.")
+
+    video_model = state.get("video_model") or ""
+    snapshot = state.get("_params_snapshot") or {}
+    project_context = str(
+        clip.get("_director_project_context")
+        or snapshot.get("scene_description")
+        or ""
+    )
+
+    task = [
+        f"SHOT {clip_index + 1} OF {len(clips)} — CURRENT PROMPT:",
+        prompt,
+    ]
+    if project_context:
+        task.extend(["", "PROJECT CONTEXT (must stay true):", project_context])
+    neighbours = _revise_shot_neighbours(clips, clip_index)
+    if neighbours:
+        task.extend(["", "ADJACENT SHOTS (keep continuity):", neighbours])
+    task.extend([
+        "",
+        "THE DIRECTOR'S NOTE — fix exactly this:",
+        note,
+        "",
+        "Return the corrected prompt for this shot only.",
+    ])
+
+    from services import llm_service
+    from services.studio_enhancement import current_settings
+
+    # Every other Director pass loads the LLM before calling it; this one
+    # called enhance_prompt straight away and died with "LLM not loaded. Call
+    # load_model() first." whenever nothing had been planned in that session.
+    _ensure_llm_loaded(snapshot)
+
+    services = current_settings(
+        _wgp.server_config.get("services", {}) if _wgp else {}
+    )
+    nsfw = bool(services.get("nsfw_mode"))
+    revised = llm_service.enhance_prompt(
+        prompt="\n".join(task),
+        mode="video",
+        # A compiled H3 Context-IR prompt is several thousand characters, and
+        # the default 200-token budget truncated the answer mid-field.
+        max_new_tokens=4096,
+        temperature=0.3,
+        nsfw=nsfw,
+        model_type=video_model,
+        system_override=_REVISE_PROMPT_SYSTEM,
+    )
+    revised = str(revised or "").strip()
+    if not revised:
+        raise ValueError("The model returned no revised prompt; try again.")
+    print(
+        f"[Pipeline {pid}] Shot {clip_index + 1} prompt revised from a "
+        f"director note ({len(prompt)} -> {len(revised)} chars)."
+    )
+    return {"clip_index": clip_index, "video_prompt": revised}
+
+
+def _record_regenerated_clip(
+    state: dict, clip_index: int, previous: Optional[str], new_filename: str,
+) -> None:
+    """Replace one clip in place, never at the start or the end of the film.
+
+    A regenerated clip used to be appended to ``output_files``, which both moved
+    it to the end of that list and let the positional backfill hand its filename
+    to a different clip. The per-clip record is authoritative, so the entry is
+    swapped where it already stood, and the clip's own slot is updated so a
+    later resume or rejoin reads the new video.
+    """
+
+    outputs = state.get("output_files")
+    if not isinstance(outputs, list):
+        state["output_files"] = [new_filename]
+    elif previous and previous in outputs:
+        # The clip already stood somewhere in the ordered film: swap it there.
+        outputs[outputs.index(previous)] = new_filename
+    elif clip_index < len(outputs):
+        # A legacy state whose per-clip mapping was backfilled from this list,
+        # so the clip's own position is the entry to replace.
+        outputs[clip_index] = new_filename
+    elif new_filename not in outputs:
+        outputs.append(new_filename)
+
+    clip_count = len(state.get("clips") or [])
+    slots = state.get("_clip_video_files")
+    if not isinstance(slots, list):
+        slots = []
+    wanted = max(clip_index + 1, clip_count)
+    if len(slots) < wanted:
+        slots.extend([None] * (wanted - len(slots)))
+    slots[clip_index] = new_filename
+    state["_clip_video_files"] = slots
+
+
 def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_override: str = None) -> dict:
     """Re-generate the video for a single clip. Returns {job_id, filename} or raises."""
     state = load_pipeline_state(out_dir, pid)
@@ -2686,6 +2912,9 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
         raise ValueError(f"Clip index {clip_index} out of range (0-{len(clips)-1})")
 
     clip = clips[clip_index]
+    # Remembered for the sidecar: it lets the gallery stack the new take next to
+    # the one it replaces, so the user can compare them and delete the bad one.
+    previous_video_filename = clip.get("video_filename") or ""
     prompt = prompt_override or clip.get("video_prompt", "")
     if not prompt:
         raise ValueError("No video prompt for this clip")
@@ -2968,6 +3197,12 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
             m.split(";")[0] for m in (video_loras.get("loras_multipliers", "") or "").split(" ") if m
         ),
         "_director_pipeline_id": pid,
+        # A one-clip rerun is not a multi-clip batch, so the job exposes no
+        # clip_output_files map for the sidecar writer to read the position
+        # from. Without this the regenerated clip's sidecar lost
+        # director_clip_index and could no longer be placed in the film.
+        "_director_clip_index": clip_index,
+        "_director_supersedes": previous_video_filename,
         "_director_detached_operation": True,
     }
     _apply_director_h3_optimizations(
@@ -3202,6 +3437,7 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
         )
 
     def _update(s):
+        previous_filename = s["clips"][clip_index].get("video_filename")
         s["clips"][clip_index]["video_filename"] = new_filename
         s["clips"][clip_index]["video_stale"] = False
         s["clips"][clip_index]["video_prompt"] = prompt
@@ -3221,8 +3457,10 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
         ):
             if prompt_plan.get(key) is not None:
                 s["clips"][clip_index][key] = prompt_plan.get(key)
-        if new_filename not in s.get("output_files", []):
-            s.setdefault("output_files", []).append(new_filename)
+        # In place, so the regenerated clip keeps its position in the film.
+        _record_regenerated_clip(
+            s, clip_index, previous_filename, new_filename,
+        )
         s["video_execution_profile"] = execution_profile
         snapshot_params = s.get("_params_snapshot")
         if isinstance(snapshot_params, dict):
@@ -3856,6 +4094,111 @@ def rejoin_clips(out_dir: str, pid: str) -> dict:
     return _rejoin_clips_impl(out_dir, pid)
 
 
+_SLOT_TAKE_EXTENSIONS = (".mp4", ".mkv", ".webm", ".mov")
+
+
+def surviving_takes_by_slot(clip_out_dir: str) -> dict[int, list[str]]:
+    """Media files on disk that carry a film slot, oldest take first."""
+
+    found: dict[int, list[tuple[float, str]]] = {}
+    try:
+        names = os.listdir(clip_out_dir)
+    except OSError:
+        return {}
+    for name in names:
+        if not name.endswith(".meta.json"):
+            continue
+        stem = name[: -len(".meta.json")]
+        media = next(
+            (
+                stem + ext
+                for ext in _SLOT_TAKE_EXTENSIONS
+                if os.path.isfile(os.path.join(clip_out_dir, stem + ext))
+            ),
+            None,
+        )
+        if media is None:
+            continue
+        try:
+            with open(os.path.join(clip_out_dir, name), encoding="utf-8") as handle:
+                sidecar = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(sidecar, dict):
+            continue
+        index = sidecar.get("director_clip_index")
+        if not isinstance(index, int):
+            continue
+        path = os.path.join(clip_out_dir, media)
+        try:
+            if os.path.getsize(path) <= 0:
+                continue
+            stamp = os.path.getmtime(path)
+        except OSError:
+            continue
+        found.setdefault(index, []).append((stamp, media))
+    return {
+        slot: [name for _stamp, name in sorted(takes)]
+        for slot, takes in found.items()
+    }
+
+
+def plan_slot_repoints(state: dict, clip_out_dir: str) -> list[dict]:
+    """Plan a re-point for every slot whose recorded video no longer exists.
+
+    Deleting a take from the gallery can remove the very file a slot was using,
+    and the rejoin then refused the whole film with "Regenerate missing or
+    invalid video clip(s) N before rejoining". On a 150-shot project that reads
+    as "re-render that shot", which is the expensive, unwanted answer for what
+    is only a stale filename. Every clip sidecar records the slot it belongs to,
+    so a surviving take of the same shot can stand in and nothing is rendered.
+    """
+
+    clips = state.get("clips") or []
+    dead = _invalid_saved_media_numbers(
+        [clip.get("video_filename") for clip in clips], len(clips), clip_out_dir, "video",
+    )
+    if not dead:
+        return []
+    takes = surviving_takes_by_slot(clip_out_dir)
+    plan: list[dict] = []
+    for one_based in dead:
+        slot = one_based - 1
+        previous = str(clips[slot].get("video_filename") or "")
+        candidates = [name for name in takes.get(slot, []) if name != previous]
+        if not candidates:
+            continue
+        plan.append({
+            "index": slot,
+            "previous": previous,
+            "replacement": candidates[-1],
+            "message": (
+                f"Shot {slot + 1}: its recorded clip is gone, "
+                f"re-pointed to a surviving take of the same shot."
+            ),
+        })
+    return plan
+
+
+def apply_slot_repoints(state: dict, plan: list[dict]) -> None:
+    """Write a re-point plan into a pipeline state (in place)."""
+
+    clips = state.get("clips") or []
+    slots = state.get("_clip_video_files")
+    outputs = state.get("output_files")
+    for fix in plan:
+        index = fix["index"]
+        if index >= len(clips):
+            continue
+        clips[index]["video_filename"] = fix["replacement"]
+        clips[index]["video_stale"] = False
+        if isinstance(slots, list) and index < len(slots):
+            slots[index] = fix["replacement"]
+        previous = fix.get("previous") or ""
+        if isinstance(outputs, list) and previous and previous in outputs:
+            outputs[outputs.index(previous)] = fix["replacement"]
+
+
 def _rejoin_clips_impl(out_dir: str, pid: str) -> dict:
     """Re-join all clips from a saved pipeline using current best versions. Returns {filename}."""
     state = load_pipeline_state(out_dir, pid)
@@ -3864,6 +4207,18 @@ def _rejoin_clips_impl(out_dir: str, pid: str) -> dict:
 
     pipeline_file = _find_pipeline_file(out_dir, pid)
     clip_out_dir = os.path.dirname(pipeline_file) if pipeline_file else out_dir
+
+    # Bookkeeping first: a slot whose file was deleted is re-pointed at a
+    # surviving take of the same shot, so the join is not refused over a stale
+    # filename. Nothing here renders anything.
+    repoints = plan_slot_repoints(state, clip_out_dir)
+    if repoints:
+        def _apply_repoints(s):
+            apply_slot_repoints(s, repoints)
+        _update_saved_pipeline(out_dir, pid, _apply_repoints)
+        state = load_pipeline_state(out_dir, pid)
+        for fix in repoints:
+            print(f"[Pipeline {pid}] {fix['message']}")
 
     clips = state.get("clips", [])
     stale_clip_numbers = [
@@ -4509,9 +4864,12 @@ def init(
 class _DirectorOutputs(list):
     """List-compatible outputs that retain exact Director clip ownership."""
 
-    def __init__(self, values, clip_output_files=None):
+    def __init__(self, values, clip_output_files=None, resumed_from=0):
         super().__init__(values)
         self.clip_output_files = dict(clip_output_files or {})
+        # Non-zero when this batch was a resumed tail, so the caller knows the
+        # batch deferred its own join and the film still has to be compiled.
+        self.resumed_from = int(resumed_from or 0)
 
 
 class _GenerationTimeoutError(RuntimeError):
@@ -4551,6 +4909,85 @@ def _director_job_outputs(job: dict) -> _DirectorOutputs:
         collapsed or output_files,
         {index: filename for index, filename in indexed if filename},
     )
+
+
+def _job_clip_positioning(job: dict) -> tuple[int, int]:
+    """Film clip offset and total for a job that may be a resumed tail."""
+
+    params = job.get("params")
+    if not isinstance(params, dict):
+        params = (snapshot_job(job).get("params") or {})
+    try:
+        offset = int(params.get("_director_clip_offset") or 0)
+    except (TypeError, ValueError):
+        offset = 0
+    try:
+        total = int(params.get("_director_clip_total") or 0)
+    except (TypeError, ValueError):
+        total = 0
+    return max(0, offset), max(0, total)
+
+
+def _persist_finished_clips(pid: Optional[str], job: dict) -> None:
+    """Record clip videos in the saved state as the job finishes them.
+
+    ``_save_pipeline_state`` used to run only at phase boundaries, so losing
+    power two hours into clip generation left a state file listing no completed
+    clips at all: the clips that had already rendered were invisible and a
+    resume regenerated the whole film from the first frame. A multi-clip job
+    publishes each clip the moment it finishes, so mirror that here.
+
+    Best-effort by design — bookkeeping must never abort a run.
+    """
+
+    if not pid:
+        return
+    try:
+        snapshot = snapshot_job(job)
+        clip_outputs = snapshot.get("clip_output_files") or {}
+        if not isinstance(clip_outputs, dict) or not clip_outputs:
+            return
+        # A resumed run submits only the tail, so the job numbers its clips from
+        # zero while they belong to the slots after the finished prefix.
+        job_params = (
+            snapshot.get("params")
+            or job.get("params")
+            or {}
+        )
+        try:
+            offset = int(job_params.get("_director_clip_offset") or 0)
+        except (TypeError, ValueError):
+            offset = 0
+        with _pipeline_lock:
+            pipeline = _pipelines.get(pid)
+            if not pipeline:
+                return
+            clip_count = len(pipeline.get("clip_plans") or [])
+            if clip_count <= 0:
+                return
+            current = list(pipeline.get("_clip_video_files") or [])
+            slots: list[Optional[str]] = current + [None] * max(
+                0, clip_count - len(current),
+            )
+        changed = False
+        for index, filename in clip_outputs.items():
+            try:
+                position = int(index) + offset
+            except (TypeError, ValueError):
+                continue
+            if 0 <= position < clip_count and filename and not slots[position]:
+                slots[position] = filename
+                changed = True
+        if not changed:
+            return
+        with _pipeline_lock:
+            pipeline = _pipelines.get(pid)
+            if pipeline is None:
+                return
+            pipeline["_clip_video_files"] = slots
+        _save_pipeline_state(pid)
+    except Exception as exc:  # noqa: BLE001 - never break generation
+        print(f"[Pipeline {pid}] Could not record finished clips yet: {exc}")
 
 
 def _submit_and_wait(
@@ -4685,6 +5122,15 @@ def _submit_and_wait(
         if activity != last_activity:
             last_activity = activity
             deadline = time.monotonic() + timeout_s
+            # A long multi-clip job must leave a resumable record behind even
+            # when the machine dies mid-batch, not only when the job reports
+            # completion or cancellation. Only the main batch writes here: a
+            # single-clip rerun is a detached operation that records its own
+            # slot when it finishes, and mirroring its batch index would file
+            # the regenerated clip under slot 0 whenever that slot was still
+            # empty — which is how a rerun ended up at the start of the film.
+            if not _detached_operation:
+                _persist_finished_clips(_dir_pid, j)
         if j["status"] == "completed":
             return _director_job_outputs(j)
         if j["status"] == "cancelled":
@@ -4755,6 +5201,7 @@ def _submit_and_wait(
                             )
                         elif source_key in j:
                             p["progress"][target_key] = None
+                    offset, film_total = _job_clip_positioning(j)
                     for key in (
                         "current_clip",
                         "total_clips",
@@ -4766,8 +5213,23 @@ def _submit_and_wait(
                         "clip_completion_at",
                         "project_completion_at",
                     ):
-                        if key in j:
-                            p["progress"][key] = copy.deepcopy(j.get(key))
+                        if key not in j:
+                            continue
+                        if key == "current_clip":
+                            # A resumed run submits only the tail, so the job
+                            # numbers its clips from one. Without the offset the
+                            # first regenerated shot is reported as "clip 1".
+                            value = j.get(key)
+                            p["progress"][key] = (
+                                int(value) + offset
+                                if isinstance(value, (int, float))
+                                else value
+                            )
+                            continue
+                        if key == "total_clips" and film_total:
+                            p["progress"][key] = film_total
+                            continue
+                        p["progress"][key] = copy.deepcopy(j.get(key))
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
@@ -5210,6 +5672,9 @@ def _resume_pipeline_reserved(pid: str, out_dir: str) -> tuple[bool, str]:
         "window_count": c.get("window_count", 1),
         "_director_dialogue_beats": (
             c.get("_director_dialogue_beats", []) or []
+        ),
+        "_director_prompt_user_edited": (
+            c.get("_director_prompt_user_edited", False)
         ),
         "_director_subjects_on_screen": (
             c.get("_director_subjects_on_screen", []) or []
@@ -5807,6 +6272,25 @@ def _run_pipeline(pid: str, resume: bool = False):
             completed_clip_videos = _clip_video_slots(
                 output_files or [], len(clip_plans),
             )
+        # A resumed tail batch defers its own join, because that join would
+        # cover the tail only. Compile the whole film here instead, now that
+        # every shot exists, so a resumed long run still finishes with the
+        # joined video the uninterrupted run would have produced.
+        if int(getattr(output_files, "resumed_from", 0) or 0):
+            _save_pipeline_state(pid)
+            try:
+                joined = rejoin_clips(pipeline_out_dir, pid)
+                joined_name = (joined or {}).get("filename")
+                if joined_name and joined_name not in list(output_files or []):
+                    output_files = [*(output_files or []), joined_name]
+                print(
+                    f"[Pipeline {pid}] Resumed run compiled into {joined_name}"
+                )
+            except Exception as join_err:  # noqa: BLE001
+                print(
+                    f"[Pipeline {pid}] Automatic compile of the resumed run "
+                    f"was skipped: {join_err}"
+                )
         completed = _update_pipeline(
             pid,
             status="completed",
@@ -6504,6 +6988,105 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
             clip_plans[index].update(shot_state)
         if index < len(planned_clips):
             planned_clips[index].update(shot_state)
+
+    # The planner is not a reliable source of per-line speaker identity: one
+    # real 150-clip project arrived with 367 of 422 dialogue beats missing
+    # ``speaker_id``. The diarized transcript already knows which host owns
+    # each line, so bind it deterministically before the H3 vocal contract is
+    # compiled. Without this every (S1)/(S2) label is re-derived from subject
+    # list order, which puts the wrong face on the wrong voice.
+    lyric_rows = params.get("lyrics")
+    if isinstance(lyric_rows, list) and lyric_rows:
+        try:
+            from services.director.speaker_binding import bind_dialogue_speakers
+
+            binding_windows: list[dict] = []
+            for position in range(len(clip_plans)):
+                candidate = (
+                    planned_clips[position]
+                    if position < len(planned_clips)
+                    else None
+                )
+                if not isinstance(candidate, dict) or "start" not in candidate:
+                    fallback = clip_plans[position].get("planned_clip")
+                    if isinstance(fallback, dict):
+                        candidate = fallback
+                binding_windows.append(candidate if isinstance(candidate, dict) else {})
+            # Split fused turns BEFORE binding. A split creates new beats, and
+            # any created after the binding would keep the planner's inline
+            # label without ever being checked against the diarized audio.
+            from services.director.h3_dialogue import _split_multi_speaker_beats
+
+            _split_multi_speaker_beats(clip_plans)
+            binding_stats = bind_dialogue_speakers(
+                clip_plans,
+                binding_windows,
+                lyric_rows,
+            )
+            if binding_stats["beats_total"]:
+                print(
+                    "[SpeakerBinding] Bound "
+                    f"{binding_stats['beats_bound']} transcript-matched + "
+                    f"{binding_stats['beats_fallback']} window-dominant "
+                    f"dialogue beat(s) to their diarized speaker "
+                    f"({binding_stats['beats_normalized']} label(s) "
+                    f"canonicalized, {binding_stats['beats_corrected']} "
+                    f"corrected against the audio, {binding_stats['beats_unresolved']} "
+                    f"unresolved, {binding_stats['subjects_relabelled']} "
+                    "subject(s) labelled)."
+                )
+        except Exception as exc:
+            print(f"[SpeakerBinding] Skipped ({exc}).")
+
+    # C — verify the diarization this plan depends on actually exists. A plan
+    # that reused a stale or missing analysis cannot know which host owns each
+    # line, so say so instead of silently rendering guesswork.
+    if not isinstance(lyric_rows, list) or not lyric_rows:
+        print(
+            "[SpeakerBinding] WARNING: this plan carries no diarized "
+            "transcript, so per-line speakers could not be verified. Run "
+            "'Analyze voices / diarization' before planning audio-driven shots."
+        )
+    else:
+        from services.director.speaker_binding import speaker_label_order
+        if not speaker_label_order(lyric_rows):
+            print(
+                "[SpeakerBinding] WARNING: the transcript has no speaker "
+                "labels, so every (S1)/(S2) assignment is a positional guess. "
+                "Re-run 'Analyze voices / diarization' on this audio."
+            )
+
+    # A — measure the real pitch of each host and warn when the gender the
+    # project declares contradicts the audio. Advisory only: a conflict never
+    # blocks the render, it just tells the user the mapping is suspect.
+    vocal_audio = params.get("audio_vocals_path") or params.get("audio_path")
+    if isinstance(lyric_rows, list) and lyric_rows and vocal_audio:
+        try:
+            from services.director.voice_gender import (
+                describe_measurements,
+                verify_voice_genders,
+            )
+
+            gender_measurements, gender_conflicts = verify_voice_genders(
+                str(vocal_audio),
+                lyric_rows,
+                speaker_mappings=params.get("speaker_mappings") or [],
+                concept_text=scene_description,
+            )
+            if gender_measurements:
+                print(
+                    "[VoiceGender] Measured "
+                    f"{describe_measurements(gender_measurements)}"
+                )
+            for conflict in gender_conflicts:
+                print(
+                    f"[VoiceGender] WARNING: {conflict['label']} measures "
+                    f"{conflict['median_f0']} Hz ({conflict['measured']}-leaning) "
+                    f"but the project describes it as {conflict['declared']}. "
+                    "Check the speaker mapping before rendering."
+                )
+        except Exception as exc:
+            print(f"[VoiceGender] Skipped ({exc}).")
 
     if selected_video_strategy in {BOUNDED_START_END, OMNI_REFERENCE}:
         clip_plans = apply_independent_shot_context(
@@ -7205,6 +7788,42 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
     if not out_dir:
         out_dir = _wgp.save_path
 
+    # ── Resume: submit only the clips that never rendered ────────────
+    # A stopped or interrupted run leaves its finished clips in the state
+    # file, but the batch was re-submitted whole, so a resume regenerated hours
+    # of finished work starting from the first frame. Every per-clip array
+    # below is derived from ``planned_clips`` -- including the audio offset,
+    # see ``_audio_timeline_start`` -- so slicing the inputs resumes exactly
+    # where the run stopped. A seamless run is one continuous rolling window
+    # with no per-clip boundary to resume from, and is left alone.
+    resume_prefix: list[Optional[str]] = []
+    clip_offset = 0
+    if not seamless:
+        completed = _completed_clip_video_prefix(pid, len(clip_plans), out_dir)
+        if any(completed):
+            clip_offset = next(
+                (index for index, name in enumerate(completed) if not name),
+                len(completed),
+            )
+            if clip_offset:
+                resume_prefix = completed[:clip_offset]
+                clip_plans = list(clip_plans[clip_offset:])
+                planned_clips = list((planned_clips or [])[clip_offset:])
+                clip_images = list((clip_images or [])[clip_offset:])
+                clip_keyframes = [
+                    list(frames) for frames in (clip_keyframes or [])[clip_offset:]
+                ]
+                print(
+                    f"[Pipeline {pid}] Resume: {clip_offset} clip(s) already "
+                    f"rendered — generating the remaining {len(clip_plans)}"
+                )
+    if not clip_plans:
+        return _DirectorOutputs(
+            [name for name in resume_prefix if name],
+            {index: name for index, name in enumerate(resume_prefix) if name},
+            resumed_from=clip_offset,
+        )
+
     # Quantize helper
     try:
         _min_f, _fs, _latent = _wgp.get_model_min_frames_and_step(video_model)
@@ -7621,7 +8240,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
         for ci, cf in enumerate(per_clip_frames):
             wp_count = len((clip_plans[ci].get("window_prompts") or []) if ci < len(clip_plans) else [])
             wc = clip_plans[ci].get("window_count", 1) if ci < len(clip_plans) else 1
-            print(f"[Pipeline {pid}] Clip {ci+1}: {cf} frames ({cf/fps:.1f}s), windows={wc}, window_prompts={wp_count}")
+            print(f"[Pipeline {pid}] Clip {ci + 1 + clip_offset}: {cf} frames ({cf/fps:.1f}s), windows={wc}, window_prompts={wp_count}")
 
     # Build audio params
     audio_params: dict = {}
@@ -7957,6 +8576,13 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
     gen_params["input_video_strength"] = video_params.get(
         "input_video_strength", 1.0,
     )
+    # Lets the progress mirror file a resumed tail under the slots it belongs
+    # to instead of the first clips of the film, and stops the batch from
+    # publishing a partial _multiclip join.
+    gen_params["_director_clip_offset"] = clip_offset
+    gen_params["_director_clip_total"] = len(clip_plans) + clip_offset
+    if clip_offset:
+        gen_params["multi_clip_defer_concat"] = True
     _apply_director_h3_optimizations(
         gen_params,
         video_params,
@@ -7980,4 +8606,4 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
         workspace=workspace,
         out_dir=out_dir,
     )  # Abort only after 2 hours with no observable generation progress.
-    return output_files
+    return _merge_resumed_clip_outputs(output_files, resume_prefix, clip_offset)

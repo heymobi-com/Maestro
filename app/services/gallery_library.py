@@ -52,10 +52,25 @@ class GalleryLibrary:
                 mci = dict(mci, index=int(mci.get("index", 0)), total=int(mci.get("total", 0)))
             except (ValueError, TypeError):
                 mci = None
+        # Director shots carry the film they belong to and their position in it,
+        # which is what lets the gallery hold a film together in shot order even
+        # after one shot is regenerated into a brand-new file.
+        film_id = meta.get("director_pipeline_id")
+        try:
+            film_index = (
+                int(meta["director_clip_index"])
+                if meta.get("director_clip_index") is not None else None
+            )
+        except (ValueError, TypeError):
+            film_index = None
+        supersedes = meta.get("director_supersedes")
         compact = {
             "mode": meta.get("generation_mode"),
             "edit_sub_mode": params.get("edit_sub_mode"),
             "multi_clip_info": mci,
+            "director_film": str(film_id) if film_id else "",
+            "director_film_index": film_index,
+            "director_supersedes": str(supersedes) if supersedes else "",
             "metadata_ready": stamp is not None,
             "metadata_updated_at": stamp[0] / 1e9 if stamp else None,
             "tokens": SearchIndex.searchable_tokens(os.path.basename(path), meta),
@@ -130,7 +145,14 @@ class GalleryLibrary:
                         if highest >= total - 1 or int(mci.get("index", 0)) < highest:
                             continue
                     kind = "video" if ext in VIDEO_EXTENSIONS else "audio" if ext in AUDIO_EXTENSIONS else "image"
-                    item = {key: meta[key] for key in ("mode", "edit_sub_mode", "metadata_ready", "metadata_updated_at")}
+                    item = {
+                        key: meta.get(key)
+                        for key in (
+                            "mode", "edit_sub_mode", "metadata_ready",
+                            "metadata_updated_at", "director_film",
+                            "director_film_index", "director_supersedes",
+                        )
+                    }
                     item.update(name=name, workspace=workspace, path=path,
                                 id=f"{workspace}/{name}", type=kind, size=stat.st_size,
                                 created_at=stat.st_mtime, favorite=name in favs,
@@ -163,7 +185,38 @@ class GalleryLibrary:
             for path in list(self._cache):
                 if os.path.dirname(path) in roots and path not in scanned:
                     del self._cache[path]
-        key = lambda item: (item["created_at"], item["workspace"], item["name"])
+        # A Director film's shots are placed together, at the film's own
+        # position in the feed, reading newest shot first like everything else
+        # in the gallery. Regenerating a shot rewrites its file and therefore
+        # its mtime, which used to launch that one shot to the top of the
+        # gallery, away from the rest of the film: in a 150-shot run its place
+        # was then impossible to find. The anchor is the oldest shot of the
+        # film, so it survives a regeneration. The block reads shot 150 at the
+        # top down to shot 1 at the bottom, matching the descending feed, so
+        # the newest work is always nearest the top.
+        film_anchors: dict[str, float] = {}
+        for item in results:
+            film = item.get("director_film")
+            if film and item.get("director_film_index") is not None:
+                film_anchors[film] = min(
+                    film_anchors.get(film, item["created_at"]), item["created_at"],
+                )
+
+        def key(item):
+            film = item.get("director_film")
+            index = item.get("director_film_index")
+            if film and index is not None:
+                # Descending shot order under a descending sort, so the highest
+                # shot number sorts first. A second take of one shot shares its
+                # index, and the newest take sorts first so it sits immediately
+                # above the one it replaced.
+                return (
+                    film_anchors[film],
+                    item["workspace"],
+                    f"~{film}~{index:06d}"
+                    f"~{int(item['created_at'] * 1000):014d}",
+                )
+            return (item["created_at"], item["workspace"], item["name"])
         results.sort(key=key, reverse=True)
         total = len(results)
         if after is not None:
