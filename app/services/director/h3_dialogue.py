@@ -1522,6 +1522,201 @@ def _looks_like_a_multi_shot_body(body: str) -> bool:
     return len(_H3_MULTI_SHOT_BODY_RE.findall(text)) > 1
 
 
+_H3_SPOKEN_BLOCK_RE = re.compile(r"<d>.*?</d>", re.DOTALL)
+_H3_AT_TIMESTAMP_RE = re.compile(r"\bAt\s+(\d+(?:\.\d+)?)\s*s\b", re.IGNORECASE)
+_H3_BEHIND_POSITION_RE = re.compile(
+    r"background|behind|periphery|peripheral|out of focus behind",
+    re.IGNORECASE,
+)
+
+
+def h3_dialogue_blocks(prompt: str) -> list[str]:
+    """The spoken lines of a compiled prompt, in order, byte for byte."""
+
+    return _H3_SPOKEN_BLOCK_RE.findall(str(prompt or ""))
+
+
+def _h3_subject_display_name(subject: Mapping[str, Any]) -> str:
+    """The name a subject row is known by, whatever shape the row arrived in."""
+
+    name = _normalized_space(
+        _field(subject, "speaker_name", "") or _field(subject, "character_id", "")
+    )
+    if name:
+        return name
+    visual = _normalized_space(_field(subject, "visual_description", ""))
+    return visual.split(",")[0].strip() if visual else ""
+
+
+def diagnose_h3_clip_prompt(
+    prompt: str,
+    *,
+    duration_seconds: float = 0.0,
+    subjects: Sequence[Any] | None = None,
+    mode: str = "ref2va",
+    references: Sequence[Mapping[str, Any]] | None = None,
+    context_anchors: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    """What is measurably wrong with one clip's prompt.
+
+    The correction assistant used to receive only the prompt text and the
+    director's note, so it reasoned about a symptom it could not see and left
+    causes untouched: shot 26 of one project described Ricardo twice in the
+    background, in two shots inside a 7.29 s clip, and three correction notes
+    never removed it. These are the facts a reader would take from the saved
+    shot, so the assistant reasons from measurements instead of guesses.
+    """
+
+    text = str(prompt or "")
+    shots = _declared_shot_numbers(text)
+    findings: list[str] = []
+
+    try:
+        clip_seconds = float(duration_seconds or 0.0)
+    except (TypeError, ValueError):
+        clip_seconds = 0.0
+    if clip_seconds > 0:
+        findings.append(f"The clip is {clip_seconds:.2f} seconds long.")
+
+    if shots:
+        listed = ", ".join(f"[Shot {number}]" for number in shots)
+        findings.append(f"The body declares {len(shots)} shot(s): {listed}.")
+        if any(number > 1 for number in shots):
+            findings.append(
+                "A Director clip is ONE continuous shot, so the model performs "
+                "each declared shot inside the same clip: anyone placed in a "
+                "later framing is rendered again."
+            )
+    else:
+        findings.append("The body declares no [Shot 1] marker.")
+
+    positions: list[dict[str, str]] = []
+    for subject in subjects or []:
+        if not isinstance(subject, Mapping):
+            continue
+        name = _h3_subject_display_name(subject)
+        position = _normalized_space(
+            _field(subject, "position_or_relation", "")
+            or _field(subject, "position", "")
+        )
+        if name or position:
+            positions.append({"subject": name, "position": position})
+    behind = [
+        row["subject"] or "a subject"
+        for row in positions
+        if row["position"] and _H3_BEHIND_POSITION_RE.search(row["position"])
+    ]
+    if behind:
+        findings.append(
+            "Subject row: "
+            + ", ".join(behind)
+            + " is placed behind the speaker. For a prompt the director edited the "
+            "text is what the model reads, but a shot recompiled from the plan "
+            "would carry that placement again."
+        )
+    if len([row for row in positions if row["subject"]]) > 2:
+        findings.append(
+            f"The shot declares {len(positions)} subjects; a two-person scene "
+            "needs two."
+        )
+
+    if clip_seconds > 0:
+        beyond = [
+            float(value)
+            for value in _H3_AT_TIMESTAMP_RE.findall(text)
+            if float(value) > clip_seconds
+        ]
+        if beyond:
+            findings.append(
+                "Timestamps beyond the end of the clip: "
+                + ", ".join(f"{value}s" for value in sorted(set(beyond)))
+                + f" (the clip ends at {clip_seconds:.2f}s)."
+            )
+
+    blocks = h3_dialogue_blocks(text)
+    findings.append(f"The body carries {len(blocks)} spoken <d> line(s).")
+
+    errors = validate_h3_prompt_contract(
+        text,
+        [],
+        mode=mode,
+        references=references,
+        subjects=subjects,
+        context_anchors=context_anchors,
+    )
+    if errors:
+        findings.extend(f"Contract problem: {error}" for error in errors)
+
+    return {
+        "shots": shots,
+        "duration_seconds": clip_seconds,
+        "dialogue_blocks": len(blocks),
+        "subject_positions": positions,
+        "behind_speaker": behind,
+        "errors": list(errors),
+        "findings": findings,
+    }
+
+
+def review_h3_revision(
+    original: str,
+    revised: str,
+    *,
+    duration_seconds: float = 0.0,
+    subjects: Sequence[Any] | None = None,
+    mode: str = "ref2va",
+    references: Sequence[Mapping[str, Any]] | None = None,
+    context_anchors: Sequence[str] | None = None,
+) -> list[str]:
+    """Why a rewritten prompt must not reach the editor.
+
+    The assistant is told to keep the spoken lines and a single shot, but a rule
+    in a prompt is a request, not a guarantee. A rewrite that drops a <d> line or
+    keeps a [Shot 2] would otherwise be discovered by rendering the shot, which
+    is the most expensive way to find a typo. An empty list means the rewrite is
+    safe to hand over.
+    """
+
+    text = str(revised or "")
+    problems: list[str] = []
+
+    before = h3_dialogue_blocks(original)
+    after = h3_dialogue_blocks(text)
+    if before != after:
+        if len(before) != len(after):
+            problems.append(
+                f"The rewrite has {len(after)} spoken line(s) instead of "
+                f"{len(before)}: the spoken words must survive untouched."
+            )
+        else:
+            problems.append(
+                "The rewrite changed the spoken words. The <d> lines must be "
+                "copied exactly, including their [Language] tag."
+            )
+
+    shots = _declared_shot_numbers(text)
+    if any(number > 1 for number in shots):
+        listed = ", ".join(f"[Shot {number}]" for number in shots)
+        problems.append(
+            f"The rewrite still declares several shots ({listed}). A clip is "
+            "one continuous shot: fold them into a single [Shot 1]."
+        )
+    elif not shots:
+        problems.append("The rewrite lost its [Shot 1] marker.")
+
+    problems.extend(
+        validate_h3_prompt_contract(
+            text,
+            [],
+            mode=mode,
+            references=references,
+            subjects=subjects,
+            context_anchors=context_anchors,
+        )
+    )
+    return problems
+
+
 def _source_prompt_parts(
     prompt: str,
     *,

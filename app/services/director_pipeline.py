@@ -2738,36 +2738,76 @@ def rerun_clip_video(out_dir: str, pid: str, clip_index: int, prompt_override: s
     return _rerun_clip_video_impl(out_dir, pid, clip_index, prompt_override)
 
 
-_REVISE_PROMPT_SYSTEM = """You are correcting exactly ONE shot of an already-planned film.
+_REVISE_PROMPT_SYSTEM = """You are the prompt editor for exactly ONE shot of an already-planned film, \
+working in a short conversation with its director. They describe what looks wrong in the \
+rendered clip; you say what in the prompt causes it, and only then rewrite it.
 
-The director read the rendered shot and wrote a note about what is wrong. Rewrite \
-the shot's video prompt so the note is satisfied and nothing else changes.
+Answer with these three markers and nothing else:
 
-Hard rules:
-- Keep the prompt's existing structure and field order (subject_definitions, \
-summary, retention_analysis, detailed_description, overall_soundscape, \
-non_diegetic_music). Edit the fields; do not reorganise them.
-- Change ONLY what the note asks for. Preserve every other instruction, every \
-subject definition, every wardrobe and lighting detail, and every <Picture N> / \
-<Video N> / <Subject N> binding.
-- Keep every <d>...</d> dialogue block exactly as written, including its \
-[Language] tag. Never re-assign a line to a different speaker and never change \
-the words. If the note asks about who speaks, follow the note for the delivery \
-and blocking text only.
-- Respect the speakers' declared gender and voice: a subject declared FEMALE must \
-never be given masculine delivery, wardrobe or features, and the reverse.
-- Keep the shot continuous with its neighbours: same studio, same lighting, same \
-colour palette, same wardrobe, and motion that flows out of the previous shot and \
-into the next one.
-- A Director clip is exactly ONE continuous shot. The corrected \
-detailed_description must declare exactly one shot: one ``[Shot 1]`` marker and no \
-``[Shot 2]`` or later. If the current text declares later shots, fold what they show \
-into the single shot and delete the extra markers. Never preserve a second framing: \
-the model performs every shot it is given inside the same clip, so anyone placed in \
-a later framing is rendered a second time. The rule to change only what the note asks \
-for does not protect a second shot.
-- Return the corrected prompt ONLY. No commentary, no markdown fences, no \
-explanation."""
+ANALYSIS: what in the current prompt produces what the director describes. Quote the \
+offending words. Use the MEASUREMENT given to you instead of guessing: it was read from \
+the saved shot and names the shots declared, the subjects' positions, the timestamps and \
+any contract problem.
+QUESTION: one question, and only when the note is missing an intent you cannot infer. \
+Otherwise write NONE.
+FIXED_PROMPT: the complete corrected prompt, or NONE when you asked a question.
+
+Hard rules for FIXED_PROMPT:
+- Keep the prompt's six fields and their order (subject_definitions, summary, \
+retention_analysis, detailed_description, overall_soundscape, non_diegetic_music). \
+Edit the fields; do not reorganise them.
+- A Director clip is exactly ONE continuous shot: exactly one [Shot 1] marker and no \
+[Shot 2] or later. If the current text declares later shots, fold what they show into the \
+single shot and delete the extra markers. The rule to change only what the note asks for \
+does not protect a second shot.
+- Copy every <d>...</d> dialogue block exactly as written, in the same order, including \
+its [Language] tag. Never re-word, re-assign or drop a line: a rewrite that changes one is \
+rejected before the director sees it.
+- Keep every canonical identity and world anchor the measurement lists, spelled verbatim.
+- Respect the speakers' declared gender and voice: a subject declared FEMALE must never \
+be given masculine delivery, wardrobe or features, and the reverse.
+- Change only what the note requires. Preserve every other instruction, subject, wardrobe \
+and lighting detail, and every <Picture N> / <Video N> / <Subject N> binding.
+- Keep the shot continuous with its neighbours: same studio, same lighting, same colour \
+palette, same wardrobe, and motion that flows out of the previous shot and into the next.
+- No commentary outside the three markers."""
+
+
+_REVISION_MARKER_RE = re.compile(
+    r"(?mi)^\s*(ANALYSIS|QUESTION|FIXED_PROMPT)\s*:\s*"
+)
+
+
+def _parse_revision_envelope(text: str) -> dict:
+    """Split the assistant's answer into its analysis, question and prompt.
+
+    Markers rather than JSON, so a two-thousand-character Context-IR prompt never
+    has to be escaped into a JSON string. An answer with no markers is read as the
+    analysis alone -- unless it already is a compiled prompt, which is what the
+    older single-shot revision returned; that still lands in the editor.
+    """
+
+    raw = str(text or "").strip()
+    matches = list(_REVISION_MARKER_RE.finditer(raw))
+    if not matches:
+        from services.director.h3_dialogue import looks_like_compiled_h3_prompt
+        if looks_like_compiled_h3_prompt(raw):
+            return {"analysis": "", "question": "", "prompt": raw}
+        return {"analysis": raw, "question": "", "prompt": ""}
+    parts = {"analysis": "", "question": "", "prompt": ""}
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
+        value = raw[match.end():end].strip()
+        if value.upper().startswith("NONE"):
+            value = ""
+        key = match.group(1).upper()
+        if key == "ANALYSIS":
+            parts["analysis"] = value
+        elif key == "QUESTION":
+            parts["question"] = value
+        else:
+            parts["prompt"] = value
+    return parts
 
 
 def _revise_shot_neighbours(clips: list, clip_index: int) -> str:
@@ -2791,11 +2831,15 @@ def revise_clip_prompt(
     clip_index: int,
     instruction: str,
     current_prompt: str = "",
+    history: Optional[list] = None,
 ) -> dict:
-    """Ask the LLM to rewrite one shot's prompt per a director's correction note.
+    """One turn of the correction conversation for a single shot.
 
-    Returns the revised text without saving it, so the user reviews the result
-    in the prompt editor before it becomes the shot's source of truth.
+    Answers with the assistant's reading of the prompt, a question when the note
+    is missing an intent, and a rewritten prompt when it has one. Nothing is
+    saved: the result lands in the prompt editor for review. A rewrite is only
+    handed over when it survives ``review_h3_revision``, so a dropped spoken line
+    or a second shot is refused here rather than found by rendering.
     """
 
     state = load_pipeline_state(out_dir, pid)
@@ -2832,12 +2876,44 @@ def revise_clip_prompt(
     neighbours = _revise_shot_neighbours(clips, clip_index)
     if neighbours:
         task.extend(["", "ADJACENT SHOTS (keep continuity):", neighbours])
+
+    from services.director.h3_dialogue import (
+        _h3_plan_context_anchors,
+        diagnose_h3_clip_prompt,
+        review_h3_revision,
+    )
+
+    # Read the shot before writing anything. The assistant used to receive only
+    # the prompt text and the note, so it reasoned about a symptom it could not
+    # see: three notes on one shot never mentioned the second shot or the
+    # "background right" placement that were producing the duplicate.
+    diagnosis = diagnose_h3_clip_prompt(
+        prompt,
+        duration_seconds=clip.get("_director_duration_sec") or 0.0,
+        subjects=clip.get("_director_subjects_on_screen") or [],
+        mode=clip.get("_director_h3_prompt_mode") or "ref2va",
+        references=clip.get("_director_h3_reference_manifest") or [],
+        context_anchors=_h3_plan_context_anchors(clip),
+    )
+    task.extend(["", "MEASUREMENT OF THE CURRENT PROMPT (read the facts, do not guess):"])
+    task.extend(f"- {finding}" for finding in diagnosis["findings"])
+    turns = [
+        turn for turn in (history or [])
+        if isinstance(turn, dict) and str(turn.get("text") or "").strip()
+    ][-6:]
+    if turns:
+        task.append("")
+        task.append("CONVERSATION SO FAR:")
+        for turn in turns:
+            role = str(turn.get("role") or "director")
+            label = "DIRECTOR" if role == "director" else "YOU"
+            task.append(f"{label}: {str(turn.get('text')).strip()[:1200]}")
     task.extend([
         "",
         "THE DIRECTOR'S NOTE — fix exactly this:",
         note,
         "",
-        "Return the corrected prompt for this shot only.",
+        "Answer with ANALYSIS, QUESTION and FIXED_PROMPT.",
     ])
 
     from services import llm_service
@@ -2865,12 +2941,58 @@ def revise_clip_prompt(
     )
     revised = str(revised or "").strip()
     if not revised:
-        raise ValueError("The model returned no revised prompt; try again.")
+        raise ValueError("The model returned no answer; try again.")
+    parts = _parse_revision_envelope(revised)
+
+    result = {
+        "clip_index": clip_index,
+        "analysis": parts["analysis"],
+        "question": parts["question"],
+        "diagnosis": diagnosis,
+        "rewritten": False,
+        "errors": [],
+        "video_prompt": "",
+    }
+    if not parts["prompt"]:
+        if parts["question"]:
+            print(
+                f"[Pipeline {pid}] Shot {clip_index + 1}: the assistant asked "
+                "before rewriting."
+            )
+        else:
+            print(
+                f"[Pipeline {pid}] Shot {clip_index + 1}: the assistant reported "
+                "the prompt without rewriting it."
+            )
+        return result
+
+    # The spoken lines, the single shot and the contract are checked here rather
+    # than requested in the system prompt: a rule in a prompt is a request, and
+    # this is what decides whether a rewrite reaches the editor.
+    problems = review_h3_revision(
+        prompt,
+        parts["prompt"],
+        duration_seconds=clip.get("_director_duration_sec") or 0.0,
+        subjects=clip.get("_director_subjects_on_screen") or [],
+        mode=clip.get("_director_h3_prompt_mode") or "ref2va",
+        references=clip.get("_director_h3_reference_manifest") or [],
+        context_anchors=_h3_plan_context_anchors(clip),
+    )
+    if problems:
+        result["errors"] = problems
+        print(
+            f"[Pipeline {pid}] Shot {clip_index + 1}: the rewrite was refused "
+            f"({len(problems)} problem(s)); the prompt is unchanged."
+        )
+        return result
+
+    result["rewritten"] = True
+    result["video_prompt"] = parts["prompt"]
     print(
         f"[Pipeline {pid}] Shot {clip_index + 1} prompt revised from a "
-        f"director note ({len(prompt)} -> {len(revised)} chars)."
+        f"director note ({len(prompt)} -> {len(parts['prompt'])} chars)."
     )
-    return {"clip_index": clip_index, "video_prompt": revised}
+    return result
 
 
 def _record_regenerated_clip(

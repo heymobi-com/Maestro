@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, Component, type ReactNode } from 'react'
 import { X, ChevronDown, ChevronRight, Play, ImageIcon, Check, AlertTriangle, Clock, Brain, Sparkles, Loader2, Camera, Film, Combine, Pencil, Trash2, Maximize2 } from 'lucide-react'
 import { FloatingPanel } from './FloatingPanel'
 import { useStore } from '../../stores/useStore'
-import { getFileUrl, reviseClipPrompt, updateClipPrompt } from '../../api/client'
+import { getFileUrl, reviseClipPrompt, updateClipPrompt, type RevisionAnswer, type RevisionTurn } from '../../api/client'
 import type { PipelineClipState, SavedPipelineState } from '../../types'
 import { multipleShotWarning } from '../../lib/h3Prompt'
 
@@ -208,6 +208,11 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
   const [fixNote, setFixNote] = useState('')
   const [fixing, setFixing] = useState(false)
   const [fixError, setFixError] = useState('')
+  // The correction is a short conversation, bounded per shot: the director's
+  // notes and what the assistant answered, so a second note builds on the first
+  // instead of starting again from the same symptom.
+  const [fixTurns, setFixTurns] = useState<RevisionTurn[]>([])
+  const [fixAnswer, setFixAnswer] = useState<RevisionAnswer | null>(null)
   const [showPromptWindow, setShowPromptWindow] = useState(false)
   const [showPreview, setShowPreview] = useState(false)
   const [loadPreview, setLoadPreview] = useState(false)
@@ -295,21 +300,33 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
   const runFixWithAi = async () => {
     setFixing(true)
     setFixError('')
+    const note = fixNote.trim()
     try {
       const windowed = (clip.window_prompts?.length || 0) > 1
-      const result = await reviseClipPrompt(
+      const answer = await reviseClipPrompt(
         pipeline.pipeline_id,
         clip.index,
-        fixNote,
+        note,
         windowed
           ? clip.window_prompts.join('\n')
           : (editingVideo ? editVideoPrompt : clip.video_prompt || ''),
+        fixTurns,
       )
-      // Show it in the editor instead of saving straight away: the rewrite is
-      // a suggestion, and the user stays the one who approves it.
-      setEditVideoPrompt(result.video_prompt)
-      setEditingVideo(true)
+      setFixAnswer(answer)
+      // Keep the turn so the next note builds on what the assistant already said
+      // instead of describing the same symptom from scratch.
+      setFixTurns([
+        ...fixTurns,
+        { role: 'director', text: note },
+        { role: 'assistant', text: answer.analysis || answer.question || 'No change suggested.' },
+      ])
       setFixNote('')
+      // A suggestion shown in the editor, never saved: the user approves it. A
+      // refused rewrite arrives with errors and leaves the prompt untouched.
+      if (answer.rewritten && answer.video_prompt) {
+        setEditVideoPrompt(answer.video_prompt)
+        setEditingVideo(true)
+      }
     } catch (error) {
       setFixError(error instanceof Error ? error.message : String(error))
     } finally {
@@ -586,18 +603,39 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
           })()}
           {saveError && <p role="alert" className="mt-1 text-[9px] text-indicator-warning">{saveError}</p>}
 
-          {/* A plain-language correction for this one shot. Saying what is
-              wrong is far easier than hand-editing a compiled H3 prompt, and
-              the rewrite is given the neighbouring shots so the sequence
-              stays continuous. The result lands in the editor above, unsaved. */}
+          {/* A short correction conversation for this one shot. The assistant is
+              handed the measurement of the saved shot, so it names the cause
+              instead of guessing at a symptom it cannot see, and it may ask
+              before rewriting. A rewrite reaches the editor only when it keeps
+              every spoken line and carries a single shot. */}
           <div className="mt-1.5 rounded border border-border bg-bg-tertiary/60 p-1.5">
-            <div className="text-[8px] text-text-muted uppercase tracking-wider mb-0.5">
-              Correct this shot
+            <div className="flex items-center justify-between mb-0.5">
+              <span className="text-[8px] text-text-muted uppercase tracking-wider">
+                Correct this shot
+              </span>
+              {fixTurns.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => { setFixTurns([]); setFixAnswer(null); setFixError('') }}
+                  className="text-[8px] text-text-muted hover:text-text-primary transition-colors">
+                  Start over
+                </button>
+              )}
             </div>
+            {fixTurns.length > 0 && (
+              <div className="mb-1 max-h-28 space-y-0.5 overflow-y-auto">
+                {fixTurns.map((turn, i) => (
+                  <p key={i} className={`text-[9px] ${turn.role === 'director' ? 'text-text-secondary' : 'text-accent-blue/90'}`}>
+                    <span className="text-text-muted">{turn.role === 'director' ? 'You: ' : 'AI: '}</span>
+                    {turn.text}
+                  </p>
+                ))}
+              </div>
+            )}
             <textarea
               value={fixNote}
               onChange={e => setFixNote(e.target.value)}
-              placeholder="What is wrong? e.g. this line is delivered by (S2) but it is written for the woman"
+              placeholder="What is wrong? e.g. the man appears twice; they should sit facing each other"
               className="w-full bg-bg-tertiary border border-border rounded px-1.5 py-1 text-[10px] text-text-primary resize-none focus:outline-none focus:border-accent-blue"
               rows={2}
               disabled={fixing}
@@ -607,14 +645,48 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                 onClick={runFixWithAi}
                 disabled={fixing || !fixNote.trim() || busy}
                 className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] bg-accent-blue/15 text-accent-blue hover:bg-accent-blue/25 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                title="Rewrite this shot's prompt with the LLM, keeping the rest of the sequence consistent">
+                title="The assistant reads the saved shot, says what causes the problem, asks when the note is missing an intent, and rewrites only what survives the checks">
                 <Sparkles size={9} />
-                {fixing ? 'Rewriting…' : 'Fix with AI'}
+                {fixing ? 'Reading shot…' : fixTurns.length > 0 ? 'Send' : 'Fix with AI'}
               </button>
               {fixing && (
-                <span className="text-[9px] text-text-muted">Rewriting shot {clip.index + 1}…</span>
+                <span className="text-[9px] text-text-muted">Reading shot {clip.index + 1}…</span>
               )}
             </div>
+            {!!fixAnswer?.diagnosis?.findings?.length && (
+              <details className="mt-1">
+                <summary className="text-[8px] text-text-muted cursor-pointer">
+                  What the measurement found
+                </summary>
+                <ul className="mt-1 space-y-0.5">
+                  {fixAnswer.diagnosis.findings.map((finding, i) => (
+                    <li key={i} className="text-[9px] text-text-muted">· {finding}</li>
+                  ))}
+                </ul>
+              </details>
+            )}
+            {fixAnswer?.question && (
+              <p className="mt-1 rounded border border-accent-blue/30 bg-bg-tertiary p-1 text-[9px] text-accent-blue">
+                {fixAnswer.question}
+              </p>
+            )}
+            {!!fixAnswer?.errors?.length && (
+              <div className="mt-1 rounded border border-indicator-warning/40 bg-bg-tertiary p-1">
+                <p className="text-[9px] text-indicator-warning">
+                  The rewrite was refused, so the prompt is unchanged:
+                </p>
+                <ul className="mt-0.5 space-y-0.5">
+                  {fixAnswer.errors.map((problem, i) => (
+                    <li key={i} className="text-[9px] text-indicator-warning/90">· {problem}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {fixAnswer?.rewritten && (
+              <p className="mt-1 text-[9px] text-indicator-success">
+                The rewrite is in the editor above — review it, then save.
+              </p>
+            )}
             {fixError && <p role="alert" className="mt-1 text-[9px] text-indicator-warning">{fixError}</p>}
           </div>
 

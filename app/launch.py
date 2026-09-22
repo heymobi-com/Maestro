@@ -9991,12 +9991,14 @@ async def save_pipeline_clip_prompt(pid: str, clip_index: int, request: Request)
 
 @api.post("/api/v1/director/pipelines/{pid}/clips/{clip_index}/revise-prompt")
 async def revise_pipeline_clip_prompt(pid: str, clip_index: int, request: Request):
-    """Rewrite one shot's prompt from a director's correction note.
+    """One turn of the correction conversation for a single shot.
 
-    The director says what is wrong in plain language; the LLM returns the
-    corrected prompt, which the UI shows for review before it is saved. The
-    note is deliberately combined with the adjacent shots' prompts so the
-    rewrite stays continuous with the rest of the sequence.
+    The director says what is wrong in plain language; the assistant reports what
+    in the prompt causes it, asks when the note is missing an intent, and returns
+    a corrected prompt that only reaches the UI if it keeps every spoken line,
+    carries exactly one shot and passes the prompt contract. The measurement, the
+    adjacent shots and the turns so far travel with the note so the rewrite stays
+    continuous with the rest of the sequence.
     """
     from services.director_pipeline import revise_clip_prompt
     try:
@@ -10011,12 +10013,16 @@ async def revise_pipeline_clip_prompt(pid: str, clip_index: int, request: Reques
     current = body.get("prompt")
     if current is not None and not isinstance(current, str):
         return JSONResponse({"error": "prompt must be text"}, status_code=400)
+    history = body.get("history")
+    if history is not None and not isinstance(history, list):
+        return JSONResponse({"error": "history must be a list of turns"}, status_code=400)
     base = wgp.server_config.get("save_path", "outputs")
     try:
         result = await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: revise_clip_prompt(
                 base, pid, clip_index, instruction, current or "",
+                history or [],
             ),
         )
     except ValueError as exc:

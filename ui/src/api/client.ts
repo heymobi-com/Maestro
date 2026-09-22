@@ -1116,14 +1116,53 @@ export async function updateClipPrompt(pid: string, clipIndex: number, update: {
 }
 
 /**
- * Ask the LLM to rewrite one shot's prompt from a plain-language correction.
- * Returns the revised text for review; nothing is saved until the user saves.
+ * One turn of the correction conversation for a shot.
+ *
+ * The assistant reports what in the prompt causes the problem, asks when the note
+ * is missing an intent, and returns a rewrite only when it keeps every spoken
+ * line, carries exactly one shot and passes the prompt contract. Nothing is saved
+ * here: the rewrite lands in the prompt editor for review.
  */
-export async function reviseClipPrompt(pid: string, clipIndex: number, instruction: string, prompt?: string): Promise<{ clip_index: number; video_prompt: string }> {
+export interface RevisionTurn {
+  role: 'director' | 'assistant'
+  text: string
+}
+
+export interface ShotDiagnosis {
+  shots: number[]
+  duration_seconds: number
+  dialogue_blocks: number
+  subject_positions: Array<{ subject: string; position: string }>
+  behind_speaker: string[]
+  errors: string[]
+  findings: string[]
+}
+
+export interface RevisionAnswer {
+  clip_index: number
+  analysis: string
+  question: string
+  diagnosis: ShotDiagnosis
+  rewritten: boolean
+  errors: string[]
+  video_prompt: string
+}
+
+export async function reviseClipPrompt(
+  pid: string,
+  clipIndex: number,
+  instruction: string,
+  prompt?: string,
+  history: RevisionTurn[] = [],
+): Promise<RevisionAnswer> {
   const res = await fetch(`${BASE}/api/v1/director/pipelines/${encodeURIComponent(pid)}/clips/${clipIndex}/revise-prompt`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ instruction, prompt: prompt || undefined }),
+    body: JSON.stringify({
+      instruction,
+      prompt: prompt || undefined,
+      history: history.length ? history : undefined,
+    }),
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: 'Could not revise the prompt' }))

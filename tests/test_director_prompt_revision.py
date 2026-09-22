@@ -122,15 +122,24 @@ class PromptRevisionTests(unittest.TestCase):
         # Continuity comes from both neighbours, not just the previous shot.
         self.assertIn("previous shot 1: first shot body", sent)
         self.assertIn("next shot 3: last shot body", sent)
-        self.assertEqual(result["video_prompt"], "corrected shot body")
         self.assertEqual(result["clip_index"], 1)
+        # The answer is now asked for as a reading plus a rewrite. Plain prose
+        # carries no FIXED_PROMPT, so nothing is handed over to the editor: a
+        # stray sentence must never replace a shot.
+        self.assertEqual(result["video_prompt"], "")
+        self.assertFalse(result["rewritten"])
 
     def test_the_system_prompt_forbids_reassigning_dialogue(self):
         system = pipeline._REVISE_PROMPT_SYSTEM
 
         self.assertIn("<d>", system)
-        self.assertIn("Never re-assign a line", system)
-        self.assertIn("Change ONLY what the note asks for", system)
+        self.assertIn("Never re-word, re-assign or drop a line", system)
+        self.assertIn("Change only what the note requires", system)
+        # "Change only what the note asks for" used to protect the extra shots:
+        # a note about the framing left [Shot 2] alone. The exception is explicit
+        # now, and a [Shot 2] is the first thing the gate refuses.
+        self.assertIn("does not protect a second shot", system)
+        self.assertIn("exactly one [Shot 1] marker", system)
         self.assertEqual(system, pipeline._REVISE_PROMPT_SYSTEM)
 
     def test_the_revision_is_not_saved(self):
@@ -149,7 +158,7 @@ class PromptRevisionTests(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             pipeline.revise_clip_prompt(self.out_dir, self.pid, 0, "fix it")
 
-        self.assertIn("returned no revised prompt", str(caught.exception))
+        self.assertIn("returned no answer", str(caught.exception))
 
 
 class PromptRevisionWiringTests(unittest.TestCase):
@@ -189,8 +198,13 @@ class PromptRevisionWiringTests(unittest.TestCase):
         start = dashboard.index("const runFixWithAi = async () => {")
         body = dashboard[start:dashboard.index("}", dashboard.index("setFixing(false)", start))]
 
-        self.assertIn("setEditVideoPrompt(result.video_prompt)", body)
+        self.assertIn("setEditVideoPrompt(answer.video_prompt)", body)
         self.assertNotIn("onSavePrompt", body)
+        # Only a rewrite that survived the gate reaches the editor. A refused one
+        # arrives with its errors and the editor keeps the current prompt, so the
+        # refusal cannot be mistaken for an accepted suggestion.
+        self.assertIn("answer.rewritten && answer.video_prompt", body)
+        self.assertIn("setFixAnswer(answer)", body)
 
 
 if __name__ == "__main__":
