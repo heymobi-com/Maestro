@@ -26,20 +26,16 @@ module.exports = {
       filetypes: [["Git bundle", "*.bundle"]]
     }
   }, {
-    // Copy it into the repo first: git then receives a short relative path with
-    // no spaces, which avoids a class of quoting problems in the shell.
-    method: "fs.copy",
-    params: {
-      src: "{{input.paths[0]}}",
-      dest: "dist/local_fixes.bundle"
-    }
-  }, {
     // Fetching into a branch is non-destructive. A bundle whose base commit is
     // missing fails here, while the working tree is still untouched, so the
     // diagnostic is "run Update first" rather than a half-applied state.
+    //
+    // The picked path is used directly, quoted: nothing is copied into the repo
+    // first, because that would depend on a destination folder existing on the
+    // receiving machine, and a folder that is ignored by git can be absent.
     method: "shell.run",
     params: {
-      message: "git fetch dist/local_fixes.bundle main:maestro-local-fixes"
+      message: "git fetch \"{{input.paths[0]}}\" main:maestro-local-fixes"
     }
   }, {
     // -c on the command line only: a merge commit needs an author, and applying

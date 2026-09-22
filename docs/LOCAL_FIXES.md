@@ -10,6 +10,11 @@ projects.
 1. **Run Update once first.** The bundle records the upstream commit it was built from, so
    the install has to be on that commit or newer. `Advanced > Update`, in the app menu.
 2. **`Advanced > Apply local fixes`**, then pick the `.bundle` file when the dialog opens.
+
+   The file may live anywhere: Downloads, Desktop, an external drive. It is read from where
+   it is and nothing is copied into the repository. Two details if the dialog seems empty:
+   extract the bundle first if it arrived inside a `.zip`, and set the dialog's file-type
+   filter to "All files" if the downloader renamed the extension.
 3. **Stop Maestro if it is running, start it again, and hard-refresh the browser**
    (`Ctrl+Shift+R`).
 
