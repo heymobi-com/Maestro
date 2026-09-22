@@ -1966,12 +1966,30 @@ def update_clip_prompt(out_dir: str, pid: str, clip_index: int, update: dict) ->
                 clip["_director_h3_source_prompt"] = clip["video_prompt"]
                 clip["_director_prompt_user_edited"] = True
                 clip["_director_h3_compiled_prompt"] = ""
-                clip["_director_dialogue_beats"] = []
+                # Clearing the beat cache outright also destroyed the speech
+                # plan: with no beats this compiler can no longer rebuild the
+                # shot's dialogue and timing contract, and a reviewed compiled
+                # prompt is rendered verbatim, so nothing downstream restored
+                # it. The shot then rendered with closed mouths however often
+                # the director note was rewritten. Keep the beats whose lines
+                # survived the edit; the ones it removed must not come back.
+                clip["_director_dialogue_beats"] = _retained_h3_beats(clip)
 
         with _pipeline_file_lock:
             return _update_saved_pipeline_locked(out_dir, pid, apply_update) is not None
     finally:
         _release_pipeline_operation(pid)
+
+
+def _retained_h3_beats(clip: dict, prompt: str = "") -> list[dict]:
+    """The clip's dialogue beats that the text being rendered still carries."""
+
+    from services.director.h3_dialogue import retain_dialogue_beats
+
+    return retain_dialogue_beats(
+        clip.get("_director_dialogue_beats") or [],
+        str(prompt or clip.get("video_prompt") or ""),
+    )
 
 
 def _update_clip_tag_locked(out_dir: str, pid: str, clip_index: int, tag: Optional[str]) -> bool:
@@ -3173,10 +3191,11 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
             "" if prompt_override is not None
             else clip.get("_director_h3_compiled_prompt") or prompt
         ),
-        "_director_dialogue_beats": (
-            [] if prompt_override is not None
-            else clip.get("_director_dialogue_beats", []) or []
-        ),
+        # A rerun of an edited shot used to reach preflight with no beats at
+        # all, which is the one input this compiler needs to rebuild the
+        # shot's speech contract. Retain instead, against the text that is
+        # actually being rendered.
+        "_director_dialogue_beats": _retained_h3_beats(clip, prompt),
         "_director_subjects_on_screen": (
             clip.get("_director_subjects_on_screen", []) or []
         ),
@@ -3193,6 +3212,9 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
         "_director_opening_blocking": clip.get("_director_opening_blocking", ""),
         "_director_closing_blocking": clip.get("_director_closing_blocking", ""),
         "_director_audio_plan": clip.get("_director_audio_plan") or {},
+        # Written back after a rerun below: without the key the write-back
+        # stored None over a contract the clip still had.
+        "_director_vocal_contract": clip.get("_director_vocal_contract"),
     }
     _apply_h3_music_audio_contract(
         video_model, [prompt_plan],

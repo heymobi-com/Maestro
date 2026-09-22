@@ -1585,6 +1585,82 @@ def h3_dialogue_blocks(prompt: str) -> list[str]:
     return _H3_SPOKEN_BLOCK_RE.findall(str(prompt or ""))
 
 
+_H3_LINE_SPEAKER_RE = re.compile(
+    r"[(\(]\s*(?:Speaker[_ ]?|S)\s*(\d+)\s*[)\)]",
+    re.IGNORECASE,
+)
+
+
+def h3_dialogue_line_speakers(prompt: str) -> list[str]:
+    """The speaker bound to each spoken line, in line order.
+
+    A compiled body writes the binding immediately ahead of the block
+    (``(S2) speaks with a heavy sigh: <d>...</d>``), so the last marker found
+    before a block belongs to that block.
+    """
+
+    prompt = str(prompt or "")
+    speakers: list[str] = []
+    cursor = 0
+    for block in _H3_SPOKEN_BLOCK_RE.finditer(prompt):
+        marker = None
+        for candidate in _H3_LINE_SPEAKER_RE.finditer(prompt, cursor, block.start()):
+            marker = candidate
+        speakers.append(f"(S{marker.group(1)})" if marker else "")
+        cursor = block.end()
+    return speakers
+
+
+def retain_dialogue_beats(
+    beats: Sequence[Any] | None,
+    prompt: str,
+) -> list[dict]:
+    """Keep the beats whose lines *prompt* still carries, in line order.
+
+    Saving reviewed prompt text used to clear the beat cache outright. That also
+    dropped the plan metadata -- the speaker, the delivery, and the words the
+    timing clause is scheduled from -- this compiler needs to rebuild a shot's
+    speech contract. A reviewed compiled prompt is rendered verbatim, so nothing
+    downstream could restore it and the shot rendered with closed mouths however
+    often the note was rewritten. A line the editor deleted must not come back;
+    a line the editor kept must keep its plan metadata.
+    """
+
+    block_words: list[str] = []
+    for block in h3_dialogue_blocks(prompt):
+        try:
+            block_words.append(_dialogue_payload(block)[1])
+        except H3DialogueContractError:
+            block_words.append("")
+    if not block_words:
+        return []
+    speakers = h3_dialogue_line_speakers(prompt)
+    kept: list[dict] = []
+    cursor = 0
+    for beat in beats or []:
+        spoken = _field(beat, "spoken_text", "")
+        if not _normalized_space(spoken) or is_silent_dialogue(spoken):
+            continue
+        try:
+            words = _dialogue_payload(spoken)[1]
+        except H3DialogueContractError:
+            continue
+        if not words:
+            continue
+        for index in range(cursor, len(block_words)):
+            if block_words[index] != words:
+                continue
+            entry = dict(beat) if isinstance(beat, Mapping) else {"spoken_text": spoken}
+            # The prompt is what the user reads and approves, so its binding
+            # wins over a stale plan id when the two disagree.
+            if index < len(speakers) and speakers[index]:
+                entry["speaker_id"] = speakers[index]
+            kept.append(entry)
+            cursor = index + 1
+            break
+    return kept
+
+
 def _h3_subject_display_name(subject: Mapping[str, Any]) -> str:
     """The name a subject row is known by, whatever shape the row arrived in."""
 

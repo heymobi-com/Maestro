@@ -30,9 +30,11 @@ if _APP_DIR not in sys.path:
 
 from services import director_pipeline as pipeline  # noqa: E402
 from services.director.h3_dialogue import (  # noqa: E402
+    compile_h3_clip_plans,
     diagnose_h3_clip_prompt,
     h3_dialogue_blocks,
     reconcile_audio_plan_with_dialogue,
+    retain_dialogue_beats,
     review_h3_revision,
 )
 from services.director_pipeline import (  # noqa: E402
@@ -41,6 +43,7 @@ from services.director_pipeline import (  # noqa: E402
     _changed_characters,
     _changed_words,
     _parse_revision_envelope,
+    _retained_h3_beats,
 )
 
 
@@ -572,6 +575,225 @@ class GestureFindingTests(unittest.TestCase):
         joined = " ".join(diagnosis["findings"])
         self.assertIn("let the speaking mouth do the work", joined)
         self.assertIn("move the gesture to a beat where that person is silent", joined)
+
+
+# From the real shot: three lines the plan wrote, and one the editor removed.
+REVIEWED_LINES = [
+    ("S2", "with a heavy sigh", "Me invadio una sensacion de obsolescencia."),
+    ("S1", "calmly", "Es una reaccion muy natural."),
+    ("S2", "earnestly", "Es que piensalo."),
+]
+
+# The plan's own ids were misaligned with the text, and it still lists a line the
+# editor deleted -- both are exactly what the retention has to resolve.
+PLAN_BEATS = [
+    {"spoken_text": "Me invadio una sensacion de obsolescencia.",
+     "delivery": "with a heavy sigh", "speaker_id": "(S1)"},
+    {"spoken_text": "Es una reaccion muy natural.",
+     "delivery": "calmly", "speaker_id": "(S2)"},
+    {"spoken_text": "Es que piensalo.",
+     "delivery": "earnestly", "speaker_id": "(S1)"},
+    {"spoken_text": "A line the editor deleted.",
+     "delivery": "flat", "speaker_id": "(S1)"},
+]
+
+REVIEWED_SUBJECTS = [
+    {"character_id": "(S1)", "speaker_name": "Valeria",
+     "visual_description": "Valeria, a woman in a navy blazer.",
+     "position_or_relation": "foreground left"},
+    {"character_id": "(S2)", "speaker_name": "Ricardo",
+     "visual_description": "Ricardo, a man with grey hair and glasses.",
+     "position_or_relation": "across the table"},
+]
+
+
+def _reviewed_prompt(lines, *, contract: bool = True) -> str:
+    """A compiled prompt that came back through the editor."""
+
+    body = " ".join(
+        f"({speaker}) speaks {delivery}: <d>[Spanish] {text}</d>."
+        for speaker, delivery, text in lines
+    )
+    tail = (
+        "Only the tagged lines are spoken, once each in order. After the final "
+        "tagged line, every character remains silent with their mouth closed; no "
+        "invented dialogue, muttering, gibberish, speech-like vocalization, or "
+        "background voice occurs. "
+        if contract else ""
+    )
+    return (
+        "subject_definitions: <Subject 1> (S1): Valeria, a woman in a navy blazer.\n"
+        "<Subject 2> (S2): Ricardo, a man with grey hair and glasses.\n\n"
+        "summary: [reference generation] Valeria speaks to Ricardo across a table.\n\n"
+        "retention_analysis: Preserve the described identities and wardrobe.\n\n"
+        "detailed_description: The target video keeps its style. [Shot 1] "
+        f"{body} {tail}\n\n"
+        "overall_soundscape: Natural ambience.\n\n"
+        "non_diegetic_music: N/A\n"
+    )
+
+
+class SpeechPlanSurvivesTheEdit(unittest.TestCase):
+    """Saving reviewed text must not cost the shot its speech plan.
+
+    ``update_clip_prompt`` cleared the beat cache outright. That is the one
+    input this compiler needs to rebuild a shot's dialogue and timing contract,
+    and a reviewed compiled prompt is rendered verbatim, so nothing downstream
+    restored it: the shot kept rendering with closed mouths however often the
+    director note was rewritten.
+    """
+
+    def test_kept_lines_keep_their_plan_metadata(self):
+        kept = retain_dialogue_beats(PLAN_BEATS, _reviewed_prompt(REVIEWED_LINES))
+
+        self.assertEqual(
+            [beat["delivery"] for beat in kept],
+            ["with a heavy sigh", "calmly", "earnestly"],
+        )
+
+    def test_the_prompt_binding_wins_over_a_stale_plan_speaker(self):
+        kept = retain_dialogue_beats(PLAN_BEATS, _reviewed_prompt(REVIEWED_LINES))
+
+        self.assertEqual(
+            [beat["speaker_id"] for beat in kept], ["(S2)", "(S1)", "(S2)"],
+        )
+
+    def test_a_line_the_editor_deleted_does_not_come_back(self):
+        kept = retain_dialogue_beats(PLAN_BEATS, _reviewed_prompt(REVIEWED_LINES))
+
+        self.assertNotIn(
+            "A line the editor deleted.",
+            [beat["spoken_text"] for beat in kept],
+        )
+
+    def test_a_rerun_override_drops_the_beat_of_a_line_it_removed(self):
+        clip = {
+            "video_prompt": _reviewed_prompt(REVIEWED_LINES),
+            "_director_dialogue_beats": PLAN_BEATS,
+        }
+
+        kept = _retained_h3_beats(clip, _reviewed_prompt(REVIEWED_LINES[:2]))
+
+        self.assertEqual(len(kept), 2)
+        self.assertEqual(kept[-1]["spoken_text"], REVIEWED_LINES[1][2])
+
+    def test_a_prompt_with_no_spoken_lines_keeps_no_beats(self):
+        self.assertEqual(
+            retain_dialogue_beats(PLAN_BEATS, "subject_definitions: none."), [],
+        )
+
+
+class ReviewedPromptKeepsItsShape(unittest.TestCase):
+    """A reviewed prompt is rendered as it was saved, not wrapped again.
+
+    Rebuilding it wrapped a SECOND six-field Context-IR prompt around the first:
+    one real shot reached 17,331 characters with its lines present twice and its
+    speaker no longer resolvable. The text the director approved is authoritative.
+    """
+
+    def _compile(self, prompt: str, beats) -> dict:
+        plan = {
+            "video_prompt": prompt,
+            "_director_prompt_user_edited": True,
+            "_director_h3_source_prompt": prompt,
+            "_director_h3_compiled_prompt": "",
+            "_director_dialogue_beats": beats,
+            "_director_subjects_on_screen": REVIEWED_SUBJECTS,
+            "_director_duration_sec": 7.29,
+            "_director_h3_prompt_mode": "ref2va",
+            "_director_h3_model_family": "ref2va",
+            "_director_speaker_registry": {},
+            "_director_audio_plan": {"mode": "dialogue_driven", "lip_sync_critical": True},
+        }
+
+        compiled = compile_h3_clip_plans(
+            [plan], prompt_modes=["ref2va"], durations=[7.29],
+        )
+
+        return dict(compiled[0])
+
+    def test_the_reviewed_text_reaches_the_model_unchanged(self):
+        prompt = _reviewed_prompt(REVIEWED_LINES, contract=False)
+        beats = retain_dialogue_beats(PLAN_BEATS, prompt)
+
+        result = self._compile(prompt, beats)
+
+        self.assertEqual(result["video_prompt"], prompt)
+        self.assertEqual(
+            h3_dialogue_blocks(result["video_prompt"]),
+            h3_dialogue_blocks(prompt),
+        )
+
+    def test_the_six_field_prompt_is_not_wrapped_twice(self):
+        prompt = _reviewed_prompt(REVIEWED_LINES)
+        beats = retain_dialogue_beats(PLAN_BEATS, prompt)
+
+        result = self._compile(prompt, beats)
+
+        self.assertEqual(result["video_prompt"].count("subject_definitions:"), 1)
+        self.assertEqual(result["video_prompt"].count("[Shot 1]"), 1)
+
+
+class SavedPromptKeepsTheSpeechPlan(unittest.TestCase):
+    """The pipeline write path, not just the helper."""
+
+    def setUp(self):
+        self.originals = {
+            "threads": pipeline._pipeline_threads,
+            "child_jobs": pipeline._pipeline_child_jobs,
+            "starting": pipeline._pipeline_starting,
+            "operations": pipeline._pipeline_operations,
+            "deleting": pipeline._pipeline_deleting,
+        }
+        self.temp_dir = tempfile.TemporaryDirectory()
+        pipeline._pipeline_threads = {}
+        pipeline._pipeline_child_jobs = {}
+        pipeline._pipeline_starting = set()
+        pipeline._pipeline_operations = set()
+        pipeline._pipeline_deleting = set()
+
+    def tearDown(self):
+        pipeline._pipeline_threads = self.originals["threads"]
+        pipeline._pipeline_child_jobs = self.originals["child_jobs"]
+        pipeline._pipeline_starting = self.originals["starting"]
+        pipeline._pipeline_operations = self.originals["operations"]
+        pipeline._pipeline_deleting = self.originals["deleting"]
+        self.temp_dir.cleanup()
+
+    def _save(self, pid: str, prompt: str) -> None:
+        path = os.path.join(self.temp_dir.name, f"_director_pipeline_{pid}.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {"clips": [{
+                    "video_prompt": prompt,
+                    "_director_dialogue_beats": PLAN_BEATS,
+                }]},
+                handle,
+            )
+
+    def test_the_saved_edit_keeps_the_beats_of_the_lines_it_kept(self):
+        pid = "pipe-speech"
+        prompt = _reviewed_prompt(REVIEWED_LINES)
+        self._save(pid, prompt)
+        edited = prompt.replace(
+            " (S2) speaks earnestly: <d>[Spanish] Es que piensalo.</d>.", "",
+        )
+
+        self.assertTrue(
+            pipeline.update_clip_prompt(
+                self.temp_dir.name, pid, 0, {"video_prompt": edited},
+            )
+        )
+
+        saved = pipeline.load_pipeline_state(self.temp_dir.name, pid)
+        beats = saved["clips"][0]["_director_dialogue_beats"]
+        self.assertEqual(
+            [beat["spoken_text"] for beat in beats],
+            [line[2] for line in REVIEWED_LINES[:2]],
+        )
+        self.assertEqual(
+            [beat["speaker_id"] for beat in beats], ["(S2)", "(S1)"],
+        )
 
 
 if __name__ == "__main__":
