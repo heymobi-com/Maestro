@@ -2860,18 +2860,28 @@ def _changed_words(before: str, after: str) -> int:
     )
 
 
-def _revise_problem_nudge(problems: list[str]) -> str:
+def _revise_problem_nudge(problems: list[str], expected_lines: list[str] | None = None) -> str:
     """Tell the assistant what was wrong with its own rewrite.
 
     Without the reason it repeats the answer that was just refused, which is how
     three notes on one shot came back as 2, 55 and 1 changed characters: the
     first two were the same prompt with a comma moved, and the third rewrote the
     dialogue lines, which the gate protects.
+
+    The exact lines are listed because "copy them byte for byte" is not enough on
+    its own: a rewrite that collapses the spacing inside a line is refused, and
+    without the lines in front of it the assistant tries the same edit again.
     """
 
     listed = "\n".join(f"- {problem}" for problem in problems)
+    expected = ""
+    if expected_lines:
+        numbered = "\n".join(
+            f"  {index + 1}. {line}" for index, line in enumerate(expected_lines)
+        )
+        expected = f"\nThe lines to copy exactly, in order:\n{numbered}\n"
     return (
-        f"{_REVISE_NUDGE_HEADER}\n{listed}\n"
+        f"{_REVISE_NUDGE_HEADER}\n{listed}\n{expected}"
         "Answer again with a rewrite that fixes them. Copy every <d>...</d> line "
         "byte for byte, including its [Language] tag. If the note cannot be "
         "satisfied by editing this prompt, write NONE for FIXED_PROMPT and name "
@@ -2960,6 +2970,7 @@ def revise_clip_prompt(
     from services.director.h3_dialogue import (
         _h3_plan_context_anchors,
         diagnose_h3_clip_prompt,
+        h3_dialogue_blocks,
         review_h3_revision,
     )
 
@@ -3089,7 +3100,7 @@ def revise_clip_prompt(
     problems = _candidate_problems(parts)
     if problems:
         # One more attempt, told exactly what was wrong with the first.
-        second = _ask(_revise_problem_nudge(problems))
+        second = _ask(_revise_problem_nudge(problems, h3_dialogue_blocks(prompt)))
         if second["prompt"]:
             parts = second
             problems = _candidate_problems(second)

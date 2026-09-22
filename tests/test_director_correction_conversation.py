@@ -31,6 +31,8 @@ if _APP_DIR not in sys.path:
 from services import director_pipeline as pipeline  # noqa: E402
 from services.director.h3_dialogue import (  # noqa: E402
     _build_stable_speaker_registry,
+    _declared_shot_numbers,
+    _single_shot_body,
     _speaker_registry_entry,
     compile_h3_clip_plans,
     diagnose_h3_clip_prompt,
@@ -46,6 +48,7 @@ from services.director_pipeline import (  # noqa: E402
     _changed_words,
     _parse_revision_envelope,
     _retained_h3_beats,
+    _revise_problem_nudge,
 )
 
 
@@ -855,6 +858,80 @@ class SpeakerAliasesShareOneLabel(unittest.TestCase):
         self.assertEqual(
             _speaker_registry_entry(registry, "(s2)")[0], "(S2)",
         )
+
+
+class ShotReferencesAreNotDeclarations(unittest.TestCase):
+    """A retention row names the shot it keeps; that is not a second shot.
+
+    ``<Subject 2> (appears in [Shot 1]): fully_preserved`` is how the format
+    records which shot keeps a reference. Counting those made a one-shot body read
+    as a three-shot body, so the assistant was told to fix a defect that did not
+    exist, rewrote the dialogue lines while trying, and had its answer refused --
+    the loop that looked like "the assistant answers with an error and the shot
+    never changes".
+    """
+
+    REVIEWED = (
+        "subject_definitions: <Subject 1> (S1): Valeria.\n\n"
+        "summary: [reference generation] Valeria speaks.\n\n"
+        "retention_analysis: <Subject 2> (appears in [Shot 1]): fully_preserved. "
+        "<Subject 1> (appears in [Shot 1]): fully_preserved.\n\n"
+        "detailed_description: The style holds. [Shot 1] Valeria speaks to "
+        "camera. <d>[Spanish] Hola.</d>\n\n"
+        "overall_soundscape: Room tone.\n\n"
+        "non_diegetic_music: N/A\n"
+    )
+
+    def test_a_retention_reference_is_not_counted_as_a_shot(self):
+        self.assertEqual(_declared_shot_numbers(self.REVIEWED), [1])
+
+    def test_the_measurement_does_not_call_two_references_two_shots(self):
+        diagnosis = diagnose_h3_clip_prompt(self.REVIEWED, duration_seconds=7.29)
+
+        self.assertEqual(diagnosis["shots"], [1])
+        joined = " ".join(diagnosis["findings"])
+        self.assertNotIn("declares 3 shot(s)", joined)
+        self.assertNotIn("ONE continuous shot", joined)
+
+    def test_the_normalizer_keeps_a_reference_and_drops_a_later_shot(self):
+        fixed = _single_shot_body(
+            "She speaks. (appears in [Shot 1]) [Shot 1] The style holds. [Shot 2] Later."
+        )
+
+        self.assertIn("(appears in [Shot 1])", fixed)
+        self.assertNotIn("[Shot 2]", fixed)
+
+    def test_a_repeated_marker_is_named_as_a_repeat_not_as_two_shots(self):
+        repeated = self.REVIEWED.replace(
+            "The style holds. [Shot 1]", "The style holds. [Shot 1] [Shot 1]",
+        )
+
+        joined = " ".join(
+            diagnose_h3_clip_prompt(repeated, duration_seconds=7.29)["findings"],
+        )
+
+        self.assertIn("repeats the", joined)
+        self.assertNotIn("ONE continuous shot", joined)
+
+
+class RefusalNamesTheExactLines(unittest.TestCase):
+    """A refused rewrite is told which lines it has to copy."""
+
+    def test_the_retry_sees_the_lines_it_must_copy(self):
+        nudge = _revise_problem_nudge(
+            ["The rewrite changed the spoken words."],
+            ["<d>[Spanish] Hola.</d>", "<d>[Spanish] Adios.</d>"],
+        )
+
+        self.assertIn("The lines to copy exactly, in order:", nudge)
+        self.assertIn("1. <d>[Spanish] Hola.</d>", nudge)
+        self.assertIn("2. <d>[Spanish] Adios.</d>", nudge)
+
+    def test_a_nudge_without_lines_still_explains_itself(self):
+        nudge = _revise_problem_nudge(["The rewrite changed the spoken words."])
+
+        self.assertIn("The rewrite changed the spoken words.", nudge)
+        self.assertNotIn("copy exactly, in order", nudge)
 
 
 if __name__ == "__main__":

@@ -1504,12 +1504,35 @@ _H3_MULTI_SHOT_BODY_RE = re.compile(r"\bShot\s+\d+\s*[\(:]", re.IGNORECASE)
 _H3_BRACKET_SHOT_RE = re.compile(r"\[\s*Shot\s+(\d+)\s*\]", re.IGNORECASE)
 
 
-def _declared_shot_numbers(body: str) -> list[int]:
-    """Shot numbers a Context-IR body declares, in order of appearance."""
+def _is_shot_reference(body: str, start: int) -> bool:
+    """Whether a ``[Shot N]`` sits inside a parenthesis, naming a shot.
 
+    A retention row says which shot it keeps: ``<Subject 2> (appears in
+    [Shot 1]): fully_preserved``. That is a reference to the shot, not a
+    declaration of a new one, and counting it made a one-shot body look like a
+    three-shot body. The correction assistant was then told to fix a defect that
+    did not exist, rewrote the dialogue lines while trying, and had its answer
+    refused -- which is what "the assistant answers with an error and the shot
+    never changes" looked like from the outside.
+    """
+
+    line_start = body.rfind("\n", 0, start) + 1
+    prefix = body[line_start:start]
+    return prefix.count("(") > prefix.count(")")
+
+
+def _declared_shot_numbers(body: str) -> list[int]:
+    """Shot numbers a Context-IR body declares, in order of appearance.
+
+    The retention rows that name the shot they keep (``(appears in [Shot 1])``)
+    are references, not declarations, so they are not counted.
+    """
+
+    text = str(body or "")
     return [
-        int(value)
-        for value in _H3_BRACKET_SHOT_RE.findall(str(body or ""))
+        int(match.group(1))
+        for match in _H3_BRACKET_SHOT_RE.finditer(text)
+        if not _is_shot_reference(text, match.start())
     ]
 
 
@@ -1545,6 +1568,9 @@ def _single_shot_body(body: str) -> str:
 
     def replace(match: re.Match) -> str:
         nonlocal seen
+        if _is_shot_reference(text, match.start()):
+            # A retention row naming its shot is not a second declaration.
+            return match.group(0)
         if seen:
             return ""
         seen = True
@@ -1706,12 +1732,19 @@ def diagnose_h3_clip_prompt(
 
     if shots:
         listed = ", ".join(f"[Shot {number}]" for number in shots)
-        findings.append(f"The body declares {len(shots)} shot(s): {listed}.")
         if any(number > 1 for number in shots):
+            findings.append(f"The body declares {len(shots)} shot(s): {listed}.")
             findings.append(
                 "A Director clip is ONE continuous shot, so the model performs "
                 "each declared shot inside the same clip: anyone placed in a "
                 "later framing is rendered again."
+            )
+        elif len(shots) > 1:
+            # Harmless, but it reads as a storyboard and is worth naming: the
+            # format wants one marker per shot.
+            findings.append(
+                f"The body repeats the {listed} marker {len(shots)} times; the "
+                "format expects one marker per clip."
             )
     else:
         findings.append("The body declares no [Shot 1] marker.")
