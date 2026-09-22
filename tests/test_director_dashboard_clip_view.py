@@ -56,10 +56,13 @@ class FloatingPromptWindowTests(unittest.TestCase):
 
     def test_a_match_is_shown_where_the_user_can_edit_it(self):
         # The caret goes to the match, which is what scrolls it into view; focus
-        # then returns to the box so Enter keeps cycling.
+        # then returns to the box so Enter keeps cycling. The mark behind the text
+        # is what keeps it visible after the focus leaves.
         self.assertIn("hit.field.focus()", self.panel)
+        self.assertIn("hit.field.setSelectionRange(hit.start, hit.end)", self.panel)
         self.assertIn("searchInputRef.current?.focus({ preventScroll: true })", self.panel)
-        self.assertIn("event.shiftKey ? -1 : 1", self.panel)
+        self.assertIn("if (event.shiftKey) previous()", self.panel)
+        self.assertIn("else next()", self.panel)
 
     def test_escape_leaves_the_box_before_it_closes_the_window(self):
         self.assertIn(
@@ -72,6 +75,46 @@ class FloatingPromptWindowTests(unittest.TestCase):
         end = self.dashboard.index("footer={<>", start)
 
         self.assertIn("search", self.dashboard[start:end])
+
+
+class PromptHighlightTests(unittest.TestCase):
+    """A textarea cannot style its own text, so the marks are painted behind it."""
+
+    def setUp(self):
+        self.panel = _read("components", "DirectorDashboard", "FloatingPanel.tsx")
+        self.context = _read("components", "DirectorDashboard", "panelSearch.ts")
+        self.marks = _read("lib", "promptMarks.ts")
+        self.area = _read("components", "DirectorDashboard", "HighlightedTextarea.tsx")
+        self.dashboard = _read(
+            "components", "DirectorDashboard", "DirectorDashboard.tsx",
+        )
+
+    def test_every_match_is_painted_and_the_current_one_stands_out(self):
+        self.assertIn("bg-accent-blue/25", self.area)
+        self.assertIn("bg-chip-yellow/45", self.area)
+        self.assertIn("markPieces", self.area)
+
+    def test_the_marks_are_a_split_of_the_text_and_not_a_copy(self):
+        # The mirror has to line up with the textarea character for character, so
+        # every character belongs to exactly one piece, in order.
+        self.assertIn("text.slice(", self.marks)
+        self.assertIn("monotonic", self.marks)
+        self.assertIn("text-transparent", self.area)
+
+    def test_the_mirror_copies_the_textarea_geometry(self):
+        # A scrollbar makes a textarea narrower, which is what drifts a highlight.
+        self.assertIn("offsetWidth - area.clientWidth", self.area)
+        self.assertIn("mirror.scrollTop = event.currentTarget.scrollTop", self.area)
+        self.assertIn("whitespace-pre-wrap", self.area)
+
+    def test_the_window_publishes_what_it_found_to_its_own_content(self):
+        self.assertIn("PanelSearchContext.Provider", self.panel)
+        self.assertIn("matchesFor", self.context)
+        self.assertIn("activeFor", self.context)
+        self.assertIn("usePanelSearch", self.area)
+
+    def test_the_prompt_editor_is_the_highlighting_one(self):
+        self.assertIn("<HighlightedTextarea", self.dashboard)
 
     def test_each_shot_opens_its_own_window(self):
         self.assertIn(
@@ -148,14 +191,15 @@ class FloatingFontSizeTests(unittest.TestCase):
     def test_the_body_carries_the_size_so_children_inherit_it(self):
         self.assertIn("style={{ fontSize: `${fontSize}px` }}", self.panel)
 
-    def test_the_prompt_editors_do_not_hardcode_a_size(self):
-        # A fixed `text-[11px]` on the textarea would win over the inherited
-        # size and the buttons would look broken.
-        prompt_start = self.dashboard.index("storageKey={`prompt-${pipeline.pipeline_id}-${clip.index}`}")
-        block = self.dashboard[prompt_start:prompt_start + 2200]
+    def test_the_prompt_editor_does_not_hardcode_a_size(self):
+        # A fixed `text-[11px]` on the editor would win over the inherited size and
+        # the A- / A+ buttons would look broken. Checked on the editor component
+        # itself, because the window also holds controls that have their own size.
+        area = _read("components", "DirectorDashboard", "HighlightedTextarea.tsx")
 
-        self.assertNotIn("text-[11px]", block)
-        self.assertIn("leading-relaxed", block)
+        self.assertNotIn("text-[", area)
+        self.assertIn("leading-relaxed", area)
+        self.assertIn("font: 'inherit'", area)
 
     def test_the_prompt_window_enables_the_control_and_the_player_does_not(self):
         prompt_start = self.dashboard.index("storageKey={`prompt-${pipeline.pipeline_id}-${clip.index}`}")

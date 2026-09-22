@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { ChevronDown, ChevronUp, Search, X } from 'lucide-react'
+import { PanelSearchContext } from './panelSearch'
+import type { PanelSearch } from './panelSearch'
 
 /**
  * A floating, movable and resizable window.
@@ -148,17 +150,17 @@ export function FloatingPanel({
     const bodyRef = useRef<HTMLDivElement | null>(null)
     const searchInputRef = useRef<HTMLInputElement | null>(null)
     const [query, setQuery] = useState('')
-    const [matchCount, setMatchCount] = useState(0)
-    const [matchPosition, setMatchPosition] = useState(0)
     const [caseSensitive, setCaseSensitive] = useState(false)
+    const [hits, setHits] = useState<TextHit[]>([])
+    const [position, setPosition] = useState(0)
 
     /**
-     * Select the match in its own textarea and bring it into view.
+     * Put the caret on a hit and bring it into view.
      *
-     * Writing into a textarea is not how these prompts are read, so the caret is
-     * put on the match itself: the browser then scrolls that line into view and
-     * the user can type over the mistake right away. Focus returns to the search
-     * box so Enter keeps cycling, and an unfocused selection is still drawn.
+     * Focusing the field is what scrolls the match into view -- writing to an
+     * unfocused field does not -- and focus then returns to the box so Enter keeps
+     * cycling. The user still sees where the match is, because the window paints
+     * it in the layer behind the text.
      */
     const showHit = useCallback((hit: TextHit) => {
       hit.field.focus()
@@ -166,26 +168,50 @@ export function FloatingPanel({
       searchInputRef.current?.focus({ preventScroll: true })
     }, [])
 
-    const runSearch = useCallback((direction: 1 | -1) => {
-      const hits = findTextHits(bodyRef.current, query, caseSensitive)
-      setMatchCount(hits.length)
-      if (!hits.length) {
-        setMatchPosition(0)
+    const goTo = useCallback((index: number) => {
+      const found = findTextHits(bodyRef.current, query, caseSensitive)
+      setHits(found)
+      if (!found.length) {
+        setPosition(0)
         return
       }
-      const next = (matchPosition - 1 + direction + hits.length) % hits.length
-      setMatchPosition(next + 1)
-      showHit(hits[next])
-    }, [caseSensitive, matchPosition, query, showHit])
+      const wrapped = ((index % found.length) + found.length) % found.length
+      setPosition(wrapped + 1)
+      showHit(found[wrapped])
+    }, [caseSensitive, query, showHit])
 
-    // Searching as the user types: the first hit is shown and the count updates,
-    // which is what tells a reader that an element appears more than once.
+    const next = useCallback(() => goTo(position), [goTo, position])
+    const previous = useCallback(() => goTo(position - 2), [goTo, position])
+
+    // What the window's own content reads to paint its matches.
+    const searchState: PanelSearch = {
+      query,
+      caseSensitive,
+      matchesFor: field => field
+        ? hits
+          .filter(hit => hit.field === field)
+          .map(hit => ({ start: hit.start, end: hit.end }))
+        : [],
+      activeFor: field => {
+        if (!field) return -1
+        const own = hits.filter(hit => hit.field === field)
+        return own.findIndex(hit => hit === hits[position - 1])
+      },
+      total: hits.length,
+      position,
+      next,
+      previous,
+    }
+
+    // Searching as the user types: the window stands on the first hit and the
+    // count updates, which is the feedback that tells a reader the element appears
+    // more than once.
     useEffect(() => {
       if (!search) return
-      const hits = findTextHits(bodyRef.current, query, caseSensitive)
-      setMatchCount(hits.length)
-      setMatchPosition(hits.length ? 1 : 0)
-      if (hits.length) showHit(hits[0])
+      const found = findTextHits(bodyRef.current, query, caseSensitive)
+      setHits(found)
+      setPosition(found.length ? 1 : 0)
+      if (found.length) showHit(found[0])
     }, [search, query, caseSensitive, showHit])
 
     // Editing the prompt changes how many times the query appears. Count only:
@@ -195,7 +221,7 @@ export function FloatingPanel({
       const root = bodyRef.current
       if (!root) return
       const onInput = () => {
-        setMatchCount(findTextHits(root, query, caseSensitive).length)
+        setHits(findTextHits(root, query, caseSensitive))
       }
       root.addEventListener('input', onInput)
       return () => root.removeEventListener('input', onInput)
@@ -366,7 +392,8 @@ export function FloatingPanel({
               onKeyDown={event => {
                 if (event.key !== 'Enter') return
                 event.preventDefault()
-                runSearch(event.shiftKey ? -1 : 1)
+                if (event.shiftKey) previous()
+                else next()
               }}
               placeholder="Buscar en el texto (Ctrl+F)"
               aria-label="Buscar en el texto"
@@ -381,18 +408,18 @@ export function FloatingPanel({
             >Aa</button>
             <span
               className="text-[10px] tabular-nums text-text-muted w-12 text-right shrink-0"
-              title={query && !matchCount ? 'Sin coincidencias' : undefined}
-            >{query ? `${matchPosition}/${matchCount}` : ''}</span>
+              title={query && !hits.length ? 'Sin coincidencias' : undefined}
+            >{query ? `${position}/${hits.length}` : ''}</span>
             <button
-              onClick={() => runSearch(-1)}
-              disabled={!matchCount}
+              onClick={previous}
+              disabled={!hits.length}
               title="Coincidencia anterior (Shift+Enter)"
               aria-label="Coincidencia anterior"
               className="p-0.5 rounded text-text-muted hover:text-text-primary disabled:opacity-30 transition-colors shrink-0"
             ><ChevronUp size={12} /></button>
             <button
-              onClick={() => runSearch(1)}
-              disabled={!matchCount}
+              onClick={next}
+              disabled={!hits.length}
               title="Coincidencia siguiente (Enter)"
               aria-label="Coincidencia siguiente"
               className="p-0.5 rounded text-text-muted hover:text-text-primary disabled:opacity-30 transition-colors shrink-0"
@@ -400,17 +427,19 @@ export function FloatingPanel({
           </div>
         )}
 
-        <div
-          ref={bodyRef}
-        className={`flex-1 min-h-0 p-2.5 ${fill ? 'flex flex-col' : 'overflow-auto'}`}
-        style={{ fontSize: `${fontSize}px` }}
-      >{children}</div>
+        <PanelSearchContext.Provider value={searchState}>
+          <div
+            ref={bodyRef}
+            className={`flex-1 min-h-0 p-2.5 ${fill ? 'flex flex-col' : 'overflow-auto'}`}
+            style={{ fontSize: `${fontSize}px` }}
+          >{children}</div>
+        </PanelSearchContext.Provider>
 
-      {footer && (
-        <div className="shrink-0 border-t border-border px-2.5 py-1.5 flex items-center justify-end gap-2 bg-bg-tertiary/60">
-          {footer}
-        </div>
-      )}
+        {footer && (
+          <div className="shrink-0 border-t border-border px-2.5 py-1.5 flex items-center justify-end gap-2 bg-bg-tertiary/60">
+            {footer}
+          </div>
+        )}
 
       {/* Drag the corner to resize. The window size is remembered per clip. */}
       <div

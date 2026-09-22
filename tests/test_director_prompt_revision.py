@@ -245,8 +245,23 @@ class PromptComparisonTests(unittest.TestCase):
 
     def test_nothing_reaches_the_editor_until_it_is_applied(self):
         self.assertIn("const applyProposal = () => {", self.dashboard)
-        self.assertIn("applied={editVideoPrompt === proposalPrompt}", self.dashboard)
+        self.assertIn(
+            "applied={!windowed && editVideoPrompt === proposalPrompt}",
+            self.dashboard,
+        )
         self.assertIn("Aplicar al editor", self.view)
+
+    def test_a_refusal_is_explained_in_the_window(self):
+        # A refused rewrite carries no proposal, and the window showed nothing at
+        # all, which is what made "the assistant does nothing" the impression.
+        self.assertIn("La propuesta fue rechazada", self.dashboard)
+        self.assertIn("El asistente pregunta", self.dashboard)
+        self.assertIn("findings.slice(0, 4)", self.dashboard)
+
+    def test_the_comparison_is_offered_for_a_windowed_clip_too(self):
+        self.assertIn("canApply={!windowed}", self.dashboard)
+        self.assertIn("canApply", self.view)
+        self.assertIn("note", self.view)
 
     def test_the_assistant_is_reachable_from_the_prompt_window(self):
         start = self.dashboard.index("storageKey={`prompt-")

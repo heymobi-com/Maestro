@@ -16,6 +16,10 @@ type Props = {
   after: string
   /** True once the proposal is in the editor, so applying twice is not offered. */
   applied: boolean
+  /** False when the proposal cannot be applied as it is (a windowed clip). */
+  canApply?: boolean
+  /** What to say instead of the apply button. */
+  note?: string
   onApply: () => void
   onBack: () => void
 }
@@ -25,7 +29,9 @@ type Props = {
 const REMOVED = 'bg-chip-red/20 text-chip-red line-through decoration-chip-red/60'
 const ADDED = 'bg-accent-green/20 text-accent-green'
 
-export function PromptDiffView({ before, after, applied, onApply, onBack }: Props) {
+export function PromptDiffView({
+  before, after, applied, canApply = true, note, onApply, onBack,
+}: Props) {
   const diff = useMemo(() => diffPrompts(before, after), [before, after])
 
   return (
@@ -41,11 +47,15 @@ export function PromptDiffView({ before, after, applied, onApply, onBack }: Prop
             onClick={onBack}
             className="px-2 py-1 rounded text-[10px] text-text-muted hover:text-text-primary transition-colors"
           >Volver al editor</button>
-          <button
-            onClick={onApply}
-            disabled={applied || !diff.changed}
-            className="px-2 py-1 rounded text-[10px] bg-accent-blue/15 text-accent-blue hover:bg-accent-blue/25 transition-colors disabled:opacity-40"
-          >{applied ? 'Aplicado' : 'Aplicar al editor'}</button>
+          {canApply ? (
+            <button
+              onClick={onApply}
+              disabled={applied || !diff.changed}
+              className="px-2 py-1 rounded text-[10px] bg-accent-blue/15 text-accent-blue hover:bg-accent-blue/25 transition-colors disabled:opacity-40"
+            >{applied ? 'Aplicado' : 'Aplicar al editor'}</button>
+          ) : (
+            <span className="text-[10px] text-text-muted">{note}</span>
+          )}
         </div>
       </div>
 

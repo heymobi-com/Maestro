@@ -5,6 +5,7 @@ import { useStore } from '../../stores/useStore'
 import { getFileUrl, reviseClipPrompt, updateClipPrompt, type RevisionAnswer, type RevisionTurn } from '../../api/client'
 import type { PipelineClipState, SavedPipelineState } from '../../types'
 import { multipleShotWarning } from '../../lib/h3Prompt'
+import { HighlightedTextarea } from './HighlightedTextarea'
 import { PromptDiffView } from './PromptDiffView'
 
 /** Safely coerce any value to a displayable string */
@@ -729,11 +730,13 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                 </button>
               </>}
             >
-              {promptView === 'diff' && proposalPrompt && !windowed ? (
+              {promptView === 'diff' && proposalPrompt ? (
                 <PromptDiffView
-                  before={editVideoPrompt}
+                  before={windowed ? editWindowPrompts.join('\n') : editVideoPrompt}
                   after={proposalPrompt}
-                  applied={editVideoPrompt === proposalPrompt}
+                  applied={!windowed && editVideoPrompt === proposalPrompt}
+                  canApply={!windowed}
+                  note="Este clip usa varios prompts por ventana: aplica el cambio a mano en la ventana que corresponda."
                   onApply={applyProposal}
                   onBack={() => setPromptView('editor')}
                 />
@@ -756,10 +759,10 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                   ))}
                 </div>
               ) : (
-                <textarea
+                <HighlightedTextarea
                   value={editVideoPrompt}
-                  onChange={e => setEditVideoPrompt(e.target.value)}
-                  className="w-full flex-1 min-h-0 bg-bg-tertiary border border-border rounded px-2 py-1.5 leading-relaxed text-text-primary resize-none focus:outline-none focus:border-accent-blue"
+                  onChange={setEditVideoPrompt}
+                  ariaLabel="Text of the video prompt"
                 />
               )}
               {saveError && <p role="alert" className="mt-1.5 text-[10px] text-indicator-warning shrink-0">{saveError}</p>}
@@ -785,7 +788,7 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                   disabled={fixing || !fixNote.trim()}
                   className="px-2 py-1 rounded text-[10px] bg-accent-blue/15 text-accent-blue hover:bg-accent-blue/25 transition-colors disabled:opacity-40"
                 >{fixing ? 'Consultando…' : 'Corregir con IA'}</button>
-                {proposalPrompt && !windowed && (
+                {proposalPrompt && (
                   <button
                     onClick={() => setPromptView(promptView === 'diff' ? 'editor' : 'diff')}
                     className="px-2 py-1 rounded text-[10px] text-text-muted hover:text-text-primary transition-colors"
@@ -793,7 +796,25 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                 )}
               </div>
               {fixError && <p role="alert" className="text-[10px] text-indicator-warning shrink-0">{fixError}</p>}
-              {proposalPrompt && !windowed && promptView === 'editor' && (
+              {/* A refusal carries no proposal, so the window has to say why: an
+                  answer that changes nothing used to look like nothing happened. */}
+              {fixAnswer && !proposalPrompt && (
+                <p className="text-[10px] text-text-muted shrink-0">
+                  {fixAnswer.question
+                    ? `El asistente pregunta: ${fixAnswer.question}`
+                    : fixAnswer.errors?.length
+                      ? `La propuesta fue rechazada: ${fixAnswer.errors[0]}`
+                      : 'El asistente no propuso ningún cambio.'}
+                </p>
+              )}
+              {!!fixAnswer?.diagnosis?.findings?.length && (
+                <ul className="text-[10px] text-text-muted shrink-0 space-y-0.5 max-h-24 overflow-auto">
+                  {fixAnswer.diagnosis.findings.slice(0, 4).map((finding, i) => (
+                    <li key={i}>• {finding}</li>
+                  ))}
+                </ul>
+              )}
+              {proposalPrompt && promptView === 'editor' && (
                 <p className="text-[10px] text-text-muted shrink-0">Hay una propuesta esperando: pulsa «Ver comparación».</p>
               )}
             </FloatingPanel>
