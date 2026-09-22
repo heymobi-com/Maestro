@@ -191,20 +191,71 @@ class PromptRevisionWiringTests(unittest.TestCase):
         self.assertIn("Fix with AI", dashboard)
         self.assertIn("reviseClipPrompt(", dashboard)
 
-    def test_the_rewrite_is_shown_for_review_instead_of_being_saved(self):
+    def test_the_rewrite_is_compared_before_it_reaches_the_editor(self):
         dashboard = _read(
             "components", "DirectorDashboard", "DirectorDashboard.tsx",
         )
         start = dashboard.index("const runFixWithAi = async () => {")
         body = dashboard[start:dashboard.index("}", dashboard.index("setFixing(false)", start))]
 
-        self.assertIn("setEditVideoPrompt(answer.video_prompt)", body)
-        self.assertNotIn("onSavePrompt", body)
-        # Only a rewrite that survived the gate reaches the editor. A refused one
-        # arrives with its errors and the editor keeps the current prompt, so the
-        # refusal cannot be mistaken for an accepted suggestion.
-        self.assertIn("answer.rewritten && answer.video_prompt", body)
         self.assertIn("setFixAnswer(answer)", body)
+        self.assertNotIn("onSavePrompt", body)
+        # Only a rewrite that survived the gate is offered. A refused one arrives
+        # with its errors and no proposal, so a refusal cannot look like a fix.
+        self.assertIn("answer.rewritten && answer.video_prompt", body)
+        # Offered as a comparison instead of being swapped into the editor: whether
+        # a correction changed the acting instruction or only the prose around it is
+        # the only thing worth accepting it on, and swapping it in silently made a
+        # refused suggestion look applied.
+        self.assertNotIn("setEditVideoPrompt(answer.video_prompt)", body)
+        self.assertIn("setPromptView('diff')", body)
+
+
+class PromptComparisonTests(unittest.TestCase):
+    """The proposal is read next to the prompt it changes."""
+
+    def setUp(self):
+        self.dashboard = _read(
+            "components", "DirectorDashboard", "DirectorDashboard.tsx",
+        )
+        self.view = _read(
+            "components", "DirectorDashboard", "PromptDiffView.tsx",
+        )
+        self.diff = _read("lib", "promptDiff.ts")
+
+    def test_the_comparison_marks_added_and_removed_text(self):
+        self.assertIn("bg-chip-red/20", self.view)
+        self.assertIn("bg-accent-green/20", self.view)
+        # Colour alone would not survive a dim screen, so removals are struck
+        # through as well.
+        self.assertIn("line-through", self.view)
+        self.assertIn("Actual", self.view)
+        self.assertIn("Propuesta", self.view)
+
+    def test_the_comparison_says_how_much_changed(self):
+        self.assertIn("cambio(s)", self.view)
+        self.assertIn("caracteres", self.view)
+        self.assertIn("La propuesta no cambia nada", self.view)
+
+    def test_the_unchanged_head_and_tail_are_trimmed_before_comparing(self):
+        # That is what keeps a 4,000-character prompt cheap to compare.
+        self.assertIn("leftTokens[head] === rightTokens[head]", self.diff)
+        self.assertIn("leftTokens[leftEnd - 1] === rightTokens[rightEnd - 1]", self.diff)
+        self.assertIn("MAX_CELLS", self.diff)
+
+    def test_nothing_reaches_the_editor_until_it_is_applied(self):
+        self.assertIn("const applyProposal = () => {", self.dashboard)
+        self.assertIn("applied={editVideoPrompt === proposalPrompt}", self.dashboard)
+        self.assertIn("Aplicar al editor", self.view)
+
+    def test_the_assistant_is_reachable_from_the_prompt_window(self):
+        start = self.dashboard.index("storageKey={`prompt-")
+        window = self.dashboard[start:self.dashboard.index("</FloatingPanel>", start)]
+
+        self.assertIn("Asistente IA", window)
+        self.assertIn("Corregir con IA", window)
+        self.assertIn("runFixWithAi", window)
+        self.assertIn("Ver comparación", window)
 
 
 if __name__ == "__main__":

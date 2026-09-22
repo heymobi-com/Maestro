@@ -44,6 +44,35 @@ class FloatingPromptWindowTests(unittest.TestCase):
         self.assertIn('role="dialog"', self.panel)
         self.assertIn("event.key === 'Escape'", self.panel)
 
+    def test_the_window_can_find_text_inside_the_prompt(self):
+        # A compiled prompt runs to thousands of characters, so hunting for one
+        # misplaced "(S3)" or timestamp by eye is the slow part of an edit.
+        self.assertIn("searchInputRef", self.panel)
+        self.assertIn("Buscar en el texto", self.panel)
+        self.assertIn("setSelectionRange", self.panel)
+        self.assertIn(
+            "querySelectorAll<HTMLTextAreaElement>('textarea')", self.panel,
+        )
+
+    def test_a_match_is_shown_where_the_user_can_edit_it(self):
+        # The caret goes to the match, which is what scrolls it into view; focus
+        # then returns to the box so Enter keeps cycling.
+        self.assertIn("hit.field.focus()", self.panel)
+        self.assertIn("searchInputRef.current?.focus({ preventScroll: true })", self.panel)
+        self.assertIn("event.shiftKey ? -1 : 1", self.panel)
+
+    def test_escape_leaves_the_box_before_it_closes_the_window(self):
+        self.assertIn(
+            "document.activeElement === searchInputRef.current", self.panel,
+        )
+        self.assertIn("searchInputRef.current?.blur()", self.panel)
+
+    def test_the_prompt_window_enables_the_search_box(self):
+        start = self.dashboard.index("storageKey={`prompt-")
+        end = self.dashboard.index("footer={<>", start)
+
+        self.assertIn("search", self.dashboard[start:end])
+
     def test_each_shot_opens_its_own_window(self):
         self.assertIn(
             "storageKey={`prompt-${pipeline.pipeline_id}-${clip.index}`}",

@@ -5,6 +5,7 @@ import { useStore } from '../../stores/useStore'
 import { getFileUrl, reviseClipPrompt, updateClipPrompt, type RevisionAnswer, type RevisionTurn } from '../../api/client'
 import type { PipelineClipState, SavedPipelineState } from '../../types'
 import { multipleShotWarning } from '../../lib/h3Prompt'
+import { PromptDiffView } from './PromptDiffView'
 
 /** Safely coerce any value to a displayable string */
 function safeStr(val: unknown): string {
@@ -214,6 +215,10 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
   const [fixTurns, setFixTurns] = useState<RevisionTurn[]>([])
   const [fixAnswer, setFixAnswer] = useState<RevisionAnswer | null>(null)
   const [showPromptWindow, setShowPromptWindow] = useState(false)
+  // The window shows either the prompt itself or the comparison between it and a
+  // proposal: a correction is accepted on what it changes, which only reading the
+  // two side by side answers.
+  const [promptView, setPromptView] = useState<'editor' | 'diff'>('editor')
   const [showPreview, setShowPreview] = useState(false)
   const [loadPreview, setLoadPreview] = useState(false)
   // Which regeneration this shot has in flight. A clip rerun takes minutes, and
@@ -321,17 +326,29 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
         { role: 'assistant', text: answer.analysis || answer.question || 'No change suggested.' },
       ])
       setFixNote('')
-      // A suggestion shown in the editor, never saved: the user approves it. A
-      // refused rewrite arrives with errors and leaves the prompt untouched.
+      // Shown, never swapped in: the editor keeps the prompt that is on disk until
+      // "Aplicar al editor" puts the proposal into it, so a rejected suggestion can
+      // no longer look like an applied one.
       if (answer.rewritten && answer.video_prompt) {
-        setEditVideoPrompt(answer.video_prompt)
-        setEditingVideo(true)
+        setShowPromptWindow(true)
+        setPromptView('diff')
       }
     } catch (error) {
       setFixError(error instanceof Error ? error.message : String(error))
     } finally {
       setFixing(false)
     }
+  }
+
+  // The proposal waiting for a decision, if the gate accepted one.
+  const proposalPrompt = fixAnswer?.rewritten && fixAnswer.video_prompt
+    ? fixAnswer.video_prompt
+    : ''
+
+  const applyProposal = () => {
+    if (!proposalPrompt) return
+    setEditVideoPrompt(proposalPrompt)
+    setEditingVideo(true)
   }
 
   return (
@@ -702,6 +719,7 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
               onClose={() => setShowPromptWindow(false)}
               fill
               resizableFont
+              search
               footer={<>
                 <button onClick={() => setShowPromptWindow(false)}
                   className="px-2 py-1 rounded text-[10px] text-text-muted hover:text-text-primary transition-colors">Close</button>
@@ -711,7 +729,15 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                 </button>
               </>}
             >
-              {windowed ? (
+              {promptView === 'diff' && proposalPrompt && !windowed ? (
+                <PromptDiffView
+                  before={editVideoPrompt}
+                  after={proposalPrompt}
+                  applied={editVideoPrompt === proposalPrompt}
+                  onApply={applyProposal}
+                  onBack={() => setPromptView('editor')}
+                />
+              ) : windowed ? (
                 <div className="flex-1 min-h-0 overflow-auto space-y-2">
                   {editWindowPrompts.map((wp, wi) => (
                     <div key={wi}>
@@ -737,6 +763,39 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                 />
               )}
               {saveError && <p role="alert" className="mt-1.5 text-[10px] text-indicator-warning shrink-0">{saveError}</p>}
+
+              {/* The assistant belongs in this window too: a compiled prompt is read
+                  and corrected here, so asking must not mean closing the window. */}
+              <div className="shrink-0 mt-1.5 border-t border-border pt-1.5 flex items-center gap-2 flex-wrap">
+                <span className="text-[10px] text-text-muted shrink-0">Asistente IA</span>
+                <input
+                  value={fixNote}
+                  onChange={e => setFixNote(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key !== 'Enter' || e.shiftKey) return
+                    e.preventDefault()
+                    if (!fixing && fixNote.trim()) void runFixWithAi()
+                  }}
+                  placeholder="Qué corregir… (ej. «la boca no se mueve en la línea de Valeria»)"
+                  aria-label="Nota para el asistente"
+                  className="flex-1 min-w-[200px] bg-bg-tertiary border border-border rounded px-2 py-1 text-[11px] text-text-primary focus:outline-none focus:border-accent-blue"
+                />
+                <button
+                  onClick={runFixWithAi}
+                  disabled={fixing || !fixNote.trim()}
+                  className="px-2 py-1 rounded text-[10px] bg-accent-blue/15 text-accent-blue hover:bg-accent-blue/25 transition-colors disabled:opacity-40"
+                >{fixing ? 'Consultando…' : 'Corregir con IA'}</button>
+                {proposalPrompt && !windowed && (
+                  <button
+                    onClick={() => setPromptView(promptView === 'diff' ? 'editor' : 'diff')}
+                    className="px-2 py-1 rounded text-[10px] text-text-muted hover:text-text-primary transition-colors"
+                  >{promptView === 'diff' ? 'Ver editor' : 'Ver comparación'}</button>
+                )}
+              </div>
+              {fixError && <p role="alert" className="text-[10px] text-indicator-warning shrink-0">{fixError}</p>}
+              {proposalPrompt && !windowed && promptView === 'editor' && (
+                <p className="text-[10px] text-text-muted shrink-0">Hay una propuesta esperando: pulsa «Ver comparación».</p>
+              )}
             </FloatingPanel>
           )}
 
