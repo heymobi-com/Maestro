@@ -14,9 +14,12 @@ assistant ask instead of guessing.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
+import tempfile
 import unittest
+from unittest.mock import patch
 
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -25,12 +28,17 @@ _APP_DIR = os.path.join(_ROOT, "app")
 if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
+from services import director_pipeline as pipeline  # noqa: E402
 from services.director.h3_dialogue import (  # noqa: E402
     diagnose_h3_clip_prompt,
     h3_dialogue_blocks,
     review_h3_revision,
 )
-from services.director_pipeline import _parse_revision_envelope  # noqa: E402
+from services.director_pipeline import (  # noqa: E402
+    _NO_OP_CHANGE_CHARS,
+    _changed_characters,
+    _parse_revision_envelope,
+)
 
 
 def _prompt(body_shots: str, timestamp: str = "") -> str:
@@ -216,6 +224,179 @@ class CorrectionConversationWiringTests(unittest.TestCase):
         self.assertIn("QUESTION:", self.pipeline)
         self.assertIn("FIXED_PROMPT:", self.pipeline)
         self.assertIn("rejected before the director sees it", self.pipeline)
+
+
+class NoOpRewriteTests(unittest.TestCase):
+    """A rewrite that changes nothing is not a correction.
+
+    Three notes on clip 13 of a real project -- "the woman must faithfully
+    lip-sync the dialogue assigned to S1" -- came back as 2, 55 and 1 changed
+    characters while the render stayed wrong. The assistant explained the problem
+    and handed the same prompt back, and the loop offered it as a fix, because
+    the gate only checks that a rewrite breaks nothing.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.out_dir = self.temp.name
+        self.pid = "noop01"
+
+    def _save(self):
+        state = {
+            "pipeline_id": self.pid,
+            "status": "completed",
+            "video_model": "minimax_h3_ref2va_fused_turbo",
+            "clips": [{
+                "index": 0,
+                "video_prompt": PROBLEM_PROMPT,
+                "_director_duration_sec": 7.29,
+                "_director_h3_prompt_mode": "ref2va",
+                # Dialogue-driven, so the audio-plan finding stays out of this
+                # test: it is covered by its own case below.
+                "_director_audio_plan": {
+                    "mode": "dialogue_driven",
+                    "lip_sync_critical": True,
+                },
+            }],
+            "_params_snapshot": {"scene_description": "PROJECT: a studio"},
+        }
+        with open(
+            os.path.join(self.out_dir, f"_director_pipeline_{self.pid}.json"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(state, handle)
+
+    def _stub(self, answers):
+        """Answer in order, and hand back the prompts the model received."""
+
+        sent = []
+
+        def fake(**kwargs):
+            sent.append(kwargs["prompt"])
+            return answers[min(len(sent) - 1, len(answers) - 1)]
+
+        loader = patch.object(pipeline, "_ensure_llm_loaded", lambda params: None)
+        completion = patch("services.llm_service.enhance_prompt", fake)
+        loader.start()
+        completion.start()
+        self.addCleanup(loader.stop)
+        self.addCleanup(completion.stop)
+        return sent
+
+    @staticmethod
+    def _answer(body: str) -> str:
+        return (
+            "ANALYSIS: the prompt already assigns the line to S1.\n"
+            "QUESTION: NONE\n"
+            f"FIXED_PROMPT: {body}"
+        )
+
+    def test_a_no_op_rewrite_is_refused_after_one_retry(self):
+        self._save()
+        sent = self._stub([
+            self._answer(PROBLEM_PROMPT),
+            self._answer(PROBLEM_PROMPT),
+        ])
+
+        result = pipeline.revise_clip_prompt(
+            self.out_dir, self.pid, 0, "the woman must lip-sync her line",
+        )
+
+        self.assertFalse(result["rewritten"])
+        self.assertEqual(result["video_prompt"], "")
+        self.assertTrue(result["errors"], "a two-character edit must not pass as a fix")
+        self.assertEqual(len(sent), 2, "the empty rewrite must be retried once")
+        self.assertIn(
+            "changed almost nothing",
+            sent[1],
+            "the retry has to say what is missing",
+        )
+
+    def test_a_rewrite_that_edits_the_prompt_is_offered(self):
+        self._save()
+        self._stub([self._answer(PROBLEM_PROMPT), self._answer(FIXED_PROMPT)])
+
+        result = pipeline.revise_clip_prompt(
+            self.out_dir, self.pid, 0, "make the two of them face each other",
+        )
+
+        self.assertTrue(result["rewritten"])
+        # The envelope trims the whitespace around each marker's value, so the
+        # prompt comes back without FIXED_PROMPT's trailing newline.
+        self.assertEqual(result["video_prompt"], FIXED_PROMPT.strip())
+        self.assertEqual(result["errors"], [])
+
+    def test_an_answer_with_no_prompt_and_no_question_is_reported(self):
+        self._save()
+        self._stub(["ANALYSIS: the shot looks fine to me."])
+
+        result = pipeline.revise_clip_prompt(
+            self.out_dir, self.pid, 0, "the woman must lip-sync her line",
+        )
+
+        self.assertFalse(result["rewritten"])
+        self.assertTrue(result["errors"], "a turn with nothing to show must say so")
+
+    def test_changed_characters_counts_what_moved(self):
+        self.assertEqual(_changed_characters(PROBLEM_PROMPT, PROBLEM_PROMPT), 0)
+        self.assertGreater(
+            _changed_characters(PROBLEM_PROMPT, FIXED_PROMPT),
+            _NO_OP_CHANGE_CHARS,
+        )
+
+
+class AudioPlanFindingTests(unittest.TestCase):
+    """The measurement has to name what stops the mouths moving.
+
+    Clip 13's plan said "ambient_only", so the orchestrator never selected the
+    audio-to-video path: no prompt wording could make the woman lip-sync. The
+    assistant blamed pronouns and gestures for three turns because nothing told
+    it where to look.
+    """
+
+    def test_a_plan_that_skips_the_audio_path_is_named(self):
+        diagnosis = diagnose_h3_clip_prompt(
+            _prompt("Valeria speaks to camera."),
+            duration_seconds=7.29,
+            audio_plan={"mode": "ambient_only", "lip_sync_critical": True},
+        )
+
+        joined = " ".join(diagnosis["findings"])
+        self.assertIn("ambient_only", joined)
+        self.assertIn("audio-to-video", joined)
+        self.assertIn("No wording in this prompt can change that", joined)
+
+    def test_a_dialogue_driven_plan_raises_nothing(self):
+        diagnosis = diagnose_h3_clip_prompt(
+            _prompt("Valeria speaks to camera."),
+            duration_seconds=7.29,
+            audio_plan={"mode": "dialogue_driven", "lip_sync_critical": True},
+        )
+
+        self.assertNotIn("audio-to-video", " ".join(diagnosis["findings"]))
+
+    def test_a_plan_without_lip_sync_critical_is_named_too(self):
+        diagnosis = diagnose_h3_clip_prompt(
+            _prompt("Valeria speaks to camera."),
+            duration_seconds=7.29,
+            audio_plan={"mode": "dialogue_driven", "lip_sync_critical": False},
+        )
+
+        self.assertIn("audio-to-video", " ".join(diagnosis["findings"]))
+
+    def test_a_silent_clip_raises_nothing(self):
+        silent = _prompt("Valeria looks at the camera.").replace(
+            "Dialogue: <d>[Spanish] Hola.</d>. ", "",
+        )
+        diagnosis = diagnose_h3_clip_prompt(
+            silent,
+            duration_seconds=7.29,
+            audio_plan={"mode": "ambient_only", "lip_sync_critical": False},
+        )
+
+        self.assertNotIn("audio-to-video", " ".join(diagnosis["findings"]))
 
 
 if __name__ == "__main__":

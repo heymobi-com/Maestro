@@ -1591,6 +1591,7 @@ def diagnose_h3_clip_prompt(
     mode: str = "ref2va",
     references: Sequence[Mapping[str, Any]] | None = None,
     context_anchors: Sequence[str] | None = None,
+    audio_plan: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """What is measurably wrong with one clip's prompt.
 
@@ -1670,6 +1671,24 @@ def diagnose_h3_clip_prompt(
 
     blocks = h3_dialogue_blocks(text)
     findings.append(f"The body carries {len(blocks)} spoken <d> line(s).")
+
+    # Lips turn is decided by the plan, not by the prompt: the orchestrator picks
+    # the audio-to-video path only for an audio/dialogue-driven shot marked
+    # lip-sync critical. Three notes on clip 13 of a real project -- "the woman
+    # must faithfully lip-sync S1" -- changed 2, 55 and 1 characters and could
+    # never work, because the clip's plan said "ambient_only". Without this
+    # finding the assistant blamed pronouns and gestures instead.
+    plan_mode = str(_field(audio_plan or {}, "mode", "") or "")
+    lip_critical = bool(_field(audio_plan or {}, "lip_sync_critical", False))
+    if blocks and not (
+        plan_mode in ("audio_driven", "dialogue_driven") and lip_critical
+    ):
+        findings.append(
+            f"The clip's audio plan says {plan_mode or '(no mode)'!r}, so the "
+            "renderer does not take the audio-to-video path for this shot: nothing "
+            "drives the mouths from the voice track. No wording in this prompt can "
+            "change that -- the plan has to be fixed."
+        )
 
     errors = validate_h3_prompt_contract(
         text,

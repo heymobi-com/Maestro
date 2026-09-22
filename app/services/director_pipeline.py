@@ -10,6 +10,7 @@ Supports two planning backends:
 Controlled by feature flags in params or server config.
 """
 
+import difflib
 import os
 import copy
 import re
@@ -2810,6 +2811,32 @@ def _parse_revision_envelope(text: str) -> dict:
     return parts
 
 
+# A rewrite that moves fewer characters than this is a reshuffle rather than a
+# correction. Three notes on clip 13 of a real project -- "the woman must
+# faithfully lip-sync the dialogue assigned to S1" -- came back as 2, 55 and 1
+# changed characters while the render stayed wrong: the assistant explained the
+# problem and handed the same prompt back, and the loop offered it as a fix.
+_NO_OP_CHANGE_CHARS = 40
+
+_REVISE_NO_OP_NUDGE = (
+    "Your FIXED_PROMPT changed almost nothing, so it does not answer the note. "
+    "Rewrite the sentences that produce the problem and answer again. If the note "
+    "cannot be satisfied by editing this prompt, say so in ANALYSIS and name what "
+    "outside the prompt blocks it."
+)
+
+
+def _changed_characters(before: str, after: str) -> int:
+    """How much text actually moved between two prompts."""
+
+    matcher = difflib.SequenceMatcher(None, str(before or ""), str(after or ""))
+    return sum(
+        (i2 - i1) + (j2 - j1)
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes()
+        if tag != "equal"
+    )
+
+
 def _revise_shot_neighbours(clips: list, clip_index: int) -> str:
     """A short digest of the adjacent shots, for continuity."""
 
@@ -2894,6 +2921,7 @@ def revise_clip_prompt(
         mode=clip.get("_director_h3_prompt_mode") or "ref2va",
         references=clip.get("_director_h3_reference_manifest") or [],
         context_anchors=_h3_plan_context_anchors(clip),
+        audio_plan=clip.get("_director_audio_plan") or {},
     )
     task.extend(["", "MEASUREMENT OF THE CURRENT PROMPT (read the facts, do not guess):"])
     task.extend(f"- {finding}" for finding in diagnosis["findings"])
@@ -2928,21 +2956,27 @@ def revise_clip_prompt(
         _wgp.server_config.get("services", {}) if _wgp else {}
     )
     nsfw = bool(services.get("nsfw_mode"))
-    revised = llm_service.enhance_prompt(
-        prompt="\n".join(task),
-        mode="video",
-        # A compiled H3 Context-IR prompt is several thousand characters, and
-        # the default 200-token budget truncated the answer mid-field.
-        max_new_tokens=4096,
-        temperature=0.3,
-        nsfw=nsfw,
-        model_type=video_model,
-        system_override=_REVISE_PROMPT_SYSTEM,
-    )
-    revised = str(revised or "").strip()
-    if not revised:
-        raise ValueError("The model returned no answer; try again.")
-    parts = _parse_revision_envelope(revised)
+
+    def _ask(extra: str = "") -> dict:
+        """One completion, same budget, parsed into its three parts."""
+
+        answer = llm_service.enhance_prompt(
+            prompt="\n".join([*task, *(["", extra] if extra else [])]),
+            mode="video",
+            # A compiled H3 Context-IR prompt is several thousand characters, and
+            # the default 200-token budget truncated the answer mid-field.
+            max_new_tokens=4096,
+            temperature=0.3,
+            nsfw=nsfw,
+            model_type=video_model,
+            system_override=_REVISE_PROMPT_SYSTEM,
+        )
+        answer = str(answer or "").strip()
+        if not answer:
+            raise ValueError("The model returned no answer; try again.")
+        return _parse_revision_envelope(answer)
+
+    parts = _ask()
 
     result = {
         "clip_index": clip_index,
@@ -2960,11 +2994,43 @@ def revise_clip_prompt(
                 "before rewriting."
             )
         else:
+            # An answer with no rewrite and no question is a dead end: it used to
+            # look like a completed turn with nothing to show for it.
+            result["errors"] = [
+                "The assistant explained the prompt without rewriting it, so "
+                "nothing changed. Repeat the note and name what should change.",
+            ]
             print(
                 f"[Pipeline {pid}] Shot {clip_index + 1}: the assistant reported "
                 "the prompt without rewriting it."
             )
         return result
+
+    changed = _changed_characters(prompt, parts["prompt"])
+    if changed < _NO_OP_CHANGE_CHARS:
+        # Handing this over as a fix is what left three notes on one shot with a
+        # two-character edit. Ask once more, saying what is missing, and offer
+        # the answer only if it really edits the prompt.
+        second = _ask(_REVISE_NO_OP_NUDGE)
+        second_changed = (
+            _changed_characters(prompt, second["prompt"]) if second["prompt"] else 0
+        )
+        if second_changed >= _NO_OP_CHANGE_CHARS:
+            parts = second
+        else:
+            result["analysis"] = second["analysis"] or parts["analysis"]
+            result["question"] = second["question"]
+            result["errors"] = [
+                "The assistant explained the problem, but the prompt came back "
+                f"with only {max(changed, second_changed)} character(s) changed, "
+                "so it was not offered as a correction. The measurement above may "
+                "point at something outside the prompt.",
+            ]
+            print(
+                f"[Pipeline {pid}] Shot {clip_index + 1}: the rewrite changed "
+                f"{max(changed, second_changed)} character(s) and was refused."
+            )
+            return result
 
     # The spoken lines, the single shot and the contract are checked here rather
     # than requested in the system prompt: a rule in a prompt is a request, and
