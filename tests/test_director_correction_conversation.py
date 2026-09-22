@@ -32,6 +32,8 @@ from services import director_pipeline as pipeline  # noqa: E402
 from services.director.h3_dialogue import (  # noqa: E402
     _build_stable_speaker_registry,
     _declared_shot_numbers,
+    _ensure_h3_prompt_anchors,
+    _h3_anchor_present,
     _single_shot_body,
     _speaker_registry_entry,
     compile_h3_clip_plans,
@@ -737,6 +739,108 @@ class ReviewedPromptKeepsItsShape(unittest.TestCase):
 
         self.assertEqual(result["video_prompt"].count("subject_definitions:"), 1)
         self.assertEqual(result["video_prompt"].count("[Shot 1]"), 1)
+
+
+class ReviewedPromptGetsItsCanonicalAnchor(unittest.TestCase):
+    """A reviewed prompt that lost a canonical anchor is completed, not refused.
+
+    The compiler writes "Canonical identity and world: ..." into every body it
+    builds, but a reviewed prompt is rendered verbatim, so the reviewed prompt was
+    the one place the sentence could never be inserted -- while the contract still
+    demanded it. The correction assistant was then refused for not inventing the
+    sentence ("missing canonical identity/world context: The library/loft
+    background"), which is a dead end rather than a correction.
+    """
+
+    ENVIRONMENT = "The library/loft background"
+
+    def _compile(self, prompt: str, beats, environment: str = "") -> dict:
+        plan = {
+            "video_prompt": prompt,
+            "_director_prompt_user_edited": True,
+            "_director_h3_source_prompt": prompt,
+            "_director_h3_compiled_prompt": "",
+            "_director_dialogue_beats": beats,
+            "_director_subjects_on_screen": REVIEWED_SUBJECTS,
+            "_director_environment": environment,
+            "_director_duration_sec": 7.29,
+            "_director_h3_prompt_mode": "ref2va",
+            "_director_h3_model_family": "ref2va",
+            "_director_speaker_registry": {},
+            "_director_audio_plan": {"mode": "dialogue_driven", "lip_sync_critical": True},
+        }
+
+        compiled = compile_h3_clip_plans(
+            [plan], prompt_modes=["ref2va"], durations=[7.29],
+        )
+
+        return dict(compiled[0])
+
+    def test_the_rendered_prompt_carries_the_anchor_the_plan_requires(self):
+        prompt = _reviewed_prompt(REVIEWED_LINES)
+        beats = retain_dialogue_beats(PLAN_BEATS, prompt)
+
+        rendered = self._compile(prompt, beats, self.ENVIRONMENT)["video_prompt"]
+
+        self.assertTrue(_h3_anchor_present(self.ENVIRONMENT, rendered))
+        # The reviewed words are still authoritative: one prompt, one shot, and
+        # the spoken lines untouched.
+        self.assertEqual(rendered.count("subject_definitions:"), 1)
+        self.assertEqual(rendered.count("[Shot 1]"), 1)
+        self.assertEqual(h3_dialogue_blocks(rendered), h3_dialogue_blocks(prompt))
+
+    def test_the_anchor_lands_inside_the_body_field(self):
+        prompt = _reviewed_prompt(REVIEWED_LINES)
+        beats = retain_dialogue_beats(PLAN_BEATS, prompt)
+
+        rendered = self._compile(prompt, beats, self.ENVIRONMENT)["video_prompt"]
+
+        anchor = rendered.index("Canonical identity and world:")
+        self.assertLess(rendered.index("detailed_description:"), anchor)
+        # Appended inside the body, so the next field is still found at a line
+        # start: a sentence glued to its label hides the field entirely.
+        self.assertLess(anchor, rendered.index("overall_soundscape:"))
+        self.assertRegex(rendered, r"(?m)^overall_soundscape:")
+
+    def test_an_anchor_that_is_already_present_is_not_added_again(self):
+        prompt = _reviewed_prompt(REVIEWED_LINES)
+
+        once = _ensure_h3_prompt_anchors(prompt, [self.ENVIRONMENT])
+        twice = _ensure_h3_prompt_anchors(once, [self.ENVIRONMENT])
+
+        self.assertEqual(twice.count("Canonical identity and world:"), 1)
+        self.assertEqual(once, twice)
+
+    def test_a_rewrite_is_not_blamed_for_an_anchor_the_original_lacked(self):
+        # Compiling the rewrite is what refused it, so no answer could ever be
+        # accepted for this shot: the loop the user reported as "the assistant
+        # answers with an error and nothing changes".
+        original = _reviewed_prompt(REVIEWED_LINES)
+        revised = original.replace("Natural ambience", "Room tone")
+
+        problems = review_h3_revision(
+            original, revised, duration_seconds=7.29,
+            subjects=REVIEWED_SUBJECTS, context_anchors=[self.ENVIRONMENT],
+        )
+
+        self.assertEqual(problems, [])
+
+    def test_a_rewrite_that_drops_an_anchor_is_still_refused(self):
+        original = _ensure_h3_prompt_anchors(
+            _reviewed_prompt(REVIEWED_LINES), [self.ENVIRONMENT],
+        )
+        revised = original.replace(
+            f"Canonical identity and world: {self.ENVIRONMENT}.", "",
+        )
+
+        problems = review_h3_revision(
+            original, revised, duration_seconds=7.29,
+            subjects=REVIEWED_SUBJECTS, context_anchors=[self.ENVIRONMENT],
+        )
+
+        self.assertEqual(
+            problems, [f"missing canonical identity/world context: {self.ENVIRONMENT}"],
+        )
 
 
 class SavedPromptKeepsTheSpeechPlan(unittest.TestCase):

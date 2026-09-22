@@ -2968,6 +2968,7 @@ def revise_clip_prompt(
         task.extend(["", "ADJACENT SHOTS (keep continuity):", neighbours])
 
     from services.director.h3_dialogue import (
+        _h3_anchor_present,
         _h3_plan_context_anchors,
         diagnose_h3_clip_prompt,
         h3_dialogue_blocks,
@@ -2978,17 +2979,37 @@ def revise_clip_prompt(
     # the prompt text and the note, so it reasoned about a symptom it could not
     # see: three notes on one shot never mentioned the second shot or the
     # "background right" placement that were producing the duplicate.
+    anchors = _h3_plan_context_anchors(clip)
     diagnosis = diagnose_h3_clip_prompt(
         prompt,
         duration_seconds=clip.get("_director_duration_sec") or 0.0,
         subjects=clip.get("_director_subjects_on_screen") or [],
         mode=clip.get("_director_h3_prompt_mode") or "ref2va",
         references=clip.get("_director_h3_reference_manifest") or [],
-        context_anchors=_h3_plan_context_anchors(clip),
+        context_anchors=anchors,
         audio_plan=clip.get("_director_audio_plan") or {},
     )
     task.extend(["", "MEASUREMENT OF THE CURRENT PROMPT (read the facts, do not guess):"])
     task.extend(f"- {finding}" for finding in diagnosis["findings"])
+    if anchors:
+        # The system prompt asks the assistant to keep the anchors "the measurement
+        # lists", and the measurement listed none: the instruction pointed at
+        # nothing, so the exact sentences were never in front of it. Which of them
+        # the prompt already carries decides whether losing one is a change to
+        # refuse, so state it rather than leave it to be guessed.
+        task.append(
+            "- Canonical identity and world anchors, spelled verbatim: "
+            + " | ".join(anchors)
+        )
+        missing_anchors = [
+            anchor for anchor in anchors if not _h3_anchor_present(anchor, prompt)
+        ]
+        if missing_anchors:
+            task.append(
+                "- Not present in this prompt, and added when the shot is "
+                "rendered, so do not invent or reword them: "
+                + " | ".join(missing_anchors)
+            )
     turns = [
         turn for turn in (history or [])
         if isinstance(turn, dict) and str(turn.get("text") or "").strip()

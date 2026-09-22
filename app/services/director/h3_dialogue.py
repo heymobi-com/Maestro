@@ -1478,6 +1478,45 @@ def _ensure_h3_context_anchors(body: str, anchors: Iterable[Any]) -> str:
     )
 
 
+# The body field of a compiled Context-IR prompt: where a reviewer's edits live,
+# and where a missing canonical anchor has to be added.
+_H3_BODY_FIELD_RE = re.compile(
+    r"(?mis)^([ \t]*(?:detailed_description|integrated_multimodal_description)[ \t]*:)"
+    r"(.*?)(?=^[ \t]*[A-Za-z_][\w_]*[ \t]*:|\Z)"
+)
+
+
+def _ensure_h3_prompt_anchors(prompt: str, anchors: Iterable[Any]) -> str:
+    """Add the required anchors to a prompt that is used as it was saved.
+
+    The compiler inserts them into a body it builds, but a reviewed prompt is
+    rendered verbatim, so that was the one place a missing anchor could never be
+    added -- and the contract refuses a prompt that lacks them. A shot whose
+    reviewer had rephrased the background therefore could not satisfy the
+    contract at all, and the correction assistant was refused for not inventing
+    the sentence. Appended to the body field rather than prepended to the prompt,
+    so the six fields keep their order and the reviewed words stay where they are.
+    """
+
+    text = str(prompt or "")
+    missing = [
+        anchor for anchor in _h3_context_anchors(anchors)
+        if not _h3_anchor_present(anchor, text)
+    ]
+    if not missing:
+        return prompt
+    sentence = f"Canonical identity and world: {'; '.join(missing)}."
+    match = _H3_BODY_FIELD_RE.search(text)
+    if not match:
+        return _normalized_space(f"{sentence} {text}")
+    # Insert before the whitespace that closes the field: the next field is found
+    # at a line start, so a sentence glued to its label would hide it.
+    end = match.end(2)
+    prefix = text[:end]
+    stripped = prefix.rstrip()
+    return f"{stripped} {sentence}{prefix[len(stripped):]}{text[end:]}"
+
+
 # A Director clip is one continuous shot: the film is joined from the clips, so
 # a cut inside one is a cut the join cannot describe. Stated explicitly because
 # the project context is injected into every shot and often describes the whole
@@ -1943,18 +1982,31 @@ def review_h3_revision(
     elif not shots:
         problems.append("The rewrite lost its [Shot 1] marker.")
 
-    problems.extend(
-        validate_h3_prompt_contract(
-            text,
-            [],
-            mode=mode,
-            references=references,
-            subjects=subjects,
-            context_anchors=context_anchors,
-        )
+    # A rewrite is judged on what it changed, not on what it inherited. A reviewed
+    # prompt is rendered verbatim, so the compiler never inserted the canonical
+    # anchors into it: requiring a rewrite to invent them refused every answer for
+    # such a shot, which is what "the assistant answers with an error and nothing
+    # changes" was. An anchor the original carried and the rewrite dropped is still
+    # refused, because that one is a change.
+    inherited = validate_h3_prompt_contract(
+        str(original or ""),
+        [],
+        mode=mode,
+        references=references,
+        subjects=subjects,
+        context_anchors=context_anchors,
     )
+    for problem in validate_h3_prompt_contract(
+        text,
+        [],
+        mode=mode,
+        references=references,
+        subjects=subjects,
+        context_anchors=context_anchors,
+    ):
+        if problem not in inherited:
+            problems.append(problem)
     return problems
-
 
 def _source_prompt_parts(
     prompt: str,
@@ -4323,6 +4375,17 @@ def compile_h3_clip_plans(
             # determine which referenced character speaks ...'). Their text is
             # authoritative, so it is used as the prompt instead of as input.
             prompt = str(source_prompt)
+            required = _h3_plan_context_anchors(plan)
+            if required:
+                anchored = _ensure_h3_prompt_anchors(prompt, required)
+                if anchored != prompt:
+                    # Say it where the log is read: this shot gains the identity and
+                    # world line the compiler writes for every prompt it builds.
+                    print(
+                        f"[MiniMax H3] Shot {index + 1} reviewed prompt gained its "
+                        "canonical identity/world anchor."
+                    )
+                    prompt = anchored
             plan["video_prompt"] = prompt
             plan["_director_h3_compiled_prompt"] = prompt
             validate_h3_prompt_contract(
