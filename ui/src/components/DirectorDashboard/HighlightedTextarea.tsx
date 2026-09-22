@@ -33,22 +33,33 @@ export function HighlightedTextarea({ value, onChange, ariaLabel }: Props) {
   const search = usePanelSearch()
 
   /**
-   * Give the mirror the same content width as the textarea.
+   * Copy the geometry the browser actually gave the textarea onto the mirror.
    *
-   * A textarea showing a scrollbar is narrower by that width, and that difference
-   * alone is what makes a highlight drift on long, wrapped lines.
+   * Inheriting the font was not enough. The app raises every textarea to 16px on
+   * a window narrower than 768px (the iOS zoom-prevention rule), and `!important`
+   * beats an inline `font-size: inherit`, so the two layers disagreed by 6.5px per
+   * line and the marks walked away from the words they belong to -- which is what
+   * "the highlight lands on the wrong text" was. Measuring beats assuming: the
+   * mirror follows whatever the textarea ended up with, whatever set it.
    */
-  const syncWidth = useCallback(() => {
+  const syncGeometry = useCallback(() => {
     const mirror = mirrorRef.current
     if (!area || !mirror) return
-    mirror.style.paddingRight = `${Math.max(0, area.offsetWidth - area.clientWidth)}px`
+    const computed = window.getComputedStyle(area)
+    for (const property of [
+      'fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'lineHeight', 'letterSpacing',
+      'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
+      'whiteSpace', 'overflowWrap', 'wordBreak', 'tabSize',
+    ] as const) {
+      mirror.style[property] = computed[property]
+    }
   }, [area])
 
-  useLayoutEffect(syncWidth, [syncWidth, value])
+  useLayoutEffect(syncGeometry, [syncGeometry, value])
   useEffect(() => {
-    window.addEventListener('resize', syncWidth)
-    return () => window.removeEventListener('resize', syncWidth)
-  }, [syncWidth])
+    window.addEventListener('resize', syncGeometry)
+    return () => window.removeEventListener('resize', syncGeometry)
+  }, [syncGeometry])
 
   const pieces = useMemo(() => markPieces(
     value,
@@ -64,11 +75,17 @@ export function HighlightedTextarea({ value, onChange, ariaLabel }: Props) {
   }, [])
 
   return (
-    <div className="relative flex-1 min-h-0 rounded border border-border bg-bg-tertiary focus-within:border-accent-blue">
+    // The line height lives here, on the element both layers inherit from: the
+    // textarea needs `font: inherit` to stop the browser giving it its own
+    // monospace font, and that shorthand resets line-height too. Setting
+    // `leading-relaxed` on the textarea or the mirror instead made the two layers
+    // disagree by a few pixels per line, which is what walked the marks away from
+    // the words they belong to.
+    <div className="relative flex-1 min-h-0 rounded border border-border bg-bg-tertiary leading-relaxed focus-within:border-accent-blue">
       <div
         ref={mirrorRef}
         aria-hidden="true"
-        className="absolute inset-0 overflow-hidden px-2 py-1.5 leading-relaxed whitespace-pre-wrap break-words text-transparent select-none pointer-events-none"
+        className="absolute inset-0 overflow-hidden px-2 py-1.5 whitespace-pre-wrap break-words text-transparent select-none pointer-events-none"
       >
         {pieces.map((piece, index) => (
           piece.mark === 'none'
@@ -86,8 +103,23 @@ export function HighlightedTextarea({ value, onChange, ariaLabel }: Props) {
         onScroll={onScroll}
         aria-label={ariaLabel}
         spellCheck={false}
-        style={{ font: 'inherit' }}
-        className="absolute inset-0 w-full h-full resize-none bg-transparent px-2 py-1.5 leading-relaxed whitespace-pre-wrap break-words text-text-primary focus:outline-none"
+        /*
+         * The font is set as longhands, never with the `font` shorthand: the
+         * shorthand resets line-height, and a textarea that wraps its lines at a
+         * different height than the layer behind it is what walks a highlight away
+         * from the words. The scrollbar is hidden for the same reason -- a reserved
+         * scrollbar makes this element narrower than the mirror -- and the window is
+         * resizable, so the wheel and the keyboard still scroll it.
+         */
+        style={{
+          fontFamily: 'inherit',
+          fontSize: 'inherit',
+          fontWeight: 'inherit',
+          fontStyle: 'inherit',
+          lineHeight: 'inherit',
+          letterSpacing: 'inherit',
+        }}
+        className="absolute inset-0 w-full h-full resize-none bg-transparent px-2 py-1.5 whitespace-pre-wrap break-words text-text-primary focus:outline-none [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       />
     </div>
   )

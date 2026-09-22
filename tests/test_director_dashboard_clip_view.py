@@ -102,8 +102,17 @@ class PromptHighlightTests(unittest.TestCase):
         self.assertIn("text-transparent", self.area)
 
     def test_the_mirror_copies_the_textarea_geometry(self):
-        # A scrollbar makes a textarea narrower, which is what drifts a highlight.
-        self.assertIn("offsetWidth - area.clientWidth", self.area)
+        # Inheriting is not enough: the app raises every textarea to 16px under a
+        # 767px-wide window with `!important`, which beats an inline font-size, and
+        # the two layers then wrap at 26px and 19.5px. Measured in a browser: the
+        # mirror followed the textarea exactly, and the control without this did
+        # not (1299 against 2274 pixels tall).
+        self.assertIn("getComputedStyle", self.area)
+        self.assertIn("'lineHeight'", self.area)
+        self.assertIn("'paddingLeft'", self.area)
+        # A reserved scrollbar makes the textarea narrower than the mirror, so the
+        # editor hides it and both boxes measure the same width.
+        self.assertIn("scrollbar-width:none", self.area)
         self.assertIn("mirror.scrollTop = event.currentTarget.scrollTop", self.area)
         self.assertIn("whitespace-pre-wrap", self.area)
 
@@ -198,8 +207,12 @@ class FloatingFontSizeTests(unittest.TestCase):
         area = _read("components", "DirectorDashboard", "HighlightedTextarea.tsx")
 
         self.assertNotIn("text-[", area)
+        self.assertIn("lineHeight: 'inherit'", area)
+        # The `font` shorthand resets line-height, and a textarea that wraps its
+        # lines at a different height than the layer behind it is what walks a
+        # highlight away from the words.
+        self.assertNotIn("font: 'inherit'", area)
         self.assertIn("leading-relaxed", area)
-        self.assertIn("font: 'inherit'", area)
 
     def test_the_prompt_window_enables_the_control_and_the_player_does_not(self):
         prompt_start = self.dashboard.index("storageKey={`prompt-${pipeline.pipeline_id}-${clip.index}`}")
