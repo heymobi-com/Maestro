@@ -25,6 +25,14 @@ npm install
 npm run build
 ```
 
+If that machine has no `git`, Pinokio ships one inside its own folder:
+`<PINOKIO_HOME>\bin\miniforge\Library\cmd\git.exe`, for example
+`C:\pinokio\bin\miniforge\Library\cmd\git.exe`. The same is true of `node` and `npm` — Pinokio
+keeps its own copies, which is why the launcher scripts can build the interface on a machine
+where Node was never installed. Alternatively, run the first two lines only and let
+`Advanced > Apply local fixes` do the build on the second pass: by then the entry exists and
+the merge is a no-op, so the script goes straight to rebuilding with Pinokio's own npm.
+
 The `-c` flags matter only if the merge needs to create a commit: committing requires an
 author, and this way the fix neither needs nor edits the git identity of the machine.
 The order matters too — fetching is safe and reversible, merging is not, and the rebuild has
