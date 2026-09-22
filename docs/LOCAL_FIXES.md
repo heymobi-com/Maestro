@@ -7,32 +7,46 @@ projects.
 
 ## Applying a bundle
 
-1. **Run Update once first.** The bundle records the upstream commit it was built from, so
-   the install has to be on that commit or newer. `Advanced > Update`, in the app menu.
-2. **`Advanced > Apply local fixes`**, then pick the `.bundle` file when the dialog opens.
+**Run Update once first.** The bundle records the upstream commit it was built from, so the
+install has to be on that commit or newer: `Advanced > Update`, in the app menu.
 
-   The file may live anywhere: Downloads, Desktop, an external drive. It is read from where
-   it is and nothing is copied into the repository. Two details if the dialog seems empty:
-   extract the bundle first if it arrived inside a `.zip`, and set the dialog's file-type
-   filter to "All files" if the downloader renamed the extension.
-3. **Stop Maestro if it is running, start it again, and hard-refresh the browser**
-   (`Ctrl+Shift+R`).
+### The first bundle is applied from a terminal
 
-The last step is not optional and is the reason `apply_local_fixes.js` exists: the interface
-is a compiled React bundle in `ui/dist`, and Maestro's own Update rebuilds it only when
+The menu entry that applies bundles is itself inside the bundle, so before the first merge
+the install has no `Apply local fixes` to click. Open a terminal in the install folder
+(`PINOKIO_HOME/api/Maestro.git`, usually `C:\pinokio\api\Maestro.git` on Windows) and run
+these five lines one after another. They work in both PowerShell and `cmd`:
+
+```
+git fetch "<full path to the .bundle file>" main:maestro-local-fixes
+git -c user.name=Maestro -c user.email=maestro@localhost merge --no-edit maestro-local-fixes
+cd ui
+npm install
+npm run build
+```
+
+The `-c` flags matter only if the merge needs to create a commit: committing requires an
+author, and this way the fix neither needs nor edits the git identity of the machine.
+The order matters too — fetching is safe and reversible, merging is not, and the rebuild has
+to come last because the interface is a compiled React bundle in `ui/dist`.
+
+### Later bundles are one click
+
+Once the first merges, the app menu gains `Advanced > Apply local fixes`: pick the `.bundle`
+file and the script fetches it, merges it, and rebuilds the interface in one go. That script
+exists to force the build, because Maestro's own Update rebuilds the interface only when
 `git pull` reports new commits. A bundle arrives as a file, so the pull afterwards says
 "already up to date" and Update would skip the rebuild, leaving the old interface on screen.
 
-### Manual equivalent
+The file may live anywhere: Downloads, Desktop, an external drive. It is read from where it
+is and nothing is copied into the repository. Two details if the dialog seems empty: extract
+the bundle first if it arrived inside a `.zip`, and set the dialog's file-type filter to
+"All files" if the downloader renamed the extension.
 
-If the script cannot run, the same result comes from three commands in the install folder
-(`PINOKIO_HOME/api/Maestro.git`), followed by the rebuild:
+### Last step, either way
 
-```
-git fetch <path-to-file>.bundle main:maestro-local-fixes
-git merge --no-edit maestro-local-fixes
-cd ui && npm install && npm run build
-```
+Stop Maestro if it is running, start it again, and hard-refresh the browser (`Ctrl+Shift+R`).
+Without the refresh the browser keeps serving the previous interface from its cache.
 
 ## Producing a new bundle
 
