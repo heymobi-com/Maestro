@@ -39,6 +39,14 @@ CONTEXT-IR FORMAT:
 - Begin integrated_multimodal_description with [Shot 1] and no timestamp, then
   narrate visible action, camera, dialogue, and synchronized sound in
   chronological order. Later cuts begin [Shot N] At MM:SS.mmm.
+- A Director shot is ONE continuous shot, so its body carries exactly one
+  [Shot 1] and no later cut. Do not number it with its position in the film's
+  shot list: the eleventh shot of a film still writes "[Shot 1]", never
+  "[Shot 11]". Reserve [Shot 2] and later for a body that deliberately holds
+  several shots, and then count the shots inside the clip, starting at 1.
+- Every timestamp inside a body is relative to that clip and starts at 0.00.
+  Never write the film's elapsed time: a seven-second shot does not say
+  "At MM:37.500".
 - Give each speaking person a stable ID such as (S1) or (S2).
 - When already numbered people speak or sing together, use a compound ID such
   as (S1,S2). Characters who never vocalize receive no speaker ID.

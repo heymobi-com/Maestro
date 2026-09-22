@@ -1522,6 +1522,41 @@ def _looks_like_a_multi_shot_body(body: str) -> bool:
     return len(_H3_MULTI_SHOT_BODY_RE.findall(text)) > 1
 
 
+def _single_shot_body(body: str) -> str:
+    """Leave exactly one shot marker in a clip body.
+
+    The shot-breakdown guide asks for ``[Shot 1]`` at the start and then "later
+    cuts begin [Shot N] At MM:SS.mmm", and the planner answered with the film's
+    own shot number: clip 10 of a real project arrived as ``[Shot 1] Opening
+    composition ... [Shot 11] At MM:37.500, ...``. The compiler prepends its own
+    clip-local marker on top of that, so the body declared two shots -- 162 of
+    that project's 177 clips carried both. A model told that a later shot
+    follows performs that framing inside the same clip, which is how a character
+    placed in the later one is rendered a second time.
+
+    The first marker wins and the rest are dropped: the prose after them is this
+    clip's own body, so only the misleading label goes, and a beat that carried
+    a timestamp stays a beat of the one shot. Storyboard bodies (``Shot 2
+    (Medium, 6s):``) do not use brackets and are left untouched.
+    """
+
+    text = str(body or "")
+    seen = False
+
+    def replace(match: re.Match) -> str:
+        nonlocal seen
+        if seen:
+            return ""
+        seen = True
+        return "[Shot 1]"
+
+    normalized = _H3_BRACKET_SHOT_RE.sub(replace, text)
+    if not seen:
+        return normalized
+    # Dropping a marker can leave the space it occupied behind.
+    return re.sub(r"[ \t]{2,}", " ", normalized)
+
+
 _H3_SPOKEN_BLOCK_RE = re.compile(r"<d>.*?</d>", re.DOTALL)
 _H3_AT_TIMESTAMP_RE = re.compile(r"\bAt\s+(\d+(?:\.\d+)?)\s*s\b", re.IGNORECASE)
 _H3_BEHIND_POSITION_RE = re.compile(
@@ -3573,6 +3608,9 @@ def compile_h3_official_prompt(
         body = re.sub(r"^\s*\[Shot\s+1\]\s*", "", body, flags=re.IGNORECASE)
         body = f"[Shot 1] {body}".strip()
         body, _ = _align_h3_time_markers(body, audio_start_seconds)
+        # After the time markers are aligned, because alignment needs the
+        # ``[Shot N] At ...`` shape that this step removes.
+        body = _single_shot_body(body)
         subject_definitions = _ref2va_subject_definitions(
             subjects or [],
             registry,
@@ -3635,6 +3673,9 @@ def compile_h3_official_prompt(
         compiled_body, _ = _align_h3_time_markers(
             compiled_body, audio_start_seconds,
         )
+        # Before the shot numbers are read, so a clip-local header can no longer
+        # inherit the planner's film-global number.
+        compiled_body = _single_shot_body(compiled_body)
         shot_numbers = [int(value) for value in re.findall(
             r"\[Shot\s+(\d+)\]", compiled_body, flags=re.IGNORECASE,
         )]

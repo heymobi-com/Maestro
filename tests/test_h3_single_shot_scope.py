@@ -28,6 +28,7 @@ if _APP_DIR not in sys.path:
 from services.director.h3_dialogue import (  # noqa: E402
     _declared_shot_numbers,
     _looks_like_a_multi_shot_body,
+    _single_shot_body,
     _source_prompt_parts,
     compile_h3_clip_plans,
 )
@@ -245,6 +246,77 @@ class BracketShotMarkerTests(unittest.TestCase):
         self.assertIn("exactly ONE continuous shot", body)
         self.assertIn("[Shot 1]", body)
         self.assertIn("does not protect a second shot", body)
+
+
+class SingleMarkerNormalizationTests(unittest.TestCase):
+    """One clip, one marker.
+
+    The shot-breakdown guide asks the planner for ``[Shot 1]`` at the start and
+    then "later cuts begin [Shot N] At MM:SS.mmm", and the planner answered with
+    the film's own shot number: clip 10 of a real project arrived as ``[Shot 1]
+    Opening composition ... [Shot 11] At MM:37.500, ...``. The compiler prepended
+    its clip-local marker on top, so the body declared two shots, and 162 of
+    that project's 177 clips carried both -- the condition that renders a later
+    framing inside the same clip.
+    """
+
+    def test_the_first_marker_survives_and_the_rest_go(self):
+        normalized = _single_shot_body(
+            "[Shot 1] Opening composition: a close up. "
+            "[Shot 11] At MM:37.500, she turns."
+        )
+
+        self.assertEqual(_declared_shot_numbers(normalized), [1])
+        self.assertIn("Opening composition", normalized)
+        self.assertIn("At MM:37.500, she turns.", normalized)
+
+    def test_dropping_a_marker_leaves_no_double_space(self):
+        normalized = _single_shot_body("[Shot 1] a. [Shot 2] b.")
+
+        self.assertNotIn("  ", normalized)
+        self.assertIn("a. b.", normalized)
+
+    def test_a_single_marker_body_is_untouched(self):
+        body = "[Shot 1] Valeria (S1) speaks to camera."
+
+        self.assertEqual(_single_shot_body(body), body)
+
+    def test_a_storyboard_body_keeps_its_shots(self):
+        # "Shot 2 (Wide, 4s):" is the multi-shot storyboard syntax rather than
+        # the bracket marker, and renumbering it is not this step's business.
+        body = "[Shot 1] Shot 1 (Medium, 6s): a. Shot 2 (Wide, 4s): b."
+
+        self.assertIn("Shot 2 (Wide, 4s)", _single_shot_body(body))
+
+    def test_a_compiled_clip_declares_one_shot_only(self):
+        plan = _plan(
+            FILM_CONTEXT,
+            prompt=(
+                "[Shot 1] Opening composition: Close up on Valeria. "
+                "[Shot 11] At MM:37.500, the camera pushes into a tight close-up "
+                "of Valeria (S1)."
+            ),
+        )
+
+        compile_h3_clip_plans([plan], prompt_modes=["ref2va"], durations=[8.0])
+
+        compiled = plan["video_prompt"]
+        self.assertEqual(_declared_shot_numbers(compiled), [1])
+        self.assertIn("the camera pushes into a tight close-up", compiled)
+
+    def test_the_planner_is_told_not_to_number_by_the_film(self):
+        # The guide is what taught the global number in the first place.
+        guide = open(
+            os.path.join(
+                _APP_DIR, "services", "llm_guides", "director",
+                "minimax_h3_shot_breakdown.md",
+            ),
+            encoding="utf-8",
+        ).read()
+
+        self.assertIn("[Shot 11]", guide)
+        self.assertIn("ONE continuous shot", guide)
+        self.assertIn("relative to that clip", guide)
 
 
 if __name__ == "__main__":
