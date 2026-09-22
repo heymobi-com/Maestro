@@ -2818,12 +2818,26 @@ def _parse_revision_envelope(text: str) -> dict:
 # problem and handed the same prompt back, and the loop offered it as a fix.
 _NO_OP_CHANGE_CHARS = 40
 
-_REVISE_NO_OP_NUDGE = (
-    "Your FIXED_PROMPT changed almost nothing, so it does not answer the note. "
-    "Rewrite the sentences that produce the problem and answer again. If the note "
-    "cannot be satisfied by editing this prompt, say so in ANALYSIS and name what "
-    "outside the prompt blocks it."
-)
+_REVISE_NUDGE_HEADER = "Your FIXED_PROMPT was rejected for these reasons:"
+
+
+def _revise_problem_nudge(problems: list[str]) -> str:
+    """Tell the assistant what was wrong with its own rewrite.
+
+    Without the reason it repeats the answer that was just refused, which is how
+    three notes on one shot came back as 2, 55 and 1 changed characters: the
+    first two were the same prompt with a comma moved, and the third rewrote the
+    dialogue lines, which the gate protects.
+    """
+
+    listed = "\n".join(f"- {problem}" for problem in problems)
+    return (
+        f"{_REVISE_NUDGE_HEADER}\n{listed}\n"
+        "Answer again with a rewrite that fixes them. Copy every <d>...</d> line "
+        "byte for byte, including its [Language] tag. If the note cannot be "
+        "satisfied by editing this prompt, write NONE for FIXED_PROMPT and name "
+        "in ANALYSIS what outside the prompt blocks it."
+    )
 
 
 def _changed_characters(before: str, after: str) -> int:
@@ -3006,57 +3020,61 @@ def revise_clip_prompt(
             )
         return result
 
-    changed = _changed_characters(prompt, parts["prompt"])
-    if changed < _NO_OP_CHANGE_CHARS:
-        # Handing this over as a fix is what left three notes on one shot with a
-        # two-character edit. Ask once more, saying what is missing, and offer
-        # the answer only if it really edits the prompt.
-        second = _ask(_REVISE_NO_OP_NUDGE)
-        second_changed = (
-            _changed_characters(prompt, second["prompt"]) if second["prompt"] else 0
+    def _candidate_problems(candidate: dict) -> list[str]:
+        """Why a candidate cannot be offered as it stands.
+
+        Two ways to fail: it leaves the prompt almost intact, so it does not
+        answer the note, or it breaks something the gate protects -- usually the
+        spoken lines, which the assistant is told to copy byte for byte.
+        """
+
+        text = str(candidate.get("prompt") or "")
+        moved = _changed_characters(prompt, text) if text else 0
+        if moved < _NO_OP_CHANGE_CHARS:
+            return [
+                "the rewrite changed almost nothing "
+                f"({moved} character(s)), so it does not answer the note",
+            ]
+        return review_h3_revision(
+            prompt,
+            text,
+            duration_seconds=clip.get("_director_duration_sec") or 0.0,
+            subjects=clip.get("_director_subjects_on_screen") or [],
+            mode=clip.get("_director_h3_prompt_mode") or "ref2va",
+            references=clip.get("_director_h3_reference_manifest") or [],
+            context_anchors=_h3_plan_context_anchors(clip),
         )
-        if second_changed >= _NO_OP_CHANGE_CHARS:
+
+    problems = _candidate_problems(parts)
+    if problems:
+        # One more attempt, told exactly what was wrong with the first.
+        second = _ask(_revise_problem_nudge(problems))
+        if second["prompt"]:
             parts = second
-        else:
+            problems = _candidate_problems(second)
+        if problems:
             result["analysis"] = second["analysis"] or parts["analysis"]
             result["question"] = second["question"]
             result["errors"] = [
-                "The assistant explained the problem, but the prompt came back "
-                f"with only {max(changed, second_changed)} character(s) changed, "
-                "so it was not offered as a correction. The measurement above may "
-                "point at something outside the prompt.",
+                *problems,
+                "The rewrite was not offered, so the prompt is unchanged. Check "
+                "the measurement above before trying again: it may point at "
+                "something outside the prompt, such as the clip's audio plan.",
             ]
             print(
-                f"[Pipeline {pid}] Shot {clip_index + 1}: the rewrite changed "
-                f"{max(changed, second_changed)} character(s) and was refused."
+                f"[Pipeline {pid}] Shot {clip_index + 1}: the rewrite was refused "
+                f"({len(problems)} problem(s)); the prompt is unchanged."
             )
             return result
 
     # The spoken lines, the single shot and the contract are checked here rather
     # than requested in the system prompt: a rule in a prompt is a request, and
     # this is what decides whether a rewrite reaches the editor.
-    problems = review_h3_revision(
-        prompt,
-        parts["prompt"],
-        duration_seconds=clip.get("_director_duration_sec") or 0.0,
-        subjects=clip.get("_director_subjects_on_screen") or [],
-        mode=clip.get("_director_h3_prompt_mode") or "ref2va",
-        references=clip.get("_director_h3_reference_manifest") or [],
-        context_anchors=_h3_plan_context_anchors(clip),
-    )
-    if problems:
-        result["errors"] = problems
-        print(
-            f"[Pipeline {pid}] Shot {clip_index + 1}: the rewrite was refused "
-            f"({len(problems)} problem(s)); the prompt is unchanged."
-        )
-        return result
-
     result["rewritten"] = True
     result["video_prompt"] = parts["prompt"]
     print(
-        f"[Pipeline {pid}] Shot {clip_index + 1} prompt revised from a "
-        f"director note ({len(prompt)} -> {len(parts['prompt'])} chars)."
+        f"[Pipeline {pid}] Shot {clip_index + 1}: prompt revised from a director "
+        f"note ({len(prompt)} -> {len(parts['prompt'])} chars)."
     )
     return result
 

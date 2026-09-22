@@ -209,13 +209,13 @@ class CorrectionConversationWiringTests(unittest.TestCase):
         self.assertIn('history = body.get("history")', self.launch)
 
     def test_a_refused_rewrite_never_becomes_the_prompt(self):
-        start = self.pipeline.index("problems = review_h3_revision(")
-        tail = self.pipeline[start:start + 1800]
-        self.assertIn('result["errors"] = problems', tail)
+        start = self.pipeline.index("def _candidate_problems(")
+        tail = self.pipeline[start:start + 2600]
+        self.assertIn('result["errors"] = [', tail)
         # The errors are recorded and the turn ends there: the rewrite is only
         # assigned after the checks passed.
         self.assertLess(
-            tail.index('result["errors"] = problems'),
+            tail.index('result["errors"] = ['),
             tail.index('result["video_prompt"] = parts["prompt"]'),
         )
 
@@ -345,6 +345,39 @@ class NoOpRewriteTests(unittest.TestCase):
             _changed_characters(PROBLEM_PROMPT, FIXED_PROMPT),
             _NO_OP_CHANGE_CHARS,
         )
+
+    def test_a_rewrite_that_touches_the_spoken_words_is_retried_then_refused(self):
+        # The gate protects the dialogue lines: the words the audio carries
+        # cannot change. The retry has to be told that, or it answers with the
+        # same rewrite and the director is left with nothing to act on.
+        self._save()
+        broken = FIXED_PROMPT.replace(
+            "<d>[Spanish] Hola.</d>", "<d>[Spanish] Hola, buenos dias.</d>",
+        )
+        sent = self._stub([self._answer(broken), self._answer(broken)])
+
+        result = pipeline.revise_clip_prompt(
+            self.out_dir, self.pid, 0, "the woman must lip-sync her line",
+        )
+
+        self.assertFalse(result["rewritten"])
+        self.assertIn("spoken", " ".join(result["errors"]).lower())
+        self.assertEqual(len(sent), 2, "the refused rewrite must be retried once")
+        self.assertIn("byte for byte", sent[1], "the retry names what broke")
+
+    def test_the_retry_can_recover_from_a_gate_failure(self):
+        self._save()
+        broken = FIXED_PROMPT.replace(
+            "<d>[Spanish] Hola.</d>", "<d>[Spanish] Hola, buenos dias.</d>",
+        )
+        self._stub([self._answer(broken), self._answer(FIXED_PROMPT)])
+
+        result = pipeline.revise_clip_prompt(
+            self.out_dir, self.pid, 0, "make the two of them face each other",
+        )
+
+        self.assertTrue(result["rewritten"])
+        self.assertEqual(result["video_prompt"], FIXED_PROMPT.strip())
 
 
 class AudioPlanFindingTests(unittest.TestCase):
