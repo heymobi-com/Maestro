@@ -1488,17 +1488,38 @@ _H3_SINGLE_SHOT_SCOPE = (
 )
 
 # ``Shot 2 (Medium, 6s):`` style blocks mark a body that deliberately holds
-# several shots (storyboard format). The compiled Context-IR body uses
-# ``[Shot 1]`` instead, which is not matched here. Not anchored to a line start:
-# the body is whitespace-normalised before the scope line is decided, so the
-# newlines a storyboard was written with are already gone by then.
+# several shots (storyboard format). Not anchored to a line start: the body is
+# whitespace-normalised before the scope line is decided, so the newlines a
+# storyboard was written with are already gone by then.
 _H3_MULTI_SHOT_BODY_RE = re.compile(r"\bShot\s+\d+\s*[\(:]", re.IGNORECASE)
+
+# The compiled Context-IR body marks its shots with ``[Shot 1]``, which the
+# storyboard pattern above does not match, so a body carrying ``[Shot 2]`` used to
+# read as a single shot. One clip is one continuous shot: a body that also asks
+# for ``[Shot 2]`` makes the model perform both framings inside the same clip, and
+# anyone placed in the later one is rendered a second time. Shot 26 of one project
+# described Ricardo "visible in the periphery" and then again "in the background
+# blur", in two shots inside a 7.29 s clip, and the duplicate man on screen was
+# that instruction being obeyed.
+_H3_BRACKET_SHOT_RE = re.compile(r"\[\s*Shot\s+(\d+)\s*\]", re.IGNORECASE)
+
+
+def _declared_shot_numbers(body: str) -> list[int]:
+    """Shot numbers a Context-IR body declares, in order of appearance."""
+
+    return [
+        int(value)
+        for value in _H3_BRACKET_SHOT_RE.findall(str(body or ""))
+    ]
 
 
 def _looks_like_a_multi_shot_body(body: str) -> bool:
     """True when the body intentionally holds more than one shot."""
 
-    return len(_H3_MULTI_SHOT_BODY_RE.findall(str(body or ""))) > 1
+    text = str(body or "")
+    if any(number > 1 for number in _declared_shot_numbers(text)):
+        return True
+    return len(_H3_MULTI_SHOT_BODY_RE.findall(text)) > 1
 
 
 def _source_prompt_parts(
@@ -3866,6 +3887,18 @@ def compile_h3_clip_plans(
         )
         plan["video_prompt"] = prompt
         plan["_director_h3_compiled_prompt"] = prompt
+        # A clip is one continuous shot, so a body that also declares a later one
+        # is a defect the user cannot see in the rendered clip until a character
+        # comes out duplicated. Say it where the log is read, not silently.
+        declared_shots = _declared_shot_numbers(prompt)
+        if any(number > 1 for number in declared_shots):
+            print(
+                f"[MiniMax H3] Shot {index + 1} declares {len(declared_shots)} shots "
+                f"inside one clip ({', '.join(f'[Shot {number}]' for number in declared_shots)}). "
+                "A Director clip is one continuous shot: whoever is placed in a later "
+                "framing is rendered again, which is how a character ends up "
+                "duplicated on screen."
+            )
         plan["_director_vocal_contract"] = contract
         plan["_director_h3_prompt_mode"] = mode
         plan["_director_speaker_registry"] = registry

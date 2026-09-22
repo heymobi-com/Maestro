@@ -26,6 +26,7 @@ if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
 from services.director.h3_dialogue import (  # noqa: E402
+    _declared_shot_numbers,
     _looks_like_a_multi_shot_body,
     _source_prompt_parts,
     compile_h3_clip_plans,
@@ -197,6 +198,53 @@ class ScopeIsNotConditionalOnTheContextTests(unittest.TestCase):
             _body,
             "four shared words must not stand in for a whole context",
         )
+
+
+class BracketShotMarkerTests(unittest.TestCase):
+    """A body that marks several ``[Shot N]`` is several shots, not one.
+
+    The guard looked only for the storyboard syntax ``Shot 2 (Medium, 6s):`` while
+    the compiled Context-IR body marks its shots ``[Shot 1]``. A body carrying
+    ``[Shot 2]`` therefore read as a single shot, the scope line was added to a
+    clip that went on to perform two framings, and anyone placed in the second
+    one was rendered twice: shot 26 of one project asked for Ricardo "in the
+    periphery" and again "in the background blur", in two shots inside a 7.29 s
+    clip, and the model produced the duplicate man.
+    """
+
+    def test_bracket_markers_are_read_in_order(self):
+        self.assertEqual(
+            _declared_shot_numbers("[Shot 1] a. [Shot 2] b. [Shot 3] c."),
+            [1, 2, 3],
+        )
+
+    def test_a_body_with_a_later_shot_is_a_multi_shot_body(self):
+        self.assertTrue(
+            _looks_like_a_multi_shot_body("[Shot 1] Valeria. [Shot 2] Ricardo."),
+        )
+
+    def test_a_single_shot_body_is_still_one_shot(self):
+        self.assertFalse(_looks_like_a_multi_shot_body("[Shot 1] Valeria (S1) habla."))
+
+    def test_the_storyboard_syntax_still_counts(self):
+        self.assertTrue(
+            _looks_like_a_multi_shot_body("Shot 1 (Medium, 6s): a. Shot 2 (Wide, 4s): b."),
+        )
+
+    def test_the_ai_correction_may_remove_a_second_shot(self):
+        # Its other rule -- change only what the note asks for -- used to protect
+        # the very second shot that caused the duplicate, so the note could never
+        # remove it.
+        source = open(
+            os.path.join(_APP_DIR, "services", "director_pipeline.py"),
+            encoding="utf-8",
+        ).read()
+        start = source.index("_REVISE_PROMPT_SYSTEM = ")
+        body = source[start:start + 3200]
+
+        self.assertIn("exactly ONE continuous shot", body)
+        self.assertIn("[Shot 1]", body)
+        self.assertIn("does not protect a second shot", body)
 
 
 if __name__ == "__main__":

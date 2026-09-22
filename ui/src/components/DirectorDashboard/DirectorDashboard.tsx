@@ -4,6 +4,7 @@ import { FloatingPanel } from './FloatingPanel'
 import { useStore } from '../../stores/useStore'
 import { getFileUrl, reviseClipPrompt, updateClipPrompt } from '../../api/client'
 import type { PipelineClipState, SavedPipelineState } from '../../types'
+import { multipleShotWarning } from '../../lib/h3Prompt'
 
 /** Safely coerce any value to a displayable string */
 function safeStr(val: unknown): string {
@@ -571,6 +572,18 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
               </p>
             )
           )}
+          {(() => {
+            // Warned for the text on screen, whether it is being edited or only
+            // read, so the message follows what the user is looking at.
+            const warning = multipleShotWarning(editingVideo ? editVideoPrompt : clip.video_prompt || '')
+            if (!warning) return null
+            return (
+              <p role="alert" className="mt-1 flex items-start gap-1 text-[9px] text-indicator-warning">
+                <AlertTriangle size={9} className="mt-px shrink-0" />
+                <span>{warning}</span>
+              </p>
+            )
+          })()}
           {saveError && <p role="alert" className="mt-1 text-[9px] text-indicator-warning">{saveError}</p>}
 
           {/* A plain-language correction for this one shot. Saying what is

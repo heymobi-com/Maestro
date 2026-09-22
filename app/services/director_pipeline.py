@@ -2759,6 +2759,13 @@ never be given masculine delivery, wardrobe or features, and the reverse.
 - Keep the shot continuous with its neighbours: same studio, same lighting, same \
 colour palette, same wardrobe, and motion that flows out of the previous shot and \
 into the next one.
+- A Director clip is exactly ONE continuous shot. The corrected \
+detailed_description must declare exactly one shot: one ``[Shot 1]`` marker and no \
+``[Shot 2]`` or later. If the current text declares later shots, fold what they show \
+into the single shot and delete the extra markers. Never preserve a second framing: \
+the model performs every shot it is given inside the same clip, so anyone placed in \
+a later framing is rendered a second time. The rule to change only what the note asks \
+for does not protect a second shot.
 - Return the corrected prompt ONLY. No commentary, no markdown fences, no \
 explanation."""
 

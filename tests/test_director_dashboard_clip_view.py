@@ -255,5 +255,41 @@ class ClipPreviewTests(unittest.TestCase):
         self.assertIn("'no visual yet'", self.dashboard)
 
 
+class MultipleShotWarningTests(unittest.TestCase):
+    """The dashboard must say when a clip's prompt asks for several shots.
+
+    A clip is one continuous shot, so a prompt carrying ``[Shot 2]`` makes the
+    model perform both framings in the same few seconds and whoever is placed in
+    the later one is rendered again. Nothing in the UI said so: the duplicate
+    character was only visible after rendering the clip.
+    """
+
+    def setUp(self):
+        self.lib = _read("lib", "h3Prompt.ts")
+        self.dashboard = _read(
+            "components", "DirectorDashboard", "DirectorDashboard.tsx",
+        )
+
+    def test_the_library_reads_the_bracket_markers(self):
+        self.assertIn("export function declaredShotNumbers", self.lib)
+        self.assertIn("export function declaresMultipleShots", self.lib)
+        self.assertIn("export function multipleShotWarning", self.lib)
+        self.assertIn("number > 1", self.lib)
+
+    def test_the_card_shows_the_warning_for_the_text_on_screen(self):
+        self.assertIn("from '../../lib/h3Prompt'", self.dashboard)
+        # Follows the editor while editing and the saved prompt otherwise.
+        self.assertIn(
+            "multipleShotWarning(editingVideo ? editVideoPrompt : clip.video_prompt || '')",
+            self.dashboard,
+        )
+        self.assertIn("role=\"alert\"", self.dashboard)
+
+    def test_the_warning_names_the_shots_to_fold_back(self):
+        self.assertIn("inside one clip", self.lib)
+        self.assertIn("duplicated on screen", self.lib)
+        self.assertIn("Fold the extra shots into a single [Shot 1]", self.lib)
+
+
 if __name__ == "__main__":
     unittest.main()
