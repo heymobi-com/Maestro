@@ -5,6 +5,7 @@ import { TabFilter } from './TabFilter'
 import { ThumbnailGallery } from './ThumbnailGallery'
 import { MediaFeedItem } from './MediaFeedItem'
 import { PlanProgressCard } from './PlanProgressCard'
+import { BlockedDeleteDialog } from './BlockedDeleteDialog'
 import { GlobalQueuePopover } from '../GlobalQueuePopover'
 import { useStore } from '../../stores/useStore'
 import { useIsMobile } from '../../lib/useIsMobile'
@@ -912,6 +913,8 @@ export function MainContent() {
           {!isMobile && <GlobalQueuePopover />}
         </div>
       </div>
+
+      <BlockedDeleteDialog />
 
       {/* Content area: feed + thumbnails */}
       <div className="flex-1 flex flex-row gap-0 overflow-hidden relative">

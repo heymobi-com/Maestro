@@ -31,6 +31,12 @@ from services.director_pipeline import (  # noqa: E402
 _LAUNCH = Path(_APP_DIR) / "launch.py"
 _CLIENT = Path(_HERE).parent / "ui" / "src" / "api" / "client.ts"
 _STORE = Path(_HERE).parent / "ui" / "src" / "stores" / "useStore.ts"
+_MAIN_CONTENT = (
+    Path(_HERE).parent / "ui" / "src" / "components" / "MainContent" / "MainContent.tsx"
+)
+_BLOCKED_DIALOG = (
+    Path(_HERE).parent / "ui" / "src" / "components" / "MainContent" / "BlockedDeleteDialog.tsx"
+)
 
 
 class SlotRepointTests(unittest.TestCase):
@@ -218,12 +224,75 @@ class DeleteGuardTests(unittest.TestCase):
         self.assertIn("export async function deleteOutput(name: string, workspace?: string, force = false)", client)
         self.assertIn("params.set('force', 'true')", client)
 
-    def test_the_ui_asks_before_breaking_the_film(self):
+    def test_the_refused_delete_is_held_for_the_users_answer(self):
         store = _STORE.read_text(encoding="utf-8")
 
         self.assertIn("/is using for shot/.test(message)", store)
-        self.assertIn("window.confirm(message)", store)
-        self.assertIn("api.deleteOutput(output.name, output.workspace, true)", store)
+        self.assertIn("blockedDelete: { output, message }", store)
+        # The file is only removed once the user answered in the app's dialog.
+        self.assertIn(
+            "api.deleteOutput(blocked.output.name, blocked.output.workspace, true)", store,
+        )
+
+    def test_the_question_is_not_a_native_dialog(self):
+        store = _STORE.read_text(encoding="utf-8")
+
+        # A native confirm() can answer itself: a service-worker PWA and several
+        # webviews dismiss it and return true, so pressing cancel still deleted
+        # the take with force. The guard has to own the question.
+        self.assertNotIn("window.confirm(", store)
+        self.assertNotIn("window.confirm(", _BLOCKED_DIALOG.read_text(encoding="utf-8"))
+
+    def test_cancelling_can_only_keep_the_clip(self):
+        store = _STORE.read_text(encoding="utf-8")
+        # The implementation, not the interface declaration above it.
+        start = store.index("cancelBlockedDelete: () => {")
+        body = store[start:start + 260]
+
+        self.assertIn("set({ blockedDelete: null })", body)
+        # Nothing on the cancel path may reach the API.
+        self.assertNotIn("deleteOutput", body)
+
+    def test_a_refused_delete_does_not_touch_the_gallery(self):
+        store = _STORE.read_text(encoding="utf-8")
+        start = store.index("deleteSelectedOutput: async (target) => {")
+        body = store[start:start + 1500]
+
+        # The blocked branch returns before the local list is trimmed, so a
+        # refused delete cannot make the clip look gone while its file remains.
+        self.assertLess(
+            body.index("set({ blockedDelete: { output, message } })"),
+            body.index("get()._forgetDeletedOutput(output)"),
+        )
+
+
+class BlockedDeleteDialogTests(unittest.TestCase):
+    """Closing the question must keep the clip, however it is closed."""
+
+    def setUp(self):
+        self.dialog = _BLOCKED_DIALOG.read_text(encoding="utf-8")
+        self.main = _MAIN_CONTENT.read_text(encoding="utf-8")
+
+    def test_the_app_owns_the_dialog(self):
+        self.assertIn("createPortal", self.dialog)
+        self.assertIn('role="dialog"', self.dialog)
+        self.assertIn('aria-modal="true"', self.dialog)
+
+    def test_the_safe_answer_holds_focus_so_enter_cannot_delete(self):
+        self.assertIn("keepRef.current?.focus()", self.dialog)
+
+    def test_escape_and_the_backdrop_both_keep_the_clip(self):
+        self.assertIn("event.key !== 'Escape'", self.dialog)
+        self.assertIn("if (event.target === event.currentTarget) keep()", self.dialog)
+
+    def test_deleting_needs_a_deliberate_click(self):
+        self.assertIn("onClick={() => void confirmBlockedDelete()}", self.dialog)
+        self.assertIn("Delete it anyway", self.dialog)
+        self.assertIn("Keep the clip", self.dialog)
+
+    def test_the_dialog_is_mounted_on_the_main_screen(self):
+        self.assertIn("from './BlockedDeleteDialog'", self.main)
+        self.assertIn("<BlockedDeleteDialog />", self.main)
 
 
 if __name__ == "__main__":

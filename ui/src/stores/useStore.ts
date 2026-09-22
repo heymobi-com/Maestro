@@ -1952,6 +1952,11 @@ interface AppState {
   loadSettingsFromOutput: () => Promise<void>
   rerollGeneration: () => Promise<void>
   deleteSelectedOutput: (target?: OutputFile) => Promise<void>
+  // The take a Director shot is using, waiting for the user's own answer.
+  blockedDelete: { output: OutputFile; message: string } | null
+  confirmBlockedDelete: () => Promise<void>
+  cancelBlockedDelete: () => void
+  _forgetDeletedOutput: (output: OutputFile) => void
   rejoinClipGroup: (groupId: string, workspace?: string) => Promise<void>
 
   // Services config
@@ -11509,6 +11514,8 @@ export const useStore = create<AppState>((set, get) => ({
   // Output metadata
   selectedOutputMeta: null,
   metadataLoading: false,
+  // Set while the server's delete guard has refused and the app is asking.
+  blockedDelete: null,
 
   loadOutputMetadata: async (name, workspace) => {
     const revision = ++_galleryMetadataRevision
@@ -13127,31 +13134,56 @@ export const useStore = create<AppState>((set, get) => ({
     if (!output) return
 
     try {
-      try {
-        await api.deleteOutput(output.name, output.workspace)
-      } catch (e) {
-        // The server refuses to remove the take a Director shot is using. Ask
-        // before breaking the film: this used to be the silent step that left a
-        // slot pointing at a file that no longer existed, and the rejoin then
-        // refused the whole run.
-        const message = e instanceof Error ? e.message : String(e)
-        if (!/is using for shot/.test(message)) throw e
-        if (!window.confirm(message)) return
-        await api.deleteOutput(output.name, output.workspace, true)
+      await api.deleteOutput(output.name, output.workspace)
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      if (!/is using for shot/.test(message)) {
+        console.error('Failed to delete output:', e)
+        return
       }
-      // Remove from local state
-      const allOutputs = get().outputs.filter(o => outputIdentity(o) !== outputIdentity(output))
-      const newIdx = Math.min(idx, Math.max(0, allOutputs.length - 1))
-      set({ outputs: allOutputs, outputsTotal: Math.max(0, get().outputsTotal - 1), selectedOutput: newIdx })
-      // Load metadata for new selection
-      const newFiltered = get().filteredOutputs()
-      if (newFiltered[newIdx]) {
-        get().loadOutputMetadata(newFiltered[newIdx].name, newFiltered[newIdx].workspace)
-      } else {
-        set({ selectedOutputMeta: null })
-      }
+      // The server refuses to remove the take a Director shot is using, and the
+      // question belongs to the app. A native confirm() can answer itself -- a
+      // service-worker PWA and several webviews dismiss it as true -- so pressing
+      // cancel still deleted the take with force and left the shot pointing at a
+      // file that no longer existed. That is the exact failure this guard exists
+      // to prevent, so the file is left alone until the user answers here.
+      if (get().blockedDelete) return
+      set({ blockedDelete: { output, message } })
+      return
+    }
+    get()._forgetDeletedOutput(output)
+  },
+
+  cancelBlockedDelete: () => {
+    // Cancelling only ever means "keep the clip": nothing on this path touches
+    // the file or the gallery, so closing the question cannot delete anything.
+    set({ blockedDelete: null })
+  },
+
+  confirmBlockedDelete: async () => {
+    const blocked = get().blockedDelete
+    if (!blocked) return
+    // Close the question first so a second click cannot queue a second delete.
+    set({ blockedDelete: null })
+    try {
+      await api.deleteOutput(blocked.output.name, blocked.output.workspace, true)
+      get()._forgetDeletedOutput(blocked.output)
     } catch (e) {
       console.error('Failed to delete output:', e)
+    }
+  },
+
+  _forgetDeletedOutput: (output) => {
+    // Drop the item from the gallery only once the server confirmed it is gone.
+    const allOutputs = get().outputs.filter(o => outputIdentity(o) !== outputIdentity(output))
+    const newIdx = Math.min(get().selectedOutput, Math.max(0, allOutputs.length - 1))
+    set({ outputs: allOutputs, outputsTotal: Math.max(0, get().outputsTotal - 1), selectedOutput: newIdx })
+    // Load metadata for new selection
+    const newFiltered = get().filteredOutputs()
+    if (newFiltered[newIdx]) {
+      get().loadOutputMetadata(newFiltered[newIdx].name, newFiltered[newIdx].workspace)
+    } else {
+      set({ selectedOutputMeta: null })
     }
   },
 
