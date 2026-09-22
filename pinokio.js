@@ -170,6 +170,14 @@ module.exports = {
             params: {
               compile: true
             }
+          }, {
+            // One-time delivery of a fixes bundle over an existing install.
+            // Kept in Advanced because it is a maintenance action rather than
+            // part of normal use, and because it must not compete with Update
+            // in the primary menu.
+            icon: "fa-solid fa-code-merge",
+            text: "<div><strong>Apply local fixes</strong><div>Merge a fixes bundle from a file and rebuild the interface.</div></div>",
+            href: "apply_local_fixes.js",
           }, ...(solCapable && !cuda13DriverUpdateRequired ? [{
             icon: "fa-solid fa-bolt",
             text: "Repair H3 Performance Runtime",
