@@ -40,7 +40,8 @@ faster-whisper==1.2.1
 # Director UI reports "No speaker was detected".
 setuptools<81
 openai-whisper==20250625  # Required by Scenema audio for Whisper-medium alignment (separate namespace from faster-whisper)
-whisperx==3.3.4
+# whisperx is deliberately absent: no module in the app imports it, and it pins its
+# own torch/torchaudio, so installing it would fight the cu130 stack for nothing.
 speechbrain==1.0.3
 audio-separator==0.36.1
 pyannote.audio==3.3.2
