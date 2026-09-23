@@ -333,6 +333,16 @@ class PromptComparisonTests(unittest.TestCase):
         self.assertIn("⚠", self.dashboard)
         self.assertIn("warnings: string[]", _read("api", "client.ts"))
 
+    def test_the_comparison_shows_only_the_part_that_varies(self):
+        # "That part is much smaller, which makes accepting or rejecting easier."
+        self.assertIn("fixAnswer?.clip_prompt", self.dashboard)
+        self.assertIn("fixAnswer?.clip_proposed", self.dashboard)
+        self.assertIn("son de este clip", self.dashboard)
+        self.assertIn("scope", self.view)
+        client = _read("api", "client.ts")
+        self.assertIn("clip_prompt: string", client)
+        self.assertIn("clip_proposed: string", client)
+
     def test_the_instructions_are_big_enough_to_read(self):
         # Measured complaint: "the font of the instructions is too small, impossible
         # to read on a laptop screen". The assistant card and the window it opens were

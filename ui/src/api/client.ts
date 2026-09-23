@@ -1148,6 +1148,10 @@ export interface RevisionAnswer {
   note: string
   /** Words in the proposal that look damaged while re-typing, not corrected. */
   warnings: string[]
+  /** This shot's own text: the part that varies, and the only part an answer may change. */
+  clip_prompt: string
+  /** The same part of the proposal: what the comparison shows. */
+  clip_proposed: string
   diagnosis: ShotDiagnosis
   rewritten: boolean
   errors: string[]

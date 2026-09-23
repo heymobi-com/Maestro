@@ -38,8 +38,12 @@ from services.director.h3_dialogue import (  # noqa: E402
     _speaker_registry_entry,
     compile_h3_clip_plans,
     diagnose_h3_clip_prompt,
+    h3_clip_text,
     h3_dialogue_blocks,
+    h3_ensure_project_base,
+    h3_frozen_problems,
     h3_proposal_warnings,
+    h3_shared_project_phrases,
     reconcile_audio_plan_with_dialogue,
     retain_dialogue_beats,
     review_h3_revision,
@@ -336,6 +340,13 @@ class CorrectionConversationWiringTests(unittest.TestCase):
     def test_the_turn_hands_the_assistant_the_measurement(self):
         self.assertIn("MEASUREMENT OF THE CURRENT PROMPT", self.pipeline)
         self.assertIn("diagnose_h3_clip_prompt(", self.pipeline)
+
+    def test_the_turn_hands_the_assistant_the_shot_text_and_the_frozen_project_text(self):
+        # Sending the whole prompt invited the model to rewrite it, which is where the
+        # damage came from; the frozen project text goes along as read-only context.
+        self.assertIn("THIS SHOT'S TEXT", self.pipeline)
+        self.assertIn("frozen: it must come back", self.pipeline)
+        self.assertIn("h3_clip_text(prompt, frozen)", self.pipeline)
 
     def test_the_conversation_is_carried_and_bounded(self):
         self.assertIn("history: Optional[list] = None", self.pipeline)
@@ -1182,6 +1193,121 @@ class ProposalDamageTests(unittest.TestCase):
 
         self.assertEqual(review_h3_revision(FIXED_PROMPT, proposal), [])
         self.assertEqual(h3_proposal_warnings(FIXED_PROMPT, proposal), [])
+
+
+class ProjectTextIsSharedTests(unittest.TestCase):
+    """The text every clip of a project carries is not any shot's to edit.
+
+    Measured on a real project of 177 clips: the rules, the subject lock, the wardrobe, the
+    lighting arc and the specs are the same sentences in every clip -- 2,770 characters of
+    one 6,184-character prompt, while the direction that moves the scene is 812. That text
+    is where every case of damage was found, and 110 of the 177 clips were missing it
+    entirely while their state held it for all of them.
+    """
+
+    PROJECT_CONTEXT = (
+        "RESTRICCIONES GLOBALES DEL PROYECTO (crítico, no negociable):\n"
+        "- EXACTAMENTE DOS speaker IDs existen en todo el proyecto: (S1) y (S2).\n"
+        "- Estudio tipo loft íntimo — mesa de madera, luz cálida lateral, fondo desenfocado."
+    )
+
+    def _prompt(self, base: bool = True, direction: str = "a steady medium shot") -> str:
+        context = (
+            "Project context (the whole film; do not perform its progression inside "
+            f"this shot): {self.PROJECT_CONTEXT}"
+        ) if base else ""
+        return (
+            "subject_definitions: <Subject 1> (S1): Ricardo.\n\n"
+            "summary: [reference generation] Opening composition.\n\n"
+            "retention_analysis: Preserve the described identities.\n\n"
+            "detailed_description: The target video maintains the requested visual style. "
+            f"[Shot 1] Valeria speaks. {direction}. {context} "
+            "Dialogue: (S1) speaks: <d>[Spanish] Hola.</d>.\n\n"
+            "overall_soundscape: Natural ambience.\n\n"
+            "non_diegetic_music: N/A"
+        )
+
+    def test_a_shared_sentence_cannot_be_changed_by_one_shot(self):
+        original = self._prompt()
+        frozen = [self.PROJECT_CONTEXT]
+
+        problems = h3_frozen_problems(
+            original,
+            original.replace("luz cálida lateral", "luz fría central"),
+            frozen,
+        )
+
+        self.assertEqual(len(problems), 1)
+        self.assertIn("project's shared text", problems[0])
+
+    def test_the_shot_direction_is_free_to_change(self):
+        original = self._prompt()
+
+        problems = h3_frozen_problems(
+            original,
+            original.replace("a steady medium shot", "a slow push into a close-up"),
+            [self.PROJECT_CONTEXT],
+        )
+
+        self.assertEqual(problems, [])
+
+    def test_a_sentence_most_clips_share_is_recognised(self):
+        prompts = [self._prompt(direction=f"direction number {n}") for n in range(6)]
+
+        shared = h3_shared_project_phrases(prompts, minimum_share=0.5)
+
+        joined = " ".join(shared)
+        self.assertIn("RESTRICCIONES GLOBALES DEL PROYECTO", joined)
+        self.assertNotIn("direction number 3", joined)
+
+    def test_the_project_base_is_added_once_and_never_twice(self):
+        without = self._prompt(base=False)
+
+        added, changed = h3_ensure_project_base(without, self.PROJECT_CONTEXT)
+        again, changed_again = h3_ensure_project_base(added, self.PROJECT_CONTEXT)
+
+        self.assertTrue(changed)
+        self.assertFalse(changed_again, "assembling twice must not duplicate the block")
+        self.assertEqual(again, added)
+        self.assertIn("RESTRICCIONES GLOBALES DEL PROYECTO", added)
+        # Nothing else moves: the fields stay and the spoken lines stay byte for byte.
+        self.assertEqual(h3_dialogue_blocks(added), h3_dialogue_blocks(without))
+        self.assertEqual(added.count("subject_definitions:"), 1)
+        self.assertEqual(added.count("non_diegetic_music:"), 1)
+
+    def test_a_prompt_that_already_has_a_base_is_left_alone(self):
+        with_base = self._prompt()
+
+        kept, changed = h3_ensure_project_base(with_base, self.PROJECT_CONTEXT)
+
+        self.assertFalse(changed)
+        self.assertEqual(kept, with_base)
+
+    def test_the_comparison_covers_only_the_part_that_varies(self):
+        # "The assistant must not change more than the part that varies in each clip, and
+        # that part is what the comparison should show": measured, the project text is
+        # 2,770 of a clip's 6,184 characters and the direction is 812.
+        prompt = self._prompt(direction="a slow push into a close-up")
+
+        clip = h3_clip_text(prompt, [self.PROJECT_CONTEXT])
+
+        self.assertIn("a slow push into a close-up", clip)
+        self.assertIn("<d>[Spanish] Hola.</d>", clip, "the spoken lines are the shot's own")
+        self.assertNotIn("RESTRICCIONES GLOBALES", clip)
+        self.assertNotIn("Estudio tipo loft", clip)
+        self.assertLess(len(clip), len(prompt))
+
+    def test_the_project_text_is_what_it_was_and_the_rest_is_the_clip(self):
+        prompt = self._prompt()
+
+        clip = h3_clip_text(prompt, [self.PROJECT_CONTEXT])
+
+        # Nothing is invented and nothing important is lost: the shot's text plus the
+        # project text is the prompt, less the whitespace that joined the two seams.
+        self.assertLessEqual(len(clip) + len(self.PROJECT_CONTEXT), len(prompt))
+        self.assertGreaterEqual(
+            len(clip) + len(self.PROJECT_CONTEXT), len(prompt) - 40,
+        )
 
 
 class SavedPromptKeepsTheSpeechPlan(unittest.TestCase):

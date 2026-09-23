@@ -11,6 +11,7 @@ from __future__ import annotations
 import difflib
 import math
 import re
+from collections import Counter
 from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 
 from services.dialogue_timing import (
@@ -1983,6 +1984,184 @@ def _looks_damaged(before: str, after: str) -> bool:
     return len(old) >= 6 and len(new) >= 6 and old[:4] == new[:4]
 
 
+def _prompt_sentences(text: str) -> list[str]:
+    """The sentences of a prompt, with their bullets and field headers."""
+
+    parts = re.split(r"(?<=[.;:])\s+|\n+", str(text or ""))
+    return [part.strip() for part in parts if len(part.strip()) > 1]
+
+
+def h3_project_base_block(project_context: str) -> str:
+    """The general block a project puts in every clip, as one piece of text.
+
+    Measured on a real project: the state holds this text once (4,421 characters) and
+    every clip is supposed to carry it, but only 67 of 177 did. A clip is rendered on its
+    own, so the general instructions have to travel with it -- what must not happen is
+    each clip being *edited* separately, which is how "Vestuario" became "Vestología" and
+    a speaker rule became "(S1) y (2)".
+    """
+
+    context = str(project_context or "").strip()
+    if not context:
+        return ""
+    return (
+        "Project context (the whole film; do not perform its progression or its "
+        f"closing fade inside this shot): {context}"
+    )
+
+
+# The markers that say a prompt already carries the project's general text.
+_H3_BASE_MARKERS = ("RESTRICCIONES GLOBALES", "ESPECIFICACIONES TÉCNICAS")
+
+# Where the general block goes when a prompt is missing it: with the rest of the
+# instructions, before the spoken lines it applies to.
+_H3_BASE_ANCHORS = (
+    "Dialogue timing:",
+    "Dialogue:",
+    "Only the tagged lines are spoken",
+)
+
+
+def h3_ensure_project_base(prompt: str, project_context: str) -> tuple[str, bool]:
+    """The prompt with the project's general block, if it was missing one.
+
+    Idempotent and additive: a prompt that already carries a base is returned untouched,
+    because replacing an existing copy is a decision for the director, not for an
+    assembly step. What this fixes is the 110 of 177 clips that render with no project
+    rules at all, while their state held those rules for every one of them.
+    """
+
+    text = str(prompt or "")
+    block = h3_project_base_block(project_context)
+    if not block or not text.strip():
+        return prompt, False
+    if any(marker in text for marker in _H3_BASE_MARKERS):
+        return prompt, False
+    for anchor in _H3_BASE_ANCHORS:
+        at = text.find(anchor)
+        if at > 0:
+            return f"{text[:at].rstrip()} {block} {text[at:].lstrip()}", True
+    match = _H3_BODY_FIELD_RE.search(text)
+    if match:
+        end = match.end(2)
+        prefix = text[:end].rstrip()
+        return f"{prefix} {block}{text[end:]}", True
+    return _normalized_space(f"{text} {block}"), True
+
+
+def h3_shared_project_phrases(
+    prompts: Sequence[str], *, minimum_share: float = 0.25,
+) -> list[str]:
+    """The sentences every clip of a project carries, which no single clip may edit.
+
+    Measured on a real project of 177 clips: the project ledger, the subject lock, the
+    wardrobe, the lighting arc and the technical specs are the same sentences in every
+    clip -- 2,770 characters of one 6,184-character prompt, while the direction that
+    actually moves the scene is 812. That text is the consistency of the film, it is what
+    a model mangles when it re-types a prompt ("Vestuario" became "Vestología", the
+    speaker rule "(S1) y (S2)" became "(S1) y (2)"), and it is what 110 of those clips
+    were missing entirely.
+
+    A sentence counts as shared when a quarter of the clips carry it: that is a property
+    of the data, not a list of Spanish headings. The threshold is low on purpose, because
+    the project rules were present in only 67 of 177 clips (38%) and a majority rule
+    missed exactly the text that matters.
+    """
+
+    counts: Counter = Counter()
+    spellings: dict[str, str] = {}
+    total = 0
+    for text in prompts:
+        seen: set[str] = set()
+        for sentence in _prompt_sentences(text):
+            key = _normalized_space(sentence).casefold()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            counts[key] += 1
+            spellings.setdefault(key, sentence.strip())
+        total += 1
+    if total < 2:
+        return []
+    threshold = max(2, int(round(total * minimum_share)))
+    return [
+        spellings[key]
+        for key, count in counts.items()
+        if count >= threshold and len(key) >= 24
+    ]
+
+
+def h3_frozen_problems(
+    original: str, proposal: str, frozen: Sequence[str],
+) -> list[str]:
+    """A rewrite may not change the text every clip of the project shares.
+
+    That text is the film's consistency, and it is short enough to leave alone: the
+    direction of one shot is a few hundred characters, so nothing a director needs
+    requires editing the rules, the wardrobe or the lighting arc.
+    """
+
+    if not frozen:
+        return []
+    before = _normalized_space(original).casefold()
+    after = _normalized_space(proposal).casefold()
+    problems: list[str] = []
+    for phrase in frozen:
+        key = _normalized_space(phrase).casefold()
+        if not key or key not in before or key in after:
+            continue
+        problems.append(
+            "the proposal changes the project's shared text, which every clip carries "
+            f"verbatim: {_normalized_space(phrase)[:90]!r}"
+        )
+    return problems
+
+
+def h3_clip_spans(prompt: str, frozen: Sequence[str]) -> list[tuple[int, int]]:
+    """The spans of a prompt that are this clip's own, not the project's shared text.
+
+    Measured on a real project: 2,770 of one clip's 6,184 characters are text every clip
+    carries, and the direction that moves the scene is 812. Showing the whole prompt made a
+    two-sentence change a hunt through six thousand characters, and handed the model
+    thousands of characters it could damage on the way back. This is the part that varies:
+    the only part worth showing, and the only part worth editing.
+    """
+
+    text = str(prompt or "")
+    blocked = bytearray(len(text))
+    for phrase in frozen or []:
+        needle = str(phrase or "").strip()
+        if not needle:
+            continue
+        start = 0
+        while True:
+            at = text.find(needle, start)
+            if at < 0:
+                break
+            blocked[at:at + len(needle)] = b"\x01" * len(needle)
+            start = at + 1
+    spans: list[tuple[int, int]] = []
+    index = 0
+    while index < len(text):
+        if blocked[index]:
+            index += 1
+            continue
+        end = index
+        while end < len(text) and not blocked[end]:
+            end += 1
+        spans.append((index, end))
+        index = end
+    return spans
+
+
+def h3_clip_text(prompt: str, frozen: Sequence[str]) -> str:
+    """The clip's own text: what the assistant may change and what the review shows."""
+
+    text = str(prompt or "")
+    joined = "".join(text[start:end] for start, end in h3_clip_spans(text, frozen))
+    return re.sub(r"\n{3,}", "\n\n", joined).strip()
+
+
 def h3_proposal_warnings(prompt: str, proposal: str) -> list[str]:
     """Words that look damaged while re-typing rather than corrected.
 
@@ -2023,6 +2202,7 @@ def review_h3_revision(
     mode: str = "ref2va",
     references: Sequence[Mapping[str, Any]] | None = None,
     context_anchors: Sequence[str] | None = None,
+    frozen: Sequence[str] | None = None,
 ) -> list[str]:
     """Why a rewritten prompt must not reach the editor.
 
@@ -2073,6 +2253,9 @@ def review_h3_revision(
             "the rewrite contains editorial text instead of only the prompt "
             f"({leaked.group(0)[:50]!r})."
         )
+    # The shared text is the film's consistency and no shot may edit it: the direction of
+    # one shot is a few hundred characters, so nothing a director needs is in there.
+    problems.extend(h3_frozen_problems(original, text, frozen or []))
 
     # A rewrite is judged on what it changed, not on what it inherited. A reviewed
     # prompt is rendered verbatim, so the compiler never inserted the canonical

@@ -765,8 +765,12 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
             >
               {promptView === 'diff' && proposalPrompt ? (
                 <PromptDiffView
-                  before={windowed ? editWindowPrompts.join('\n') : editVideoPrompt}
-                  after={proposalPrompt}
+                  before={fixAnswer?.clip_prompt
+                    || (windowed ? editWindowPrompts.join('\n') : editVideoPrompt)}
+                  after={fixAnswer?.clip_proposed || proposalPrompt}
+                  scope={fixAnswer?.clip_prompt
+                    ? `${fixAnswer.clip_prompt.length} caracteres son de este clip; el resto es el texto del proyecto, que no cambia`
+                    : undefined}
                   applied={!windowed && editVideoPrompt === proposalPrompt}
                   canApply={!windowed}
                   note="Este clip usa varios prompts por ventana: aplica el cambio a mano en la ventana que corresponda."

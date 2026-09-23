@@ -26,6 +26,8 @@ type Props = {
   canApply?: boolean
   /** What to say instead of the apply button. */
   note?: string
+  /** What this comparison covers, when it is only part of the prompt. */
+  scope?: string
   onApply: () => void
   onBack: () => void
 }
@@ -38,7 +40,7 @@ const ADDED = 'bg-accent-green/20 text-accent-green'
 const GAP = <span className="text-text-muted select-none">…</span>
 
 export function PromptDiffView({
-  before, after, applied, canApply = true, note, onApply, onBack,
+  before, after, applied, canApply = true, note, scope, onApply, onBack,
 }: Props) {
   const diff = useMemo(() => diffPrompts(before, after), [before, after])
   const [showAll, setShowAll] = useState(false)
@@ -89,6 +91,7 @@ export function PromptDiffView({
             : 'La propuesta no cambia nada'}
         </span>
         <div className="ml-auto flex items-center gap-2">
+          {scope && <span className="text-[12px] text-text-muted">{scope}</span>}
           <button
             onClick={() => setShowAll(value => !value)}
             className="px-2 py-1 rounded text-[12px] text-text-muted hover:text-text-primary transition-colors"

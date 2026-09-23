@@ -2784,11 +2784,11 @@ the clip's audio window, turning this shot into a non-lip-sync one, splitting th
 re-cutting the take, re-planning the beat. Always give options when FIXED_PROMPT is \
 NONE, and always give at least one when the note cannot be answered inside the prompt. \
 Never leave the director with nothing to choose.
-FIXED_PROMPT: the complete corrected prompt, for a change that has to restructure the \
-fields themselves; NONE when you used EDITS, asked a question, or the note has to be \
-answered outside the prompt.
+FIXED_PROMPT: NONE in this pass. Your answer is applied to the saved prompt, so re-typing \
+the whole thing is not available to you: send EDITS. Write something here only when the \
+note asks for what EDITS cannot express, and say so in ANALYSIS.
 
-Hard rules for FIXED_PROMPT:
+Hard rules for EDITS:
 - Keep the prompt's six fields and their order (subject_definitions, summary, \
 retention_analysis, detailed_description, overall_soundscape, non_diegetic_music). \
 Edit the fields; do not reorganise them.
@@ -2808,6 +2808,8 @@ and lighting detail, and every <Picture N> / <Video N> / <Subject N> binding.
 palette, same wardrobe, and motion that flows out of the previous shot and into the next.
 
 How to correct:
+- You are given this shot's text and the project text. The project text is identical in \
+every clip, it is frozen, and it must come back untouched: change only the shot's text.
 - Make the change visible in what the camera, the blocking and the acting DO. Rewording a \
 direction while keeping its content is not a correction, and a rewrite that moves almost \
 nothing is refused: write the direction differently, in your own words, as far as the note \
@@ -3197,24 +3199,51 @@ def revise_clip_prompt(
         or ""
     )
 
-    task = [
-        f"SHOT {clip_index + 1} OF {len(clips)} — CURRENT PROMPT:",
-        prompt,
-    ]
-    if project_context:
-        task.extend(["", "PROJECT CONTEXT (must stay true):", project_context])
-    neighbours = _revise_shot_neighbours(clips, clip_index)
-    if neighbours:
-        task.extend(["", "ADJACENT SHOTS (keep continuity):", neighbours])
-
     from services.director.h3_dialogue import (
         _h3_anchor_present,
         _h3_plan_context_anchors,
         diagnose_h3_clip_prompt,
+        h3_clip_text,
         h3_dialogue_blocks,
         h3_proposal_warnings,
+        h3_shared_project_phrases,
         review_h3_revision,
     )
+
+    # The text every clip of this project shares: the project ledger itself (authoritative,
+    # held once in the state) plus the sentences a quarter of the clips carry -- the rules,
+    # the subject lock, the wardrobe, the lighting arc, the specs. Measured on a real
+    # project, that is 2,770 of one clip's 6,184 characters, and it is where every case of
+    # damage was found. No single shot may edit it, so the gate is given the list, and only
+    # what is left is shown to the assistant and to the director.
+    frozen = [
+        text for text in [str(clip.get("_director_project_context") or "").strip()]
+        if text
+    ] + h3_shared_project_phrases(
+        [str(item.get("video_prompt") or "") for item in clips]
+    )
+
+    # The assistant sees THIS SHOT'S TEXT, not the whole prompt: measured on a real project,
+    # 2,770 of one clip's 6,184 characters are text every clip carries and the direction that
+    # moves the scene is 812. The project text is what a model damages when it re-types a
+    # prompt, and it is frozen in the gate, so sending it as the thing to rewrite only invited
+    # the damage this pass exists to prevent.
+    clip_text = h3_clip_text(prompt, frozen)
+    task = [
+        f"SHOT {clip_index + 1} OF {len(clips)} — THIS SHOT'S TEXT. It is the only part you "
+        "may change, and the part your answer is compared against:",
+        clip_text,
+    ]
+    if project_context:
+        task.extend([
+            "",
+            "PROJECT TEXT — identical in every clip and frozen: it must come back "
+            "untouched, and you cannot see it as something to rewrite:",
+            project_context,
+        ])
+    neighbours = _revise_shot_neighbours(clips, clip_index)
+    if neighbours:
+        task.extend(["", "ADJACENT SHOTS (keep continuity):", neighbours])
 
     # Read the shot before writing anything. The assistant used to receive only
     # the prompt text and the note, so it reasoned about a symptom it could not
@@ -3331,6 +3360,8 @@ def revise_clip_prompt(
         "rewritten": False,
         "errors": [],
         "warnings": [],
+        "clip_prompt": clip_text,
+        "clip_proposed": "",
         "video_prompt": "",
     }
     def _proposal(answer: dict) -> tuple[str, list[str]]:
@@ -3407,6 +3438,7 @@ def revise_clip_prompt(
             mode=clip.get("_director_h3_prompt_mode") or "ref2va",
             references=clip.get("_director_h3_reference_manifest") or [],
             context_anchors=_h3_plan_context_anchors(clip),
+            frozen=frozen,
         )
 
     if not problems:
@@ -3477,6 +3509,7 @@ def revise_clip_prompt(
     # proposal, "Vestuario" came back as "Vestología" and "focus tightens" as "focus
     # tights". The diff marks them; these name them.
     result["warnings"] = h3_proposal_warnings(prompt, candidate)
+    result["clip_proposed"] = h3_clip_text(candidate, frozen)
     result["rewritten"] = True
     result["video_prompt"] = parts["prompt"]
     print(
