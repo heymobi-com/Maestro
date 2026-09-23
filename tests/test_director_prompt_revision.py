@@ -316,6 +316,16 @@ class PromptComparisonTests(unittest.TestCase):
         self.assertIn("runFixWithAi", window)
         self.assertIn("Ver comparación", window)
 
+    def test_the_options_are_selectable_and_not_just_printed(self):
+        # An assistant that only refuses is not an assistant: the choices it offers
+        # have to land in the note box with one click.
+        self.assertIn("Opciones:", self.dashboard)
+        self.assertIn("setFixNote(option)", self.dashboard)
+        self.assertIn("fixAnswer.note", self.dashboard)
+        client = _read("api", "client.ts")
+        self.assertIn("options: string[]", client)
+        self.assertIn("note: string", client)
+
 
 if __name__ == "__main__":
     unittest.main()

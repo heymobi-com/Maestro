@@ -253,6 +253,24 @@ class RevisionEnvelopeTests(unittest.TestCase):
             problems,
         )
 
+    def test_options_come_back_as_choices(self):
+        # Numbered, bulleted or plain: the director picks one and sends it.
+        parts = _parse_revision_envelope(
+            "ANALYSIS: the ledger owns the framing, not this shot.\n"
+            "QUESTION: NONE\n"
+            "OPTIONS:\n"
+            "1. Drop the shot sentence that competes with the ledger.\n"
+            "- Move the clip's audio window.\n"
+            "FIXED_PROMPT: NONE\n",
+        )
+
+        self.assertEqual(parts["options"], [
+            "Drop the shot sentence that competes with the ledger.",
+            "Move the clip's audio window.",
+        ])
+        self.assertEqual(parts["prompt"], "")
+        self.assertEqual(parts["question"], "")
+
 
 class CorrectionConversationWiringTests(unittest.TestCase):
     """The endpoint and the turn must carry the measurement and the turns."""
@@ -291,6 +309,13 @@ class CorrectionConversationWiringTests(unittest.TestCase):
         self.assertIn("QUESTION:", self.pipeline)
         self.assertIn("FIXED_PROMPT:", self.pipeline)
         self.assertIn("rejected before the director sees it", self.pipeline)
+
+    def test_the_assistant_is_required_to_offer_options(self):
+        # "The programming is useless" was fair: the envelope had no place for a
+        # choice, so a note the prompt cannot answer came back as a bare error.
+        self.assertIn("OPTIONS:", self.pipeline)
+        self.assertIn("Never leave the director with nothing to choose", self.pipeline)
+        self.assertIn("an error with no options is not an answer", self.pipeline)
 
 
 class NoOpRewriteTests(unittest.TestCase):
@@ -380,6 +405,60 @@ class NoOpRewriteTests(unittest.TestCase):
             sent[1],
             "the retry has to say what is missing",
         )
+
+    def test_a_no_op_without_options_still_says_what_to_do(self):
+        self._save()
+        self._stub([self._answer(PROBLEM_PROMPT), self._answer(PROBLEM_PROMPT)])
+
+        result = pipeline.revise_clip_prompt(self.out_dir, self.pid, 0, "smooth it out")
+
+        self.assertTrue(result["errors"])
+        self.assertIn(
+            "the camera, the blocking or the acting words have to move",
+            result["errors"][-1],
+        )
+
+    def test_options_are_an_answer_when_the_prompt_cannot_fix_it(self):
+        # "Then why do I want an AI assistant if not to correct?" -- a note the
+        # prompt cannot answer used to come back as an error and nothing else.
+        self._save()
+        self._stub([
+            "ANALYSIS: the lighting arc belongs to the project ledger, not to this "
+            "shot, so no rewrite of this prompt removes the conflict.\n"
+            "QUESTION: NONE\n"
+            "OPTIONS:\n"
+            "1. Move the clip's audio window so the first line starts inside it.\n"
+            "2. Render this shot without lip-sync and cover it with a hand close-up.\n"
+            "FIXED_PROMPT: NONE",
+        ])
+
+        result = pipeline.revise_clip_prompt(
+            self.out_dir, self.pid, 0, "less abrupt transitions",
+        )
+
+        self.assertFalse(result["rewritten"])
+        self.assertEqual(result["errors"], [], "options are an answer, not a refusal")
+        self.assertEqual(len(result["options"]), 2)
+        self.assertIn("Elige una opción", result["note"])
+        self.assertEqual(result["video_prompt"], "")
+
+    def test_the_prompt_back_unchanged_with_options_is_not_an_error(self):
+        self._save()
+        self._stub([
+            "ANALYSIS: the ledger owns the framing.\n"
+            "OPTIONS:\n"
+            "1. Trim the sentence in the shot that competes with the ledger.\n"
+            "2. Split the shot in two.\n"
+            f"FIXED_PROMPT: {PROBLEM_PROMPT}",
+        ])
+
+        result = pipeline.revise_clip_prompt(
+            self.out_dir, self.pid, 0, "less abrupt transitions",
+        )
+
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(len(result["options"]), 2)
+        self.assertIn("no encontró un cambio", result["note"])
 
     def test_a_rewrite_that_edits_the_prompt_is_offered(self):
         self._save()

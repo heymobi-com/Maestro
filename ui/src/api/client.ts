@@ -1142,6 +1142,10 @@ export interface RevisionAnswer {
   clip_index: number
   analysis: string
   question: string
+  /** One-line choices: a prompt edit, or the change that has to happen outside it. */
+  options: string[]
+  /** What to say when there is no proposal and no question: never a bare refusal. */
+  note: string
   diagnosis: ShotDiagnosis
   rewritten: boolean
   errors: string[]

@@ -2761,7 +2761,7 @@ _REVISE_PROMPT_SYSTEM = """You are the prompt editor for exactly ONE shot of an 
 working in a short conversation with its director. They describe what looks wrong in the \
 rendered clip; you say what in the prompt causes it, and only then rewrite it.
 
-Answer with these three markers and nothing else:
+Answer with these four markers and nothing else:
 
 ANALYSIS: what in the current prompt produces what the director describes. Quote the \
 offending words. Use the MEASUREMENT given to you instead of guessing: it was read from \
@@ -2769,7 +2769,14 @@ the saved shot and names the shots declared, the subjects' positions, the timest
 any contract problem.
 QUESTION: one question, and only when the note is missing an intent you cannot infer. \
 Otherwise write NONE.
-FIXED_PROMPT: the complete corrected prompt, or NONE when you asked a question.
+OPTIONS: two to four numbered one-line choices of what to do next. Each one is either a \
+change you can make in the prompt or a change that has to happen outside it -- moving \
+the clip's audio window, turning this shot into a non-lip-sync one, splitting the shot, \
+re-cutting the take, re-planning the beat. Always give options when FIXED_PROMPT is \
+NONE, and always give at least one when the note cannot be answered inside the prompt. \
+Never leave the director with nothing to choose.
+FIXED_PROMPT: the complete corrected prompt, or NONE when you asked a question or when \
+the note has to be answered outside the prompt.
 
 Hard rules for FIXED_PROMPT:
 - Keep the prompt's six fields and their order (subject_definitions, summary, \
@@ -2804,7 +2811,10 @@ words.
 alternatives such as "Option A" and "Option B", never repeat the current prompt, never \
 quote whole fields in ANALYSIS, and write the markers as plain lines -- no bold, no \
 headings, no code fences.
-- No commentary outside the three markers."""
+- A prompt you hand back unchanged answers nothing. If a note cannot be answered by \
+editing this prompt, say so in ANALYSIS, write NONE for FIXED_PROMPT and put the ways \
+forward in OPTIONS: an error with no options is not an answer.
+- No commentary outside the four markers."""
 
 
 # A model writes "FIXED_PROMPT:", "**FIXED_PROMPT:**", "## FIXED_PROMPT:" or
@@ -2817,8 +2827,24 @@ headings, no code fences.
 # both common, and only the first one matched an earlier version of this pattern.
 _REVISION_MARKER_RE = re.compile(
     r"(?mi)^[ \t]*(?:[-*+][ \t]+)?(?:#{1,6}[ \t]*)?[*_`]{0,2}[ \t]*"
-    r"(ANALYSIS|QUESTION|FIXED_PROMPT)[ \t]*[*_`]{0,2}[ \t]*:[ \t]*[*_`]{0,2}[ \t]*"
+    r"(ANALYSIS|QUESTION|OPTIONS|FIXED_PROMPT)[ \t]*[*_`]{0,2}[ \t]*:[ \t]*[*_`]{0,2}[ \t]*"
 )
+
+
+def _parse_revision_options(value: str) -> list[str]:
+    """The numbered choices the assistant offers, one per line.
+
+    The director is the one who decides, so a note that cannot be answered inside the
+    prompt has to come back as choices rather than as a refusal: "the rewrite changed
+    almost nothing" told them nothing about what to do instead.
+    """
+
+    options: list[str] = []
+    for line in str(value or "").splitlines():
+        cleaned = re.sub(r"^\s*(?:[-*\u2022]|\d+[.)])\s*", "", line).strip()
+        if cleaned:
+            options.append(cleaned)
+    return options
 
 # The field a compiled prompt opens with, at a line start.
 _PROMPT_FIELD_HEAD_RE = re.compile(
@@ -2873,12 +2899,18 @@ def _parse_revision_envelope(text: str) -> dict:
             return {
                 "analysis": raw[: head.start()].strip(),
                 "question": "",
+                "options": [],
                 "prompt": _first_prompt_only(raw[head.start():].strip()),
             }
         if looks_like_compiled_h3_prompt(raw):
-            return {"analysis": "", "question": "", "prompt": _first_prompt_only(raw)}
-        return {"analysis": raw, "question": "", "prompt": ""}
-    parts = {"analysis": "", "question": "", "prompt": ""}
+            return {
+                "analysis": "",
+                "question": "",
+                "options": [],
+                "prompt": _first_prompt_only(raw),
+            }
+        return {"analysis": raw, "question": "", "options": [], "prompt": ""}
+    parts = {"analysis": "", "question": "", "options": [], "prompt": ""}
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
         value = raw[match.end():end].strip()
@@ -2889,6 +2921,8 @@ def _parse_revision_envelope(text: str) -> dict:
             parts["analysis"] = value
         elif key == "QUESTION":
             parts["question"] = value
+        elif key == "OPTIONS":
+            parts["options"] = _parse_revision_options(value)
         else:
             parts["prompt"] = value
     parts["prompt"] = _first_prompt_only(parts["prompt"])
@@ -2905,6 +2939,17 @@ def _parse_revision_envelope(text: str) -> dict:
 # words, and a comma moved is none.
 _NO_OP_CHANGE_CHARS = 40
 _NO_OP_CHANGE_WORDS = 3
+
+
+def _only_no_op(problems: list[str]) -> bool:
+    """True when the only complaint is that the prompt hardly moved.
+
+    That refusal deserves a second reading: "the prompt did not change" is not the
+    same answer as "the rewrite broke the spoken lines", and what the director needs
+    in the first case is the reason and the choices, not an error.
+    """
+
+    return len(problems) == 1 and "changed almost nothing" in problems[0]
 
 _REVISE_NUDGE_HEADER = "Your FIXED_PROMPT was rejected for these reasons:"
 
@@ -2950,8 +2995,9 @@ def _revise_problem_nudge(problems: list[str], expected_lines: list[str] | None 
         f"{_REVISE_NUDGE_HEADER}\n{listed}\n{expected}"
         "Answer again with a rewrite that fixes them. Copy every <d>...</d> line "
         "byte for byte, including its [Language] tag. If the note cannot be "
-        "satisfied by editing this prompt, write NONE for FIXED_PROMPT and name "
-        "in ANALYSIS what outside the prompt blocks it."
+        "satisfied by editing this prompt, write NONE for FIXED_PROMPT, name in "
+        "ANALYSIS what outside the prompt blocks it, and put the ways forward in "
+        "OPTIONS: handing the prompt back unchanged answers nothing."
     )
 
 
@@ -3133,6 +3179,8 @@ def revise_clip_prompt(
         "clip_index": clip_index,
         "analysis": parts["analysis"],
         "question": parts["question"],
+        "options": list(parts["options"]),
+        "note": "",
         "diagnosis": diagnosis,
         "rewritten": False,
         "errors": [],
@@ -3144,9 +3192,21 @@ def revise_clip_prompt(
                 f"[Pipeline {pid}] Shot {clip_index + 1}: the assistant asked "
                 "before rewriting."
             )
+        elif parts["options"]:
+            # Explaining why the prompt cannot fix this, and offering the ways it
+            # can be fixed, is an answer: the director decides, which is what an
+            # assistant is for. A bare error here was the whole reply.
+            result["note"] = (
+                "La nota no se resuelve dentro de este prompt. Elige una opción "
+                "de abajo (se pone en la nota) o responde a lo que pregunta."
+            )
+            print(
+                f"[Pipeline {pid}] Shot {clip_index + 1}: the assistant offered "
+                f"{len(parts['options'])} option(s) instead of a rewrite."
+            )
         else:
-            # An answer with no rewrite and no question is a dead end: it used to
-            # look like a completed turn with nothing to show for it.
+            # An answer with no rewrite, no question and no options is a dead end:
+            # it used to look like a completed turn with nothing to show for it.
             result["errors"] = [
                 "The assistant explained the prompt without rewriting it, so "
                 "nothing changed. Repeat the note and name what should change.",
@@ -3190,10 +3250,40 @@ def revise_clip_prompt(
         second = _ask(_revise_problem_nudge(problems, h3_dialogue_blocks(prompt)))
         if second["prompt"]:
             parts = second
-            problems = _candidate_problems(second)
+        # Whichever answer is the latest, its explanation is the one worth showing.
+        latest = second or parts
+        if not result["options"]:
+            result["options"] = list(latest["options"])
+        if parts["prompt"]:
+            problems = _candidate_problems(parts)
+        if problems and _only_no_op(problems):
+            # The assistant handed the prompt back, or moved a comma. A no-op is not
+            # a broken answer when it comes with the reason and the choices: measured
+            # on a real shot, the reply was the prompt back at 0 of 956 words moved,
+            # which the director only saw as "changed almost nothing" and nothing to
+            # do next.
+            result["analysis"] = latest["analysis"] or result["analysis"]
+            result["question"] = latest["question"]
+            if result["options"]:
+                result["note"] = (
+                    "El asistente no encontró un cambio de prompt que resuelva la "
+                    "nota. Elige una opción de abajo (se pone en la nota) o "
+                    "responde a lo que pregunta."
+                )
+            else:
+                result["errors"] = [
+                    *problems,
+                    "Ask for a change you can see in the shot: the camera, the "
+                    "blocking or the acting words have to move.",
+                ]
+            print(
+                f"[Pipeline {pid}] Shot {clip_index + 1}: the rewrite did not "
+                f"change the prompt ({len(result['options'])} option(s) offered)."
+            )
+            return result
         if problems:
-            result["analysis"] = second["analysis"] or parts["analysis"]
-            result["question"] = second["question"]
+            result["analysis"] = latest["analysis"] or result["analysis"]
+            result["question"] = latest["question"]
             result["errors"] = [
                 *problems,
                 "The rewrite was not offered, so the prompt is unchanged. Check "

@@ -688,6 +688,27 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                 {fixAnswer.question}
               </p>
             )}
+            {/* The assistant is asked for choices, not for a verdict: a note that
+                cannot be answered inside the prompt has to come back as something
+                the director can pick and send. */}
+            {!!fixAnswer?.options?.length && (
+              <div className="mt-1 rounded border border-accent-blue/30 bg-bg-tertiary p-1">
+                <p className="text-[9px] text-accent-blue">Pick one and send it as the next note:</p>
+                <div className="mt-0.5 flex flex-col gap-0.5">
+                  {fixAnswer.options.map((option, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => setFixNote(option)}
+                      className="text-left rounded px-1 py-0.5 text-[9px] text-accent-blue/90 hover:bg-accent-blue/15 transition-colors"
+                    >{i + 1}. {option}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {fixAnswer?.note && (
+              <p className="mt-1 text-[9px] text-text-muted">{fixAnswer.note}</p>
+            )}
             {!!fixAnswer?.errors?.length && (
               <div className="mt-1 rounded border border-indicator-warning/40 bg-bg-tertiary p-1">
                 <p className="text-[9px] text-indicator-warning">
@@ -802,10 +823,26 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                 <p className="text-[10px] text-text-muted shrink-0">
                   {fixAnswer.question
                     ? `El asistente pregunta: ${fixAnswer.question}`
-                    : fixAnswer.errors?.length
-                      ? `La propuesta fue rechazada: ${fixAnswer.errors[0]}`
-                      : 'El asistente no propuso ningún cambio.'}
+                    : fixAnswer.note
+                      ? fixAnswer.note
+                      : fixAnswer.errors?.length
+                        ? `La propuesta fue rechazada: ${fixAnswer.errors[0]}`
+                        : 'El asistente no propuso ningún cambio.'}
                 </p>
+              )}
+              {!!fixAnswer?.options?.length && (
+                <div className="shrink-0 flex items-center gap-1.5 flex-wrap">
+                  <span className="text-[10px] text-text-muted shrink-0">Opciones:</span>
+                  {fixAnswer.options.map((option, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => setFixNote(option)}
+                      title="Usar como nota"
+                      className="max-w-full text-left px-2 py-1 rounded text-[10px] bg-accent-blue/10 text-accent-blue hover:bg-accent-blue/25 transition-colors"
+                    >{i + 1}. {option}</button>
+                  ))}
+                </div>
               )}
               {!!fixAnswer?.diagnosis?.findings?.length && (
                 <ul className="text-[10px] text-text-muted shrink-0 space-y-0.5 max-h-24 overflow-auto">
