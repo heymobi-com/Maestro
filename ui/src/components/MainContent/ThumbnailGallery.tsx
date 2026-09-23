@@ -44,7 +44,6 @@ function VirtualizedThumbnailList({ activeIndex, onThumbnailClick, onMobileClick
   const containerRef = useRef<HTMLDivElement>(null)
   const [scrollTop, setScrollTop] = useState(0)
   const [viewHeight, setViewHeight] = useState(400)
-  const isAutoScrolling = useRef(false)
 
   // Measure container height
   useEffect(() => {
@@ -74,21 +73,16 @@ function VirtualizedThumbnailList({ activeIndex, onThumbnailClick, onMobileClick
     }
   }, [])
 
-  // Auto-scroll to keep active thumbnail visible
-  useEffect(() => {
-    const container = containerRef.current
-    if (!container) return
-    const itemTop = activeIndex * (THUMB_HEIGHT + THUMB_GAP)
-    const itemBottom = itemTop + THUMB_HEIGHT
-    const viewTop = container.scrollTop
-    const viewBottom = viewTop + viewHeight
-
-    if (itemTop < viewTop || itemBottom > viewBottom) {
-      isAutoScrolling.current = true
-      container.scrollTo({ top: Math.max(0, itemTop - viewHeight / 2 + THUMB_HEIGHT / 2), behavior: 'smooth' })
-      setTimeout(() => { isAutoScrolling.current = false }, 400)
-    }
-  }, [activeIndex, viewHeight])
+  // This strip no longer follows the active item.
+  //
+  // It used to scroll itself to keep the active thumbnail visible, and the active
+  // index is not a stable thing to follow: the feed re-selects whichever card the
+  // viewport centre sits on, and every generation prepends a new video, which moves
+  // every index down by one. So the strip yanked itself away from where the
+  // director was reading -- "I am on 21 and it jumps to 75 or 140" -- and it is also
+  // the one place in the app that scrolled on its own. It now stays where it is; a
+  // click still goes to the video that was clicked, because the click is where the
+  // user already is.
 
   const totalHeight = outputs.length * (THUMB_HEIGHT + THUMB_GAP) - (outputs.length > 0 ? THUMB_GAP : 0)
 

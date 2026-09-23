@@ -1,5 +1,5 @@
 import { outputIdentity } from '../../lib/galleryIdentity'
-import { useRef, useCallback, useState, useEffect, useMemo, type JSX } from 'react'
+import { useRef, useCallback, useState, useEffect, useLayoutEffect, useMemo, type JSX } from 'react'
 import { Film, Play, Square, FolderOpen, Plus, Check, Loader2, X, BookMarked, Upload, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
 import { TabFilter } from './TabFilter'
 import { ThumbnailGallery } from './ThumbnailGallery'
@@ -11,7 +11,7 @@ import { useStore } from '../../stores/useStore'
 import { useIsMobile } from '../../lib/useIsMobile'
 import { formatEstimatedClock, formatEtaDuration } from '../../lib/format'
 import { PROMPT_ENHANCEMENT_ACTIVITY } from '../../lib/promptEnhancementActivity'
-import type { GenerationJob } from '../../types'
+import type { GenerationJob, OutputFile } from '../../types'
 
 function WorkspaceSelector() {
   const workspaces = useStore(s => s.workspaces)
@@ -683,7 +683,15 @@ export function MainContent() {
   const [containerHeight, setContainerHeight] = useState(800)
   const [containerWidth, setContainerWidth] = useState(800)
   const [measureEpoch, setMeasureEpoch] = useState(0)
-  const measuredHeights = useRef<Map<number, number>>(new Map())
+  // Heights are keyed by output identity, never by position: a generation prepends
+  // its video (refreshOutputs puts the new items first), so a height stored under an
+  // index described a different video on the very next generation. With the mixed
+  // aspect ratios of a real library that error accumulates over the list, and the
+  // feed landed on a different video -- "I am on 21 and it jumps to 75".
+  const measuredHeights = useRef<Map<string, number>>(new Map())
+  // The item the top of the viewport was reading, kept as data rather than as an
+  // element so the virtualizer unmounting it does not lose it.
+  const lastLayout = useRef<{ outputs: OutputFile[]; offsets: number[] }>({ outputs: [], offsets: [] })
 
   // Dynamic estimated item height based on actual container width
   const estimatedItemHeight = Math.round(containerWidth * ASPECT_RATIO) + INFO_BAR_HEIGHT
@@ -713,9 +721,14 @@ export function MainContent() {
     return () => ro.disconnect()
   }, [scheduleCenteredSelection])
 
+  const heightKey = useCallback((index: number) => {
+    const file = outputs[index]
+    return file ? outputIdentity(file) : `index:${index}`
+  }, [outputs])
+
   const getItemHeight = useCallback((index: number) => {
-    return measuredHeights.current.get(index) ?? estimatedItemHeight
-  }, [estimatedItemHeight])
+    return measuredHeights.current.get(heightKey(index)) ?? estimatedItemHeight
+  }, [estimatedItemHeight, heightKey])
 
   const { startIndex, endIndex, totalHeight, itemOffsets } = useMemo(() => {
     // Measurement changes must invalidate the virtual layout even though the
@@ -753,13 +766,14 @@ export function MainContent() {
   }, [outputs.length, scrollTop, containerHeight, getItemHeight, placeholderTotalHeight, estimatedItemHeight, measureEpoch])
 
   const handleItemMeasured = useCallback((index: number, height: number) => {
-    const prev = measuredHeights.current.get(index)
+    const key = heightKey(index)
+    const prev = measuredHeights.current.get(key)
     if (prev !== height) {
-      measuredHeights.current.set(index, height)
+      measuredHeights.current.set(key, height)
       setMeasureEpoch(e => e + 1)
       scheduleCenteredSelection()
     }
-  }, [scheduleCenteredSelection])
+  }, [heightKey, scheduleCenteredSelection])
 
   const handlePlaybackStart = useCallback((index: number, media: HTMLMediaElement) => {
     activateIndex(index)
@@ -868,9 +882,42 @@ export function MainContent() {
   }, [scheduleCenteredSelection])
 
   useEffect(() => {
-    measuredHeights.current.clear()
+    // Only a different library (nothing left to describe) drops the measurements.
+    // Clearing them on every length change sent every height back to the width-based
+    // estimate at once, which moved the whole list under the cursor each time a video
+    // finished.
+    if (outputs.length === 0) measuredHeights.current.clear()
     scheduleCenteredSelection()
   }, [outputs.length, scheduleCenteredSelection])
+
+  // Hold the reading position across a change to the list itself.
+  //
+  // A finished generation prepends its video, so every item below it moves down by
+  // one card and the index the user was on stops pointing at what they were reading.
+  // The scroll offset is kept against the item's identity instead: whatever the top
+  // of the viewport was on, stays on it.
+  useLayoutEffect(() => {
+    const feedEl = feedRef.current
+    const previous = lastLayout.current
+    lastLayout.current = { outputs, offsets: itemOffsets }
+    if (!feedEl || scrollTargetIndex.current !== null) return
+    if (previous.outputs === outputs || previous.outputs.length === 0) return
+    let anchorIndex = -1
+    for (let i = 0; i < previous.offsets.length; i++) {
+      if (previous.offsets[i] <= feedEl.scrollTop) anchorIndex = i
+      else break
+    }
+    if (anchorIndex < 0) return
+    const anchor = previous.outputs[anchorIndex]
+    if (!anchor) return
+    const delta = feedEl.scrollTop - previous.offsets[anchorIndex]
+    const identity = outputIdentity(anchor)
+    const nextIndex = outputs.findIndex(file => outputIdentity(file) === identity)
+    if (nextIndex < 0) return
+    const desired = itemOffsets[nextIndex] + delta
+    // One pixel of tolerance: sub-pixel layout differences are not a jump.
+    if (Math.abs(feedEl.scrollTop - desired) > 1) feedEl.scrollTop = desired
+  }, [outputs, itemOffsets])
 
   const visibleItems = useMemo(() => {
     const items: JSX.Element[] = []
