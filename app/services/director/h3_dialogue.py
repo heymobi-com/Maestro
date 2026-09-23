@@ -1645,6 +1645,175 @@ _H3_COMPETING_GESTURE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Every speaker id the prompt mentions anywhere, and the ones it binds to a subject.
+# "<Subject 2> (S2) = Ricardo" binds (S2); a field head like "(S4): Valeria" does not,
+# which is the whole point: measured on shot 37 the field head declared (S4) and the
+# bindings declared (S1) and (S2), and an earlier version of this pattern read the
+# field head's colon as a binding and reported the wrong orphan id.
+_H3_SPEAKER_ID_RE = re.compile(r"\(([Ss]\d+)\)")
+_H3_SPEAKER_BINDING_RE = re.compile(
+    r"(?im)(?:<Subject\s*\d+>|Subject\s*\d+)?\s*\(([Ss]\d+)\)\s*(?:=|\u2014|--|\u2013)"
+)
+
+# A tag that was left holding nothing: measured on shot 37 of a real project, the
+# prose said "as she says: <scenetrans></scenetrans> <scenetrans></scenetrans>" and
+# the three tags rendered as nothing at all.
+_H3_EMPTY_TAG_RE = re.compile(r"<(?P<tag>[a-zA-Z][\w-]*)>\s*</(?P=tag)>")
+
+# Words that say which gender a described person is, so a speaker's own description
+# can be compared with the pronouns the prose gives the person who speaks.
+_H3_FEMININE_WORDS_RE = re.compile(
+    r"(?i)\b(?:mujer|chica|se[ñn]ora|actriz|femenin\w*|woman|female|girl|she|her|hers)\b"
+)
+_H3_MASCULINE_WORDS_RE = re.compile(
+    r"(?i)\b(?:hombre|chico|se[ñn]or|actor|masculin\w*|man|male|boy|he|him|his)\b"
+)
+# A sentence that says who is speaking, which is where a mixed-up speaker shows up.
+_H3_SPEAKING_SENTENCE_RE = re.compile(
+    r"(?i)\b(?:speaks?|speaking|says|saying|delivers?|talks?|talking)\b"
+)
+
+
+def _h3_speaker_ids(text: str) -> set[str]:
+    """Every speaker id the text mentions, upper-cased."""
+
+    return {match.group(1).upper() for match in _H3_SPEAKER_ID_RE.finditer(text or "")}
+
+
+# A rule that names an id only to forbid it: "NUNCA se genera (S3), (S4)". Measured on
+# the real prompt, an orphan-id check that read the whole text reported (S3) and (S4)
+# as ids in use when the sentence naming them says they must never be used at all.
+_H3_ID_PROHIBITION_RE = re.compile(
+    r"(?i)\b(?:nunca|jam[\u00e1a]s|never|no se (?:crea|crean|genera|generan|usa|usan))\b"
+)
+
+
+def _h3_id_is_prohibited(text: str, position: int) -> bool:
+    """Whether the id at this position is named by a rule that forbids it."""
+
+    line_start = text.rfind("\n", 0, position) + 1
+    line_end = text.find("\n", position)
+    line = text[line_start:line_end if line_end > 0 else len(text)]
+    return bool(_H3_ID_PROHIBITION_RE.search(line))
+
+
+def _h3_bound_speaker_ids(text: str) -> set[str]:
+    """The speaker ids the text binds to a subject or a name."""
+
+    return {
+        match.group(1).upper()
+        for match in _H3_SPEAKER_BINDING_RE.finditer(text or "")
+    }
+
+
+def _h3_line_speakers(text: str) -> set[str]:
+    """The speaker id that introduces each spoken line.
+
+    The id sits in the prose before the line -- "(S2) speaks thoughtfully: <d>..." --
+    not inside the tag, so reading the tags alone found no speaker at all: measured on
+    shot 37, `h3_dialogue_blocks` returned the four lines and none of them carried an
+    id, which is why a check written against the tags saw nothing to compare.
+    """
+
+    found: set[str] = set()
+    body = str(text or "")
+    for match in re.finditer(r"<d\b[^>]*>", body, re.IGNORECASE):
+        head = body[max(0, match.start() - 240):match.start()]
+        ids = _H3_SPEAKER_ID_RE.findall(head)
+        if ids:
+            found.add(ids[-1].upper())
+    return found
+
+
+def _h3_speaker_gender(text: str, speaker_id: str) -> str:
+    """Which gender the prompt states for a speaker, from the lines that describe it.
+
+    Two kinds of line name a speaker and only one of them describes the person:
+    "<Subject 2> (S2) = Ricardo = [Speaker_02] = <Picture 2> + <Audio 2>" binds the id
+    and says nothing about the person, while "S2 = Ricardo \u2014 [Speaker_02] | ... |
+    Hombre maduro (60), te\u00f3logo laico..." carries the description. Reading only the
+    binding line is why the gender came back empty on the real prompt.
+    """
+
+    body = str(text or "")
+    token = str(speaker_id or "").upper()
+    if not token.startswith("S") or not token[1:].isdigit():
+        return ""
+    padded = f"{int(token[1:]):02d}"
+    marks = (f"({token})", f"{token} =", f"{token}=", f"[Speaker_{padded}]", f"[Speaker_{int(token[1:])}]")
+    candidates: list[str] = []
+    for line in body.splitlines():
+        if any(mark in line for mark in marks):
+            candidates.append(line)
+    # The shortest line that states a gender, not the first one: a compiled prompt
+    # carries its identity in a short line ("S2 = Ricardo — [Speaker_02] | ... |
+    # Hombre maduro (60)") while the same id also appears in a six-thousand-character
+    # body line that mentions both characters, and that line describes both genders.
+    # Reading the first match made Ricardo look feminine on two of three audited clips.
+    stated = [line for line in candidates if _h3_gender_of(line)]
+    if not stated:
+        return ""
+    return _h3_gender_of(min(stated, key=len))
+
+
+def _h3_gender_of(text: str) -> str:
+    """Which gender a description states, from the words it uses for the person."""
+
+    feminine = len(_H3_FEMININE_WORDS_RE.findall(text or ""))
+    masculine = len(_H3_MASCULINE_WORDS_RE.findall(text or ""))
+    if feminine > masculine:
+        return "feminine"
+    if masculine > feminine:
+        return "masculine"
+    return ""
+
+
+def _h3_gender_mismatch_finding(
+    text: str, spoken_ids: set[str],
+) -> str:
+    """A spoken line given to one gender while the prose says the other speaks.
+
+    Measured on shot 37 of a real project: every one of the four tagged lines belongs
+    to (S2) = Ricardo, whose own description says "Hombre maduro (60)", and the prose
+    still said "She speaks to camera about human differences..." and captured "her
+    thoughtful expression and natural lip sync as she says". Three correction notes
+    about the gender came back refused because the assistant was rewriting pronouns
+    it had no measurement for, and the measurement said nothing about them.
+    """
+
+    if not spoken_ids:
+        return ""
+    genders = {
+        speaker_id: _h3_speaker_gender(text, speaker_id)
+        for speaker_id in sorted(spoken_ids)
+    }
+    stated = {gender for gender in genders.values() if gender}
+    if len(stated) != 1:
+        return ""
+    speaker_gender = stated.pop()
+    other = "masculine" if speaker_gender == "feminine" else "feminine"
+    matcher = _H3_FEMININE_WORDS_RE if other == "feminine" else _H3_MASCULINE_WORDS_RE
+    culprits: list[str] = []
+    for sentence in re.split(r"(?<=[.!?])\s+", str(text or "")):
+        if not _H3_SPEAKING_SENTENCE_RE.search(sentence):
+            continue
+        # The lines themselves name their own speaker, so they are not the prose that
+        # describes who is on camera.
+        if "<d>" in sentence:
+            continue
+        if matcher.search(sentence) and _h3_gender_of(sentence) == other:
+            culprits.append(sentence.strip()[:120])
+    if not culprits:
+        return ""
+    ids = ", ".join(f"({speaker_id})" for speaker_id in sorted(spoken_ids))
+    return (
+        f"The spoken lines belong to {ids}, described here as {speaker_gender}, "
+        f"while the prose describes the person who speaks as {other}: "
+        + " | ".join(f'"{sentence}"' for sentence in culprits[:2])
+        + ". The renderer follows the prose, which is why the wrong person ends up "
+        "speaking: the sentence has to name the speaker of the tagged lines."
+    )
+
 
 def h3_dialogue_blocks(prompt: str) -> list[str]:
     """The spoken lines of a compiled prompt, in order, byte for byte."""
@@ -1835,6 +2004,51 @@ def diagnose_h3_clip_prompt(
 
     blocks = h3_dialogue_blocks(text)
     findings.append(f"The body carries {len(blocks)} spoken <d> line(s).")
+
+    # Contradictions a reader sees at once and the measurement could not name.
+    # Measured on shot 37 of a real project: the field head declared
+    # "<Subject 1> (S4)" while every binding in the same prompt says only (S1) and
+    # (S2) exist, three tags held nothing, and the prose gave the speaking to "she"
+    # while all four tagged lines are (S2) = Ricardo. The director asked three times
+    # for the gender to be fixed, the assistant had no finding that mentioned it, and
+    # its answers rewrote pronouns and were refused: "the assistant is useless, it
+    # corrects nothing".
+    used_ids = _h3_speaker_ids(text)
+    bound_ids = _h3_bound_speaker_ids(text)
+    orphan_ids = sorted(
+        speaker_id for speaker_id in used_ids - bound_ids
+        if not all(
+            _h3_id_is_prohibited(text, match.start())
+            for match in _H3_SPEAKER_ID_RE.finditer(text)
+            if match.group(1).upper() == speaker_id
+        )
+    )
+    if orphan_ids:
+        listed = ", ".join(f"({speaker_id})" for speaker_id in orphan_ids)
+        bindings = (
+            ", ".join(f"({speaker_id})" for speaker_id in sorted(bound_ids))
+            or "none"
+        )
+        findings.append(
+            f"The prompt uses the speaker id(s) {listed} that no binding in the same "
+            f"prompt declares (it binds {bindings}). Whoever renders it has to invent "
+            "a person for that id, and the wrong person can end up speaking."
+        )
+
+    empty_tags = [
+        match.group("tag") for match in _H3_EMPTY_TAG_RE.finditer(text)
+    ]
+    if empty_tags:
+        listed = ", ".join(f"<{name}></{name}>" for name in empty_tags[:3])
+        findings.append(
+            f"The body carries {len(empty_tags)} tag(s) that hold nothing: {listed}. "
+            "A tag with no text renders as nothing at all, so the line it stands for "
+            "is missing from the shot."
+        )
+
+    mismatch = _h3_gender_mismatch_finding(text, _h3_line_speakers(text))
+    if mismatch:
+        findings.append(mismatch)
 
     # The gesture paired with each line, because the global lip-sync instruction is
     # already in the prompt: a note that asks for lip-sync has nothing to add until

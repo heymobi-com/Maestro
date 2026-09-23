@@ -1799,3 +1799,103 @@ class ClipVideoRecoveryTests(unittest.TestCase):
         self.assertIn("export function splitRevisionOptions(", helper)
         self.assertIn("(?<=\\s)(?=\\d{1,2}[.)][ \\t]+\\S)", helper)
         self.assertIn("' | '", helper)
+
+class SpeakerContradictionTests(unittest.TestCase):
+    """The measurement names the contradictions a reader sees at once.
+
+    Measured on shot 37 of a real project ("el shot 37 tiene contradicciones de
+    genero, ricardo es el speaker sin embargo continua generando a la mujer como
+    speaker"): the field head declared "<Subject 1> (S4): Valeria" while every
+    binding in the same prompt says only (S1) and (S2) exist, three <scenetrans> tags
+    held nothing, and the prose gave the speaking to "she" while all four tagged
+    lines belong to (S2) = Ricardo, whose own line says "Hombre maduro (60)". The
+    assistant was told the gender was wrong and had no finding that mentioned it.
+    """
+
+    def _prompt(self, body: str, extra: str = "") -> str:
+        return (
+            "subject_definitions: <Subject 1> (S4): Valeria, a young woman with fair skin.\n"
+            "summary: Medium shot focusing on Valeria in a loft.\n"
+            "retention_analysis: Preserve the identities and the audio roles.\n"
+            f"detailed_description: [Shot 1] {body}\n"
+            "overall_soundscape: room tone.\n"
+            "non_diegetic_music: N/A\n"
+            "- <Subject 2> (S2) = Ricardo = [Speaker_02] = <Picture 2> + <Audio 2>.\n"
+            "- S2 = Ricardo \u2014 [Speaker_02] | <Picture 2> + <Audio 2> | Hombre maduro "
+            "(60), te\u00f3logo laico, gafas de lectura.\n"
+            "- NUNCA se genera (S3), (S4) ni ning\u00fan otro speaker ID adicional.\n"
+            f"{extra}"
+        )
+
+    def _findings(self, prompt: str) -> list[str]:
+        return list(diagnose_h3_clip_prompt(prompt).get("findings") or [])
+
+    def test_a_line_given_to_the_wrong_gender_is_named_with_its_sentence(self):
+        findings = self._findings(self._prompt(
+            "She speaks to camera about human differences being crushed by friction. "
+            "(S2) speaks thoughtfully: <d>[Spanish] que importa.</d>. Only the tagged "
+            "lines are spoken."
+        ))
+
+        joined = " ".join(findings)
+        self.assertIn("belong to (S2)", joined)
+        self.assertIn("describes the person who speaks as feminine", joined)
+        self.assertIn("She speaks to camera about human differences", joined)
+
+    def test_the_correct_attribution_is_left_alone(self):
+        findings = self._findings(self._prompt(
+            "He speaks to camera about human differences being crushed by friction. "
+            "(S2) speaks thoughtfully: <d>[Spanish] que importa.</d>. Only the tagged "
+            "lines are spoken."
+        ))
+
+        self.assertNotIn("describes the person who speaks", " ".join(findings))
+
+    def test_two_speakers_of_different_genders_are_not_compared(self):
+        prompt = self._prompt(
+            "She speaks first. (S1) says: <d>[Spanish] hola.</d>. Then (S2) answers: "
+            "<d>[Spanish] que importa.</d>."
+        ) + "- S1 = Valeria \u2014 [Speaker_01] | <Picture 1> + <Audio 1> | Mujer joven (30).\n"
+
+        findings = self._findings(prompt)
+
+        self.assertNotIn("describes the person who speaks", " ".join(findings))
+
+    def test_an_id_that_no_binding_declares_is_named_and_a_forbidden_one_is_not(self):
+        findings = self._findings(self._prompt(
+            "(S2) speaks: <d>[Spanish] que importa.</d>."
+        ))
+
+        joined = " ".join(findings)
+        self.assertIn("speaker id(s) (S4)", joined)
+        self.assertIn("it binds (S2)", joined)
+        # (S3) is named by the rule that forbids it, never by the shot.
+        self.assertNotIn("(S3)", joined)
+
+    def test_a_tag_that_holds_nothing_is_named(self):
+        findings = self._findings(self._prompt(
+            "(S2) speaks: <scenetrans></scenetrans> <scenetrans></scenetrans> "
+            "<d>[Spanish] que importa.</d>."
+        ))
+
+        joined = " ".join(findings)
+        self.assertIn("2 tag(s) that hold nothing", joined)
+        self.assertIn("<scenetrans></scenetrans>", joined)
+
+    def test_a_healthy_single_speaker_shot_gets_no_such_finding(self):
+        findings = self._findings(
+            "subject_definitions: <Subject 2> (S2): Ricardo, a man in his sixties.\n"
+            "summary: Medium shot of Ricardo.\n"
+            "retention_analysis: Preserve the identities.\n"
+            "detailed_description: [Shot 1] He speaks calmly to camera. (S2) speaks: "
+            "<d>[Spanish] que importa.</d>. Only the tagged lines are spoken.\n"
+            "overall_soundscape: room tone.\n"
+            "non_diegetic_music: N/A\n"
+            "- <Subject 2> (S2) = Ricardo = [Speaker_02] = <Picture 2> + <Audio 2>.\n"
+            "- S2 = Ricardo \u2014 [Speaker_02] | Hombre maduro (60), gafas de lectura.\n"
+        )
+
+        joined = " ".join(findings)
+        self.assertNotIn("speaker id(s)", joined)
+        self.assertNotIn("hold nothing", joined)
+        self.assertNotIn("describes the person who speaks", joined)
