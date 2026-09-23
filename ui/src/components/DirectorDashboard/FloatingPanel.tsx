@@ -63,10 +63,18 @@ function findTextHits(
   return found
 }
 
+/** Whether two hit lists say the same thing, so a recount can leave state alone. */
+function sameHits(before: TextHit[], after: TextHit[]): boolean {
+  if (before.length !== after.length) return false
+  return before.every((hit, index) => {
+    const other = after[index]
+    return hit.field === other.field && hit.start === other.start && hit.end === other.end
+  })
+}
+
 const MIN_WIDTH = 380
 const MIN_HEIGHT = 240
 const MARGIN = 8
-
 // Text size for the body. A compiled prompt is read at length, so this is a
 // reading setting, not a styling flourish: it is clamped, remembered, and
 // reachable without a mouse wheel or a browser zoom that would also shrink the
@@ -216,15 +224,35 @@ export function FloatingPanel({
 
     // Editing the prompt changes how many times the query appears. Count only:
     // jumping while someone types would fight their own caret.
+    //
+    // The recount is deferred and skipped when nothing changed, and that is not a
+    // micro-optimisation. A recount raised inside the input event itself re-renders
+    // this window with the value React last saw -- the text BEFORE the keystroke --
+    // and the commit writes that value back over the character just typed, so the
+    // character is lost and React never reports a change either. Measured on a real
+    // window: the textarea held 8,201 characters during the capture phase and 8,200
+    // by the time the same event reached <body>, with one write of the old value,
+    // from React's commit, and onChange never called. That is what "the floating
+    // window does not let me edit by hand" was; the card's own box, which has no
+    // such listener, typed normally. Waiting for the event to finish costs 120 ms on
+    // a match count nobody is watching mid-keystroke.
     useEffect(() => {
       if (!search) return
       const root = bodyRef.current
       if (!root) return
+      let timer = 0
       const onInput = () => {
-        setHits(findTextHits(root, query, caseSensitive))
+        window.clearTimeout(timer)
+        timer = window.setTimeout(() => {
+          const found = findTextHits(root, query, caseSensitive)
+          setHits(current => sameHits(current, found) ? current : found)
+        }, 120)
       }
       root.addEventListener('input', onInput)
-      return () => root.removeEventListener('input', onInput)
+      return () => {
+        window.clearTimeout(timer)
+        root.removeEventListener('input', onInput)
+      }
     }, [search, query, caseSensitive])
     useEffect(() => {
       // Debounced: this used to write on every pointer move of a drag, which is a

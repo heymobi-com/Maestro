@@ -365,3 +365,43 @@ class PromptComparisonTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FloatingWindowEditingTests(unittest.TestCase):
+    """Typing in the floating prompt window reaches the prompt.
+
+    Measured in the running window: the textarea held 8,201 characters during the
+    capture phase of one input event and 8,200 by the time the same event reached
+    <body>, with a single write of the old value coming from React's commit and
+    onChange never called. The window's own recount listener ran inside the event,
+    its re-render used the value React last saw -- the text before the keystroke --
+    and that commit wrote the old text back over the character just typed. So the
+    character was lost and React never learned it had been typed: "the floating
+    window does not let me edit by hand". The card's own box, which has no such
+    listener, typed normally, and the window's search box survived because its value
+    prop did not change on that re-render.
+    """
+
+    def setUp(self):
+        self.panel = _read(
+            "components", "DirectorDashboard", "FloatingPanel.tsx",
+        )
+
+    def test_the_recount_waits_for_the_event_to_finish(self):
+        self.assertIn("root.addEventListener('input', onInput)", self.panel)
+        self.assertIn("timer = window.setTimeout(() => {", self.panel)
+        self.assertIn("}, 120)", self.panel)
+
+    def test_a_recount_that_changes_nothing_does_not_re_render(self):
+        self.assertIn(
+            "setHits(current => sameHits(current, found) ? current : found)",
+            self.panel,
+        )
+        self.assertIn(
+            "function sameHits(before: TextHit[], after: TextHit[]): boolean {",
+            self.panel,
+        )
+
+    def test_the_measurement_is_recorded_where_the_next_reader_will_look(self):
+        self.assertIn("8,201", self.panel)
+        self.assertIn("does not let me edit by hand", self.panel)
