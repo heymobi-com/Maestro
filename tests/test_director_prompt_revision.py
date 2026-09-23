@@ -210,7 +210,7 @@ class PromptRevisionWiringTests(unittest.TestCase):
         dashboard = _read(
             "components", "DirectorDashboard", "DirectorDashboard.tsx",
         )
-        start = dashboard.index("const runFixWithAi = async () => {")
+        start = dashboard.index("const runFixWithAi = async (overrideNote?: string) => {")
         body = dashboard[start:dashboard.index("}", dashboard.index("setFixing(false)", start))]
 
         self.assertIn("setFixAnswer(answer)", body)

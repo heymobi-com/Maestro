@@ -303,10 +303,14 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
     }
   }
 
-  const runFixWithAi = async () => {
+  const runFixWithAi = async (overrideNote?: string) => {
+    // An option chip is an instruction: it arrives here instead of landing in the
+    // note box, where it used to sit waiting for a second click and looked like a
+    // button that did nothing.
+    const note = (overrideNote ?? fixNote).trim()
+    if (!note) return
     setFixing(true)
     setFixError('')
-    const note = fixNote.trim()
     try {
       const windowed = (clip.window_prompts?.length || 0) > 1
       const answer = await reviseClipPrompt(
@@ -660,7 +664,7 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
             />
             <div className="flex items-center gap-2 mt-1.5">
               <button
-                onClick={runFixWithAi}
+                onClick={() => void runFixWithAi()}
                 disabled={fixing || !fixNote.trim() || busy}
                 className="flex items-center gap-1 px-2 py-1 rounded text-[12px] bg-accent-blue/15 text-accent-blue hover:bg-accent-blue/25 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 title="The assistant reads the saved shot, says what causes the problem, asks when the note is missing an intent, and rewrites only what survives the checks">
@@ -693,14 +697,16 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                 the director can pick and send. */}
             {!!fixAnswer?.options?.length && (
               <div className="mt-1.5 rounded border border-accent-blue/30 bg-bg-tertiary p-1.5">
-                <p className="text-[12px] text-accent-blue">Pick one and send it as the next note:</p>
+                <p className="text-[12px] text-accent-blue">Elige una: el asistente la aplica como la siguiente instrucción.</p>
                 <div className="mt-1 flex flex-col gap-1">
                   {fixAnswer.options.map((option, i) => (
                     <button
                       key={i}
                       type="button"
-                      onClick={() => setFixNote(option)}
-                      className="text-left rounded px-1.5 py-1 text-[13px] leading-snug text-accent-blue/90 hover:bg-accent-blue/15 transition-colors"
+                      onClick={() => { setFixNote(option); void runFixWithAi(option) }}
+                      disabled={fixing}
+                      title="Enviar esta opción al asistente"
+                      className="text-left rounded px-1.5 py-1 text-[13px] leading-snug text-accent-blue/90 hover:bg-accent-blue/15 transition-colors disabled:opacity-40"
                     >{i + 1}. {option}</button>
                   ))}
                 </div>
@@ -821,7 +827,7 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                   className="flex-1 min-w-[200px] bg-bg-tertiary border border-border rounded px-2 py-1.5 text-[13px] text-text-primary focus:outline-none focus:border-accent-blue"
                 />
                 <button
-                  onClick={runFixWithAi}
+                  onClick={() => void runFixWithAi()}
                   disabled={fixing || !fixNote.trim()}
                   className="px-2 py-1 rounded text-[12px] bg-accent-blue/15 text-accent-blue hover:bg-accent-blue/25 transition-colors disabled:opacity-40"
                 >{fixing ? 'Consultando…' : 'Corregir con IA'}</button>
@@ -853,9 +859,10 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                     <button
                       key={i}
                       type="button"
-                      onClick={() => setFixNote(option)}
-                      title="Usar como nota"
-                      className="max-w-full text-left px-2 py-1 rounded text-[13px] leading-snug bg-accent-blue/10 text-accent-blue hover:bg-accent-blue/25 transition-colors"
+                      onClick={() => { setFixNote(option); void runFixWithAi(option) }}
+                      disabled={fixing}
+                      title="Enviar esta opción al asistente"
+                      className="max-w-full text-left px-2 py-1 rounded text-[13px] leading-snug bg-accent-blue/10 text-accent-blue hover:bg-accent-blue/25 transition-colors disabled:opacity-40"
                     >{i + 1}. {option}</button>
                   ))}
                 </div>

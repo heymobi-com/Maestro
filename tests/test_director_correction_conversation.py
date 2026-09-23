@@ -325,6 +325,42 @@ class RevisionEnvelopeTests(unittest.TestCase):
         }])
         self.assertEqual(parts["prompt"], "")
 
+    def test_two_choices_written_on_one_line_are_still_two_choices(self):
+        # Measured: the model answered "OPTIONS: 1. cortar el plano antes del giro.
+        # 2. anadir un inserto de la mano" on a single line and the window showed ONE
+        # chip whose text was both proposals. A chip carrying two instructions executes
+        # neither, which is what the director reported.
+        one_line = _parse_revision_envelope(
+            "ANALYSIS: the closing beat is missing.\n"
+            "OPTIONS: 1. Cortar el plano antes del giro. 2. Anadir un inserto de la mano.\n",
+        )
+
+        self.assertEqual(one_line["options"], [
+            "Cortar el plano antes del giro.",
+            "Anadir un inserto de la mano.",
+        ])
+
+    def test_choices_piped_on_one_line_and_three_of_them_are_split_too(self):
+        piped = _parse_revision_envelope(
+            "ANALYSIS: x.\nOPTIONS:\nCortar el plano | Anadir un inserto\n",
+        )
+        three = _parse_revision_envelope(
+            "ANALYSIS: x.\nOPTIONS:\n1. Cortar el plano. 2. Insertar la mano. "
+            "3. Cambiar el encuadre al rostro.\n",
+        )
+
+        self.assertEqual(piped["options"], ["Cortar el plano", "Anadir un inserto"])
+        self.assertEqual(len(three["options"]), 3)
+
+    def test_one_choice_stays_one_because_a_duration_is_not_a_numbering(self):
+        single = _parse_revision_envelope(
+            "ANALYSIS: x.\nOPTIONS:\n1. Recortar el plano en 1.5 s para que entre el giro.\n",
+        )
+
+        self.assertEqual(single["options"], [
+            "Recortar el plano en 1.5 s para que entre el giro.",
+        ])
+
 
 class CorrectionConversationWiringTests(unittest.TestCase):
     """The endpoint and the turn must carry the measurement and the turns."""
@@ -413,6 +449,27 @@ class CorrectionConversationWiringTests(unittest.TestCase):
         )
         with open(os.path.join(_ROOT, "ui", "src", "types", "index.ts"), encoding="utf-8") as handle:
             self.assertIn("revision_llm_model_id: string", handle.read())
+
+    def test_an_option_chip_runs_the_correction_it_carries(self):
+        # The chip only called setFixNote: it filled a box and waited for a second
+        # click, so "it offers options and then does nothing" was literally true.
+        with open(
+            os.path.join(_ROOT, "ui", "src", "components", "DirectorDashboard", "DirectorDashboard.tsx"),
+            encoding="utf-8",
+        ) as handle:
+            dashboard = handle.read()
+
+        self.assertIn("void runFixWithAi(option)", dashboard)
+        self.assertIn("const runFixWithAi = async (overrideNote?: string)", dashboard)
+        # Passing the handler itself would hand the click's MouseEvent to the note.
+        self.assertNotIn("onClick={runFixWithAi}", dashboard)
+        self.assertIn("onClick={() => void runFixWithAi()}", dashboard)
+
+    def test_the_shape_of_the_answer_is_recorded(self):
+        # Nothing logged how many markers or choices an answer carried, so a collapsed
+        # chip could only be guessed at.
+        self.assertIn("markers=", self.pipeline)
+        self.assertIn("options={len(parsed['options'])}", self.pipeline)
 
     def test_the_assistant_is_required_to_offer_options(self):
         # "The programming is useless" was fair: the envelope had no place for a

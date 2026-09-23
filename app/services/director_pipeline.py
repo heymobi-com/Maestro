@@ -2916,14 +2916,44 @@ def _parse_revision_options(value: str) -> list[str]:
     The director is the one who decides, so a note that cannot be answered inside the
     prompt has to come back as choices rather than as a refusal: "the rewrite changed
     almost nothing" told them nothing about what to do instead.
+
+    One per line is what the prompt asks for and what the choices were written for, but
+    the model often does not comply: measured, "OPTIONS: 1. cortar el plano antes del
+    giro. 2. anadir un inserto de la mano" arrived on a single line and became ONE
+    button whose text was both proposals. A button carrying two instructions executes
+    neither, which is what "junta las propuestas en una sola opcion y no genera ninguna
+    respuesta" described. So a line is cut at every inline numbering, and at the pipe a
+    model uses when it writes the two choices side by side.
     """
 
     options: list[str] = []
     for line in str(value or "").splitlines():
-        cleaned = re.sub(r"^\s*(?:[-*\u2022]|\d+[.)])\s*", "", line).strip()
-        if cleaned:
-            options.append(cleaned)
+        for piece in _split_inline_options(line):
+            cleaned = _OPTION_MARKER_RE.sub("", piece).strip()
+            if cleaned:
+                options.append(cleaned)
     return options
+
+
+# A second proposal inside the same line starts at its own numbering.
+_INLINE_OPTION_RE = re.compile(r"(?<=\s)(?=\d{1,2}[.)][ \t]+\S)")
+# The pipe a model puts between two choices written side by side.
+_OPTION_SEPARATORS = (" | ", " || ")
+_OPTION_MARKER_RE = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s*")
+
+
+def _split_inline_options(line: str) -> list[str]:
+    """One line that carries several proposals, cut into its proposals."""
+
+    numbered = [piece for piece in _INLINE_OPTION_RE.split(line) if piece.strip()]
+    if len(numbered) > 1:
+        return numbered
+    for separator in _OPTION_SEPARATORS:
+        if separator in line:
+            pieces = [piece for piece in line.split(separator) if piece.strip()]
+            if len(pieces) > 1:
+                return pieces
+    return [line]
 
 # The field a compiled prompt opens with, at a line start.
 _PROMPT_FIELD_HEAD_RE = re.compile(
@@ -3345,7 +3375,18 @@ def revise_clip_prompt(
         answer = str(answer or "").strip()
         if not answer:
             raise ValueError("The model returned no answer; try again.")
-        return _parse_revision_envelope(answer, prompt)
+        parsed = _parse_revision_envelope(answer, prompt)
+        # What the answer actually looked like. Two proposals on one line became a
+        # single chip whose text was both of them, and nothing recorded the shape that
+        # produced it, so the only way to know was to guess. One line per answer:
+        # characters, how many markers were seen, and how the choices came out.
+        markers = sorted({match.group(1).upper() for match in _REVISION_MARKER_RE.finditer(answer)})
+        print(
+            f"[Pipeline {pid}] Shot {clip_index + 1}: answer {len(answer)} chars, "
+            f"markers={markers or ['none']}, options={len(parsed['options'])}, "
+            f"edits={len(parsed['edits'])}, prompt={len(parsed['prompt'])}"
+        )
+        return parsed
 
     parts = _ask()
 
