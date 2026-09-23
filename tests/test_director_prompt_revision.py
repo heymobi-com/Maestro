@@ -119,9 +119,14 @@ class PromptRevisionTests(unittest.TestCase):
         sent = captured["prompt"]
         self.assertIn("the line belongs to the man", sent)
         self.assertIn("middle shot body", sent)
-        # Continuity comes from both neighbours, not just the previous shot.
-        self.assertIn("previous shot 1: first shot body", sent)
-        self.assertIn("next shot 3: last shot body", sent)
+        # Continuity comes from both neighbours, not just the previous shot, and each one
+        # arrives as what actually differs between shots: who it gives its lines to, who is
+        # on screen and its own text. The first 600 characters of a neighbour's prompt are
+        # the same 600 characters in every shot of the film, so they said nothing about it.
+        self.assertIn("previous shot 1: speaks", sent)
+        self.assertIn("next shot 3: speaks", sent)
+        self.assertIn("its own text: first shot body", sent)
+        self.assertIn("its own text: last shot body", sent)
         self.assertEqual(result["clip_index"], 1)
         # The answer is now asked for as a reading plus a rewrite. Plain prose
         # carries no FIXED_PROMPT, so nothing is handed over to the editor: a

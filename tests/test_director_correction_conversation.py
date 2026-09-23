@@ -45,7 +45,9 @@ from services.director.h3_dialogue import (  # noqa: E402
     h3_ensure_project_base,
     h3_frozen_problems,
     h3_proposal_warnings,
+    h3_shared_line_speaker_problems,
     h3_shared_project_phrases,
+    h3_subject_binding_problems,
     reconcile_audio_plan_with_dialogue,
     retain_dialogue_beats,
     review_h3_revision,
@@ -2119,3 +2121,91 @@ class RealPlacementTests(unittest.TestCase):
         self.assertTrue(any("shared text" in problem for problem in raw_problems))
         # Placed back into its own spans, the same correction is accepted.
         self.assertEqual(placed_problems, [])
+
+
+class ReferenceAndReasoningTests(unittest.TestCase):
+    """The assistant is given the neighbours, and its reading is shown.
+
+    "Muchas estan hiladas con la siguiente escena, entonces sin referencia no hay modo
+    que el AI entienda... me diga que hay que arreglar y lo razone antes de proceder."
+
+    Measured on magnifica-humanitas: the neighbour digest handed over the first 600
+    characters of each neighbour's prompt, which are the same 600 characters in all 177
+    shots (the shared project text), so it said nothing about the neighbour. And shot 37
+    shares its last line with shot 38 under a different speaker -- "datos, a ordenes y a
+    rendimientos." is (S2) in one and (S1) in the other -- which no single shot can show.
+    """
+
+    def test_the_neighbour_digest_carries_what_differs_between_shots(self):
+        with open(
+            os.path.join(_APP_DIR, "services", "director_pipeline.py"), encoding="utf-8",
+        ) as handle:
+            pipeline_source = handle.read()
+
+        self.assertIn("its own text:", pipeline_source)
+        self.assertIn("speaks {heard or '(nobody)'}", pipeline_source)
+        self.assertIn("h3_clip_text(prompt,", pipeline_source)
+        # The shared 600 characters are not the neighbour's identity.
+        self.assertNotIn('str(clips[index].get("video_prompt") or "").split()\n            )[:600]', pipeline_source)
+
+    def test_the_crossed_line_between_shots_is_measured(self):
+        clips = [
+            {"video_prompt": "x (S2) says: <d>[Spanish] hola.</d>"},
+            {"video_prompt": "y (S1) says: <d>[Spanish] hola.</d>"},
+        ]
+
+        problems = h3_shared_line_speaker_problems(clips, 0)
+
+        self.assertEqual(len(problems), 1)
+        self.assertIn("(S2)", problems[0])
+        self.assertIn("shot 2", problems[0])
+        self.assertIn("(S1)", problems[0])
+
+    def test_a_line_everyone_gives_to_the_same_speaker_is_left_alone(self):
+        clips = [
+            {"video_prompt": "x (S2) says: <d>[Spanish] hola.</d>"},
+            {"video_prompt": "y (S2) says: <d>[Spanish] hola.</d>"},
+        ]
+
+        self.assertEqual(h3_shared_line_speaker_problems(clips, 0), [])
+
+    def test_the_subject_a_shot_declares_is_compared_with_its_own_rule(self):
+        prompt = (
+            "subject_definitions: <Subject 1> (S1): Ricardo, wearing a sweater.\n"
+            "summary: x.\n"
+            "- <Subject 1> (S1) = Valeria = [Speaker_01] = <Picture 1> + <Audio 1>.\n"
+        )
+
+        problems = h3_subject_binding_problems(prompt)
+
+        self.assertEqual(len(problems), 1)
+        self.assertIn("<Subject 1> as Ricardo", problems[0])
+        self.assertIn("says <Subject 1> is Valeria", problems[0])
+
+    def test_a_shot_that_agrees_with_its_own_rule_is_left_alone(self):
+        prompt = (
+            "subject_definitions: <Subject 1> (S1): Valeria, a young woman.\n"
+            "summary: x.\n"
+            "- <Subject 1> (S1) = Valeria = [Speaker_01] = <Picture 1> + <Audio 1>.\n"
+        )
+
+        self.assertEqual(h3_subject_binding_problems(prompt), [])
+
+    def test_the_shot_text_is_numbered_so_an_answer_can_point_at_a_line(self):
+        with open(
+            os.path.join(_APP_DIR, "services", "director_pipeline.py"), encoding="utf-8",
+        ) as handle:
+            pipeline_source = handle.read()
+
+        self.assertIn('f"{index + 1}| {line}"', pipeline_source)
+        self.assertIn("The 'N| ' prefix is a reference", pipeline_source)
+
+    def test_the_assistant_reading_is_shown_in_the_window(self):
+        with open(
+            os.path.join(_ROOT, "ui", "src", "components", "DirectorDashboard", "DirectorDashboard.tsx"),
+            encoding="utf-8",
+        ) as handle:
+            dashboard = handle.read()
+
+        self.assertEqual(dashboard.count("Su lectura del shot"), 2)
+        self.assertIn("{fixAnswer.analysis}", dashboard)

@@ -1768,6 +1768,107 @@ def _h3_gender_of(text: str) -> str:
     return ""
 
 
+# The field head of a compiled prompt names the subjects on screen, and the prompt's own
+# binding lines say who each Subject is. When they disagree the shot is built on the wrong
+# person. Measured on magnifica-humanitas: shots 35, 36, 37, 39 and 41 declare
+# "<Subject 1> (S1): Ricardo" while the rule inside the very same prompt says
+# "<Subject 1> (S1) = Valeria".
+_H3_SUBJECT_FIELD_RE = re.compile(
+    r"(?mi)^[ \t]*subject_definitions[ \t]*:[ \t]*(.+)$"
+)
+_H3_SUBJECT_DECLARED_RE = re.compile(
+    r"<Subject\s*(\d+)>\s*(?:\(([Ss]\d+)\))?\s*:?\s*([A-Z\u00c1\u00c9\u00cd\u00d3\u00da\u00d1]"
+    r"[\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*)"
+)
+_H3_SUBJECT_BOUND_RE = re.compile(
+    r"<Subject\s*(\d+)>\s*\(([Ss]\d+)\)\s*=\s*"
+    r"([A-Za-z\u00c1\u00c9\u00cd\u00d3\u00da\u00d1\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]+)"
+)
+
+
+def h3_subject_binding_problems(prompt: str) -> list[str]:
+    """Where a shot's own field head names a different person than its own bindings.
+
+    The prompt carries both: the field head says who is on screen ("<Subject 1> (S1):
+    Ricardo") and the project's rules say who each Subject is ("<Subject 1> (S1) =
+    Valeria"). Nothing compared them, so a shot could be built on the wrong person and
+    the next scene could contradict it, which is the thread a director sees when the
+    wrong person keeps speaking between shots.
+    """
+
+    text = str(prompt or "")
+    head = _H3_SUBJECT_FIELD_RE.search(text)
+    if not head:
+        return []
+    declared = {
+        match.group(1): match.group(3)
+        for match in _H3_SUBJECT_DECLARED_RE.finditer(head.group(1))
+    }
+    bound = {
+        match.group(1): match.group(3)
+        for match in _H3_SUBJECT_BOUND_RE.finditer(text)
+    }
+    problems = []
+    for number, person in sorted(declared.items()):
+        other = bound.get(number)
+        if other and other.lower() != person.lower():
+            problems.append(
+                f"The shot declares <Subject {number}> as {person}, while the rule in "
+                f"the same prompt says <Subject {number}> is {other}. The shot is built "
+                "on the wrong person, so the person who speaks can change from one shot "
+                "to the next."
+            )
+    return problems
+
+
+def h3_shared_line_speaker_problems(
+    clips: Sequence[Any], clip_index: int, *, span: int = 2,
+) -> list[str]:
+    """The same spoken line given to a different speaker in a neighbouring shot.
+
+    Measured on magnifica-humanitas: "datos, a ordenes y a rendimientos." is the last
+    line of shot 37 spoken by (S2) and the first line of shot 38 spoken by (S1), so the
+    two shots tell different stories about who says it. A shot cannot be judged on its
+    own for this: it needs the shots next to it, which is what the director meant by
+    "muchas estan hiladas con la siguiente escena".
+    """
+
+    def lines_with_speaker(prompt: str) -> dict[str, str]:
+        found: dict[str, str] = {}
+        body = str(prompt or "")
+        for match in re.finditer(r"<d\b[^>]*>(.*?)</d>", body, re.S):
+            head = body[max(0, match.start() - 200):match.start()]
+            ids = _H3_SPEAKER_ID_RE.findall(head)
+            spoken = " ".join(match.group(1).split()).strip()
+            if spoken and ids:
+                found.setdefault(spoken, ids[-1].upper())
+        return found
+
+    try:
+        current = str(clips[clip_index].get("video_prompt") or "")
+    except (IndexError, AttributeError, TypeError):
+        return []
+    mine = lines_with_speaker(current)
+    if not mine:
+        return []
+    problems: list[str] = []
+    for offset in range(-span, span + 1):
+        index = clip_index + offset
+        if offset == 0 or not 0 <= index < len(clips):
+            continue
+        theirs = lines_with_speaker(str(clips[index].get("video_prompt") or ""))
+        for spoken, speaker in theirs.items():
+            own = mine.get(spoken)
+            if own and own != speaker:
+                problems.append(
+                    f"Shot {clip_index + 1} gives the line \"{spoken[:80]}\" to ({own}), "
+                    f"and shot {index + 1} gives the same line to ({speaker}). Both shots "
+                    "render the same sentence, so the one that is wrong will be seen "
+                    "contradicting the other."
+                )
+    return problems
+
+
 def _h3_gender_mismatch_finding(
     text: str, spoken_ids: set[str],
 ) -> str:
@@ -2049,6 +2150,8 @@ def diagnose_h3_clip_prompt(
     mismatch = _h3_gender_mismatch_finding(text, _h3_line_speakers(text))
     if mismatch:
         findings.append(mismatch)
+
+    findings.extend(h3_subject_binding_problems(text))
 
     # The gesture paired with each line, because the global lip-sync instruction is
     # already in the prompt: a note that asks for lip-sync has nothing to add until

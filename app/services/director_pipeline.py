@@ -3434,17 +3434,49 @@ def _changed_characters(before: str, after: str) -> int:
 
 
 def _revise_shot_neighbours(clips: list, clip_index: int) -> str:
-    """A short digest of the adjacent shots, for continuity."""
+    """The shots next to this one, for the continuity only they can show.
 
-    parts = []
+    This used to hand over the first 600 characters of each neighbour's prompt, which are
+    the same 600 characters in every shot of the film: the shared project text, the
+    identity blocks and the field heads. Measured, that told the assistant nothing about
+    the neighbour -- not who is on screen, not who speaks, not even which lines it has --
+    and a contradiction that runs between two shots is exactly what a correction needs to
+    see. What goes in now is the neighbour's own text (the part that varies), its spoken
+    lines with the speaker each one is given to, and the subjects its field head declares.
+    """
+
+    from services.director.h3_dialogue import (
+        h3_clip_text, h3_dialogue_blocks, h3_shared_project_phrases, _h3_line_speakers,
+    )
+
+    try:
+        frozen = h3_shared_project_phrases(clips)
+    except Exception:
+        frozen = []
+    parts: list[str] = []
     for offset, label in ((-1, "previous"), (1, "next")):
         index = clip_index + offset
-        if 0 <= index < len(clips):
-            text = " ".join(
-                str(clips[index].get("video_prompt") or "").split()
-            )[:600]
-            if text:
-                parts.append(f"{label} shot {index + 1}: {text}")
+        if not 0 <= index < len(clips):
+            continue
+        clip = clips[index] if isinstance(clips[index], dict) else {}
+        prompt = str(clip.get("video_prompt") or "")
+        if not prompt:
+            continue
+        lines = h3_dialogue_blocks(prompt)
+        speakers = sorted(_h3_line_speakers(prompt))
+        heard = speakers[0] if len(speakers) == 1 else "/".join(speakers)
+        own = h3_clip_text(prompt, [clip.get("_director_project_context") or "", *frozen])
+        own = " ".join(own.split())[:420]
+        declared = re.search(r"(?mi)^[ \t]*subject_definitions[ \t]*:[ \t]*(.+)$", prompt)
+        entry = [
+            f"{label} shot {index + 1}: speaks {heard or '(nobody)'}",
+        ]
+        if declared:
+            entry.append(f"  on screen: {' '.join(declared.group(1).split())[:200]}")
+        for line in lines[:6]:
+            entry.append(f"  line: {line[:140]}")
+        entry.append(f"  its own text: {own}")
+        parts.append("\n".join(entry))
     return "\n".join(parts)
 
 
@@ -3497,6 +3529,7 @@ def revise_clip_prompt(
         h3_clip_text,
         h3_dialogue_blocks,
         h3_proposal_warnings,
+        h3_shared_line_speaker_problems,
         h3_shared_project_phrases,
         review_h3_revision,
     )
@@ -3520,10 +3553,18 @@ def revise_clip_prompt(
     # prompt, and it is frozen in the gate, so sending it as the thing to rewrite only invited
     # the damage this pass exists to prevent.
     clip_text = h3_clip_text(prompt, frozen)
+    # Numbered, so an answer can point at a line it cannot copy perfectly: the model
+    # paraphrases field blocks instead of copying them, which is why 11 EDITS came back
+    # unplaceable on shot 37 of a real project. The numbers are a reference, not text.
+    numbered = "\n".join(
+        f"{index + 1}| {line}" for index, line in enumerate(clip_text.splitlines())
+    )
     task = [
-        f"SHOT {clip_index + 1} OF {len(clips)} — THIS SHOT'S TEXT. It is the only part you "
-        "may change, and the part your answer is compared against:",
-        clip_text,
+        f"SHOT {clip_index + 1} OF {len(clips)} — THIS SHOT'S TEXT, one line per "
+        "numbered line. The 'N| ' prefix is a reference for your answer and is not "
+        "part of the text. This is the only part you may change, and the part your "
+        "answer is compared against:",
+        numbered,
     ]
     if project_context:
         task.extend([
@@ -3552,6 +3593,15 @@ def revise_clip_prompt(
     )
     task.extend(["", "MEASUREMENT OF THE CURRENT PROMPT (read the facts, do not guess):"])
     task.extend(f"- {finding}" for finding in diagnosis["findings"])
+    # The contradictions that only exist between shots: the same line given to two
+    # different speakers, or a shot built on the wrong person while its neighbour shows
+    # the right one. Measured on the real project, 12 shots carry a crossed line and 58
+    # declare a Subject the project's own rule contradicts, and a shot cannot be judged
+    # on its own for either.
+    crossed = h3_shared_line_speaker_problems(clips, clip_index)
+    if crossed:
+        task.extend(["", "MEASUREMENT ACROSS THE NEIGHBOURING SHOTS:"])
+        task.extend(f"- {finding}" for finding in crossed)
     if anchors:
         # The system prompt asks the assistant to keep the anchors "the measurement
         # lists", and the measurement listed none: the instruction pointed at
@@ -3585,8 +3635,7 @@ def revise_clip_prompt(
     task.extend([
         "",
         "THE DIRECTOR'S NOTE — fix exactly this:",
-        note,
-        "",
+        note,        "",
         "Answer with ANALYSIS, QUESTION and FIXED_PROMPT.",
     ])
 

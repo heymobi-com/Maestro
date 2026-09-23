@@ -688,6 +688,20 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                 </ul>
               </details>
             )}
+            {/* The assistant's own reading, before anything it proposes. It was used to
+                build the next turn and never shown, so the window went from a note to an
+                error or to a diff with no account of what it found: "no se que esta
+                haciendo o que cambio quiere hacer". */}
+            {fixAnswer?.analysis && (
+              <div className="mt-1.5 rounded border border-border bg-bg-tertiary p-1.5">
+                <p className="text-[11px] text-text-muted uppercase tracking-wider">
+                  Su lectura del shot
+                </p>
+                <p className="mt-0.5 text-[13px] leading-snug text-text-secondary whitespace-pre-wrap">
+                  {fixAnswer.analysis}
+                </p>
+              </div>
+            )}
             {fixAnswer?.question && (
               <p className="mt-1.5 rounded border border-accent-blue/30 bg-bg-tertiary p-1.5 text-[13px] leading-snug text-accent-blue">
                 {fixAnswer.question}
@@ -840,6 +854,14 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                 )}
               </div>
               {fixError && <p role="alert" className="text-[12px] text-indicator-warning shrink-0">{fixError}</p>}
+              {/* The same reading, in the window: what the assistant found and why, before
+                  the comparison it proposes. */}
+              {fixAnswer?.analysis && (
+                <div className="shrink-0 max-h-40 overflow-auto rounded border border-border bg-bg-tertiary p-1.5">
+                  <p className="text-[11px] text-text-muted uppercase tracking-wider">Su lectura del shot</p>
+                  <p className="mt-0.5 text-[13px] leading-snug text-text-secondary whitespace-pre-wrap">{fixAnswer.analysis}</p>
+                </div>
+              )}
               {/* A refusal carries no proposal, so the window has to say why: an
                   answer that changes nothing used to look like nothing happened. */}
               {fixAnswer && !proposalPrompt && (
