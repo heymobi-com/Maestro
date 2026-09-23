@@ -3260,6 +3260,125 @@ def _changed_words(before: str, after: str) -> int:
     )
 
 
+def _clip_scoped_rewrite(
+    prompt: str, answer: str, frozen: list[str],
+) -> str | None:
+    """An answer that rewrites only the clip, placed back into the full prompt.
+
+    The assistant is handed THIS SHOT'S TEXT -- measured, 1,963 of shot 37's 7,330
+    characters, because the other 5,367 are the project's shared text and re-typing
+    them is where every case of damage came from. It answers at that scale: its
+    FIXED_PROMPT is the clip's own text, corrected. Judging that answer against the
+    whole prompt is what made every such turn end as "the rewrite was refused" -- the
+    answer looked like a prompt that had dropped the project's rules, its identities
+    and its audio bindings. Then the prompt never changed, which is what "el prompt no
+    aparenta haber cambiado" was.
+
+    So an answer carrying none of the project text is placed back into the prompt's own
+    clip spans. The prompt is rebuilt one span at a time and the text between spans is
+    copied verbatim, so the project's text cannot be touched by construction. Anything
+    the alignment cannot place cleanly returns None, which leaves the caller with the
+    old behaviour of judging the answer as a whole prompt: a refusal is honest, a
+    silently mangled prompt is not.
+    """
+
+    from services.director.h3_dialogue import h3_clip_spans
+
+    text = str(prompt or "")
+    candidate = str(answer or "")
+    if not text or not candidate.strip() or not frozen:
+        return None
+    spans = h3_clip_spans(text, frozen)
+    if not spans:
+        return None
+    current = "".join(text[start:end] for start, end in spans)
+    if not current:
+        return None
+    # An answer that carries the project's text is a whole prompt, not a clip: leave it
+    # to the caller. Measured, the clip is a quarter of a prompt, so an answer that is
+    # 90% its own text is answering at the clip's scale.
+    own_text = sum(
+        end - start for start, end in h3_clip_spans(candidate, frozen)
+    )
+    if own_text < 0.9 * len(candidate):
+        return None
+    opcodes = difflib.SequenceMatcher(
+        None, current, candidate, autojunk=False,
+    ).get_opcodes()
+    kept = sum(i2 - i1 for tag, i1, i2, _, _ in opcodes if tag == "equal")
+    if kept < 0.5 * len(current):
+        # Less than half of the clip survived: this is not a correction of the same
+        # text, and piecing it together piecewise would be inventing a prompt.
+        return None
+    pieces: list[str] = []
+    cursor = 0
+    clip_position = 0
+    for start, end in spans:
+        pieces.append(text[cursor:start])
+        cursor = end
+        low, high = clip_position, clip_position + (end - start)
+        for tag, i1, i2, j1, j2 in opcodes:
+            if i2 <= low or i1 >= high:
+                continue
+            left = max(i1, low)
+            right = min(i2, high)
+            if tag == "equal":
+                if right > left:
+                    pieces.append(text[start + (left - low):start + (right - low)])
+                continue
+            if tag == "insert":
+                if low <= i1 <= high:
+                    pieces.append(candidate[j1:j2])
+                continue
+            if right <= left:
+                continue
+            # replace and delete, cut to this span. The answer's text is taken in the
+            # same proportion, which is exact for a replacement of equal length and a
+            # rounding choice otherwise.
+            if tag != "replace" or j2 <= j1 or i2 <= i1:
+                continue
+            factor = (j2 - j1) / (i2 - i1)
+            ja = j1 + int((left - i1) * factor)
+            jb = j1 + int((right - i1) * factor)
+            original = text[start + (left - low):start + (right - low)]
+            replacement = candidate[ja:jb]
+            if tag == "delete":
+                # A deletion that only removes whitespace keeps the prompt's layout: the
+                # answer may drop a blank line, and losing the newline between two fields
+                # glues their heads together.
+                if not original.strip():
+                    pieces.append(original)
+                continue
+            # A difference that is only whitespace keeps the prompt's own layout, in both
+            # directions. Measured with an answer the model had reflowed onto one line: the
+            # newlines between the six fields became single spaces and the prompt came back
+            # with one field instead of six. Whitespace carries no meaning here and the
+            # prompt's structure does.
+            if not replacement.strip() and original:
+                pieces.append(original)
+            else:
+                pieces.append(replacement)
+        clip_position = high
+    pieces.append(text[cursor:])
+    placed = "".join(pieces)
+    # Two invariants, checked on the result rather than trusted to the assembly: the
+    # prompt's own field structure and the project's text are both things a correction is
+    # never allowed to lose. Measured on a fixture whose newline sat against a frozen
+    # seam, the assembly dropped one and glued two field heads together; refusing is the
+    # honest answer there, and the caller then judges the answer as a whole prompt.
+    field_head = re.compile(
+        r"(?mi)^[ \t]*(?:subject_definitions|summary|retention_analysis|"
+        r"detailed_description|integrated_multimodal_description|overall_soundscape|"
+        r"non_diegetic_music)[ \t]*:"
+    )
+    if len(field_head.findall(placed)) != len(field_head.findall(text)):
+        return None
+    for phrase in frozen:
+        if phrase in text and phrase not in placed:
+            return None
+    return placed
+
+
 def _revise_problem_nudge(problems: list[str], expected_lines: list[str] | None = None) -> str:
     """Tell the assistant what was wrong with its own rewrite.
 
@@ -3560,7 +3679,15 @@ def revise_clip_prompt(
         """
 
         if answer["prompt"]:
-            return str(answer["prompt"]), []
+            # The answer may be the whole prompt or only this shot's text, which is what
+            # the task asks for when it sends THIS SHOT'S TEXT and the project text as
+            # read-only context. A clip-scoped answer is placed back into the prompt;
+            # anything the placement cannot align is judged as a whole prompt, as before.
+            text = str(answer["prompt"])
+            placed = _clip_scoped_rewrite(prompt, text, frozen)
+            if placed is not None:
+                return placed, []
+            return text, []
         if answer["edits"]:
             return _apply_revision_edits(prompt, answer["edits"])
         return "", []

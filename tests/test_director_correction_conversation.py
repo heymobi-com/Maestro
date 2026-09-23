@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -38,6 +39,7 @@ from services.director.h3_dialogue import (  # noqa: E402
     _speaker_registry_entry,
     compile_h3_clip_plans,
     diagnose_h3_clip_prompt,
+    h3_clip_spans,
     h3_clip_text,
     h3_dialogue_blocks,
     h3_ensure_project_base,
@@ -1899,3 +1901,221 @@ class SpeakerContradictionTests(unittest.TestCase):
         self.assertNotIn("speaker id(s)", joined)
         self.assertNotIn("hold nothing", joined)
         self.assertNotIn("describes the person who speaks", joined)
+
+class ClipScopedAnswerTests(unittest.TestCase):
+    """An answer about the shot's own text is placed back into the prompt.
+
+    Measured on shot 37 of a real project: the assistant is handed THIS SHOT'S TEXT
+    (1,963 of the prompt's 7,330 characters, because the other 5,367 are the project's
+    shared text), so its FIXED_PROMPT is the shot's own text corrected. Judged against
+    the whole prompt that answer came back with 50 problems -- "the proposal changes the
+    project's shared text, which every clip carries verbatim" -- and the prompt never
+    changed, which is what "el prompt no aparenta haber cambiado" was. Placed back into
+    the prompt's own spans, the same answer comes back with no problems at all.
+    """
+
+    PROJECT_RULES = (
+        "RESTRICCIONES GLOBALES DEL PROYECTO (critico, no negociable):\n"
+        "- Este proyecto tiene EXACTAMENTE DOS participantes. No hay un tercero.\n"
+    )
+    BINDINGS = (
+        "- <Subject 1> (S1) = Valeria = [Speaker_01] = <Picture 1> + <Audio 1>.\n"
+        "- <Subject 2> (S2) = Ricardo = [Speaker_02] = <Picture 2> + <Audio 2>.\n"
+    )
+
+    def setUp(self):
+        # The project's text first and the shot's six fields after it. The shape that
+        # matters in practice is the one the real project has -- the project's text
+        # interleaved through the shot's own -- and that one is pinned by
+        # RealPlacementTests below, on the real prompt.
+        self.frozen = [self.PROJECT_RULES, self.BINDINGS]
+        self.prompt = (
+            self.PROJECT_RULES
+            + self.BINDINGS
+            + "subject_definitions: <Subject 1> (S1): Valeria, a young woman.\n"
+            "\n"
+            "summary: [reference generation] She speaks to camera in a loft.\n"
+            "\n"
+            "retention_analysis: Preserve the identities and the audio roles.\n"
+            "\n"
+            "detailed_description: [Shot 1] She speaks to camera. (S2) speaks "
+            "thoughtfully: <d>[Spanish] que importa.</d>.\n"
+            "\n"
+            "overall_soundscape: room tone.\n"
+            "\n"
+            "non_diegetic_music: N/A\n"
+        )
+        # The answer is a rewrite of the shot's own text, which is what the assistant is
+        # given and what it answers with.
+        shot_text = "".join(
+            self.prompt[start:end]
+            for start, end in h3_clip_spans(self.prompt, self.frozen)
+        )
+        self.answer = (
+            shot_text
+            .replace("She speaks to camera in a loft", "He speaks to camera in a loft")
+            .replace("detailed_description: [Shot 1] She speaks", "detailed_description: [Shot 1] He speaks")
+        )
+
+    def test_a_clip_scoped_answer_is_placed_and_the_project_text_survives(self):
+        placed = pipeline._clip_scoped_rewrite(self.prompt, self.answer, self.frozen)
+
+        self.assertIsNotNone(placed)
+        self.assertIn("He speaks to camera", placed)
+        self.assertNotIn("She speaks to camera", placed)
+        for phrase in self.frozen:
+            self.assertIn(phrase, placed)
+
+    def test_the_fields_and_the_spoken_lines_come_through_untouched(self):
+        placed = pipeline._clip_scoped_rewrite(self.prompt, self.answer, self.frozen)
+
+        fields = re.findall(
+            r"(?mi)^[ \t]*(subject_definitions|summary|retention_analysis|"
+            r"detailed_description|overall_soundscape|non_diegetic_music)[ \t]*:",
+            placed,
+        )
+        self.assertEqual(len(set(fields)), 6)
+        self.assertEqual(
+            h3_dialogue_blocks(placed), h3_dialogue_blocks(self.prompt),
+        )
+
+    def test_an_answer_the_model_reflowed_never_loses_a_field(self):
+        # Whitespace carries no meaning here and the prompt's structure does. A reflowed
+        # answer either comes back with all six fields or is refused; what it must never do
+        # is come back as a prompt whose fields have been glued together.
+        reflowed = re.sub(r"\s+", " ", self.answer).strip()
+
+        placed = pipeline._clip_scoped_rewrite(self.prompt, reflowed, self.frozen)
+
+        if placed is None:
+            return  # refused: the caller judges it as a whole prompt, as before
+        fields = re.findall(
+            r"(?mi)^[ \t]*(subject_definitions|summary|retention_analysis|"
+            r"detailed_description|overall_soundscape|non_diegetic_music)[ \t]*:",
+            placed,
+        )
+        self.assertEqual(len(set(fields)), 6)
+        for phrase in self.frozen:
+            self.assertIn(phrase, placed)
+    def test_an_answer_that_already_carries_the_project_text_is_left_alone(self):
+        whole = self.prompt.replace("She speaks to camera", "He speaks to camera")
+
+        self.assertIsNone(
+            pipeline._clip_scoped_rewrite(self.prompt, whole, self.frozen),
+        )
+
+    def test_an_answer_that_is_not_a_prompt_is_left_alone(self):
+        self.assertIsNone(
+            pipeline._clip_scoped_rewrite(
+                self.prompt, "Una nota, no un prompt.", self.frozen,
+            ),
+        )
+
+    def test_a_rewrite_that_loses_the_shot_is_left_alone(self):
+        self.assertIsNone(
+            pipeline._clip_scoped_rewrite(
+                self.prompt, "subject_definitions: something else entirely.\n", self.frozen,
+            ),
+        )
+
+    def test_the_proposal_asks_for_the_placement(self):
+        with open(
+            os.path.join(_APP_DIR, "services", "director_pipeline.py"), encoding="utf-8",
+        ) as handle:
+            self.assertIn("_clip_scoped_rewrite(prompt, text, frozen)", handle.read())
+
+    def test_a_placement_that_loses_the_prompt_structure_is_refused(self):
+        # The result is checked, not trusted: a field head that goes missing must not be
+        # handed back as if the prompt were whole.
+        broken = self.answer.replace("retention_analysis:", "notes about retention:")
+
+        self.assertIsNone(
+            pipeline._clip_scoped_rewrite(self.prompt, broken, self.frozen),
+        )
+
+class RealPlacementTests(unittest.TestCase):
+    """The placement on the project's own prompt, where the claim is end to end.
+
+    Measured on shot 37 of magnifica-humanitas: the assistant's answer at the shot's scale
+    came back from the review with 50 problems -- every one of them "the proposal changes
+    the project's shared text" -- so the prompt never changed. The same answer, placed back
+    into the prompt's own spans, comes back with none.
+    """
+
+    STATE = os.path.join(
+        _ROOT, "app", "outputs", "magnifica-humanitas",
+        "_director_pipeline_2d7ed490.json",
+    )
+    CLIP_INDEX = 36          # shot 37, the one the director reported
+    SPEAKS_WRONG = "She speaks to camera"
+    SPEAKS_RIGHT = "He speaks to camera"
+    FIELD_RE = re.compile(
+        r"(?mi)^[ \t]*(subject_definitions|summary|retention_analysis|"
+        r"detailed_description|overall_soundscape|non_diegetic_music)[ \t]*:"
+    )
+
+    def setUp(self):
+        if not os.path.isfile(self.STATE):
+            self.skipTest("the real project is not in this workspace")
+        with open(self.STATE, encoding="utf-8") as handle:
+            self.state = json.load(handle)
+        self.clip = next(
+            clip for clip in self.state["clips"] if clip["index"] == self.CLIP_INDEX
+        )
+        self.prompt = self.clip["video_prompt"]
+        if self.SPEAKS_WRONG not in self.prompt:
+            self.skipTest("this shot does not carry the contradiction any more")
+        self.frozen = [
+            self.clip.get("_director_project_context") or "",
+            *h3_shared_project_phrases(self.state["clips"]),
+        ]
+        self.answer = h3_clip_text(self.prompt, self.frozen).replace(
+            self.SPEAKS_WRONG, self.SPEAKS_RIGHT,
+        )
+
+    def test_the_shot_text_the_assistant_is_given_is_a_quarter_of_the_prompt(self):
+        clip_text = h3_clip_text(self.prompt, self.frozen)
+
+        self.assertLess(len(clip_text), 0.5 * len(self.prompt))
+        self.assertIn(self.SPEAKS_WRONG, clip_text)
+        self.assertNotIn(
+            "RESTRICCIONES GLOBALES DEL PROYECTO", clip_text,
+        )
+
+    def test_the_placement_keeps_everything_that_is_not_the_shot(self):
+        placed = pipeline._clip_scoped_rewrite(self.prompt, self.answer, self.frozen)
+
+        self.assertIsNotNone(placed)
+        in_prompt = [
+            phrase for phrase in self.frozen
+            if phrase.strip() and phrase in self.prompt
+        ]
+        for phrase in in_prompt:
+            self.assertIn(phrase, placed)
+        self.assertEqual(
+            len(self.FIELD_RE.findall(placed)),
+            len(self.FIELD_RE.findall(self.prompt)),
+        )
+        self.assertEqual(
+            h3_dialogue_blocks(placed), h3_dialogue_blocks(self.prompt),
+        )
+        self.assertIn(self.SPEAKS_RIGHT, placed)
+
+    def test_the_raw_answer_would_have_been_refused_and_the_placed_one_is_not(self):
+        placed = pipeline._clip_scoped_rewrite(self.prompt, self.answer, self.frozen)
+        review = dict(
+            duration_seconds=self.clip.get("_director_duration_sec") or 0.0,
+            subjects=self.clip.get("_director_subjects_on_screen") or [],
+            mode=self.clip.get("_director_h3_prompt_mode") or "ref2va",
+            references=self.clip.get("_director_h3_reference_manifest") or [],
+            frozen=self.frozen,
+        )
+
+        raw_problems = review_h3_revision(self.prompt, self.answer, **review)
+        placed_problems = review_h3_revision(self.prompt, placed, **review)
+
+        # The answer alone looked like a prompt that had dropped the project's text.
+        self.assertGreater(len(raw_problems), 10)
+        self.assertTrue(any("shared text" in problem for problem in raw_problems))
+        # Placed back into its own spans, the same correction is accepted.
+        self.assertEqual(placed_problems, [])
