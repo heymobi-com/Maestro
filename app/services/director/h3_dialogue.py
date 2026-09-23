@@ -4049,7 +4049,16 @@ def validate_h3_prompt_contract(
             rf"(?mi)^\s*{re.escape(field)}\s*:", text,
         ))
         if len(matches) != 1:
-            errors.append(f"expected one {field} field, found {len(matches)}")
+            # Where the duplicates are, so the refusal is actionable: the correction
+            # assistant gets these strings back and a bare count told it nothing.
+            where = ""
+            if len(matches) > 1:
+                lines = ", ".join(
+                    str(text[: match.start()].count("\n") + 1)
+                    for match in matches[:6]
+                )
+                where = f" (lines {lines})"
+            errors.append(f"expected one {field} field, found {len(matches)}{where}")
         elif matches:
             positions.append(matches[0].start())
     if len(positions) == len(expected) and positions != sorted(positions):

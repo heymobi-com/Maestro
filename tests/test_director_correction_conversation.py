@@ -200,6 +200,59 @@ class RevisionEnvelopeTests(unittest.TestCase):
         self.assertIn("which man", parts["analysis"])
         self.assertEqual(parts["prompt"], "")
 
+    def test_decorated_markers_are_still_markers(self):
+        # The refusals measured in a real session -- "expected one overall_soundscape
+        # field, found 3" and "The rewrite has 12 spoken line(s) instead of 3" -- were
+        # answers like these: the markers were written in bold, were not recognized as
+        # markers, and the whole answer (analysis, quoted fields and prompt) was then
+        # validated as ONE prompt.
+        for decorated in (
+            "**ANALYSIS:**",
+            "**ANALYSIS**:",
+            "## ANALYSIS:",
+            "- **ANALYSIS**:",
+            "`ANALYSIS`:",
+        ):
+            parts = _parse_revision_envelope(
+                f"{decorated} the blocking is the problem.\n"
+                "QUESTION: NONE\n"
+                f"FIXED_PROMPT: {FIXED_PROMPT}",
+            )
+            with self.subTest(marker=decorated):
+                self.assertIn("blocking is the problem", parts["analysis"])
+                self.assertEqual(parts["prompt"], FIXED_PROMPT.strip())
+
+    def test_prose_before_the_prompt_is_read_as_the_analysis(self):
+        parts = _parse_revision_envelope(
+            f"The blocking repeats what the previous shot did.\n\n{FIXED_PROMPT}",
+        )
+
+        self.assertIn("repeats what the previous shot", parts["analysis"])
+        self.assertEqual(parts["prompt"], FIXED_PROMPT.strip())
+
+    def test_alternatives_collapse_into_the_first_prompt(self):
+        # "Option A" and "Option B" under one marker put three prompts in one
+        # candidate, which the contract reads as three overall_soundscape fields and
+        # refuses. The first prompt is the one the note asked for.
+        parts = _parse_revision_envelope(
+            "ANALYSIS: X\nQUESTION: NONE\n"
+            f"FIXED_PROMPT: Opcion A:\n{FIXED_PROMPT}\nOpcion B:\n{FIXED_PROMPT}",
+        )
+
+        self.assertEqual(parts["prompt"].count("subject_definitions:"), 1)
+        self.assertEqual(parts["prompt"].count("overall_soundscape:"), 1)
+        self.assertNotIn("Opcion A", parts["prompt"])
+
+    def test_a_duplicate_field_error_names_where_the_duplicates_are(self):
+        # "found 2" alone told the assistant nothing about what to delete.
+        problems = review_h3_revision(FIXED_PROMPT, FIXED_PROMPT * 2)
+
+        self.assertTrue(
+            any("expected one subject_definitions field, found 2 (lines 1," in problem
+                for problem in problems),
+            problems,
+        )
+
 
 class CorrectionConversationWiringTests(unittest.TestCase):
     """The endpoint and the turn must carry the measurement and the turns."""

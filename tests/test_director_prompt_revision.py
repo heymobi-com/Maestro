@@ -142,6 +142,21 @@ class PromptRevisionTests(unittest.TestCase):
         self.assertIn("exactly one [Shot 1] marker", system)
         self.assertEqual(system, pipeline._REVISE_PROMPT_SYSTEM)
 
+    def test_the_assistant_is_told_one_prompt_and_freed_to_rewrite(self):
+        system = pipeline._REVISE_PROMPT_SYSTEM
+
+        # A menu of options, or markdown around the markers, is what produced the
+        # duplicate fields that were refused one attempt after another.
+        self.assertIn("One prompt, not a menu", system)
+        self.assertIn("no bold, no headings, no code fences", system)
+        # Freedom with the wording is what makes a note correctable at all: a
+        # correction that keeps the same direction in different words is refused for
+        # changing almost nothing, and what stays fixed is named next to it, so
+        # "be creative" cannot become a licence to drop a line or a subject.
+        self.assertIn("in your own words", system)
+        self.assertIn("What is fixed:", system)
+        self.assertIn("What is yours:", system)
+
     def test_the_revision_is_not_saved(self):
         self._save([{"index": 0, "video_prompt": "original body"}])
         self._stub_llm("rewritten body")

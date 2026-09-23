@@ -2789,12 +2789,66 @@ be given masculine delivery, wardrobe or features, and the reverse.
 and lighting detail, and every <Picture N> / <Video N> / <Subject N> binding.
 - Keep the shot continuous with its neighbours: same studio, same lighting, same colour \
 palette, same wardrobe, and motion that flows out of the previous shot and into the next.
+
+How to correct:
+- Make the change visible in what the camera, the blocking and the acting DO. Rewording a \
+direction while keeping its content is not a correction, and a rewrite that moves almost \
+nothing is refused: write the direction differently, in your own words, as far as the note \
+requires.
+- What is fixed: the six fields and their order, one [Shot 1], every <d>...</d> line byte \
+for byte, the declared identities and their genders, every <Picture N> / <Video N> / \
+<Subject N> binding, and the restrictions stated in PROJECT CONTEXT. What is yours: the \
+phrasing, the sentence order inside a field, and the acting, camera, lighting and blocking \
+words.
+- One prompt, not a menu. Put a single complete prompt after FIXED_PROMPT: never offer \
+alternatives such as "Option A" and "Option B", never repeat the current prompt, never \
+quote whole fields in ANALYSIS, and write the markers as plain lines -- no bold, no \
+headings, no code fences.
 - No commentary outside the three markers."""
 
 
+# A model writes "FIXED_PROMPT:", "**FIXED_PROMPT:**", "## FIXED_PROMPT:" or
+# "- **FIXED_PROMPT**:" for the same thing. A marker that is not recognized is not "no
+# marker": the whole answer -- analysis, quoted fields and the prompt -- was then read as
+# ONE prompt, and the gate refused it for having five subject_definitions fields, three
+# overall_soundscape fields and twelve spoken lines (measured in the logs of a real
+# session). The decoration is therefore part of the pattern, on BOTH sides of the colon:
+# bold around the colon ("**ANALYSIS:**") and bold around the name ("**ANALYSIS**:") are
+# both common, and only the first one matched an earlier version of this pattern.
 _REVISION_MARKER_RE = re.compile(
-    r"(?mi)^\s*(ANALYSIS|QUESTION|FIXED_PROMPT)\s*:\s*"
+    r"(?mi)^[ \t]*(?:[-*+][ \t]+)?(?:#{1,6}[ \t]*)?[*_`]{0,2}[ \t]*"
+    r"(ANALYSIS|QUESTION|FIXED_PROMPT)[ \t]*[*_`]{0,2}[ \t]*:[ \t]*[*_`]{0,2}[ \t]*"
 )
+
+# The field a compiled prompt opens with, at a line start.
+_PROMPT_FIELD_HEAD_RE = re.compile(
+    r"(?mi)^[ \t]*(?:subject_definitions|integrated_multimodal_description)[ \t]*:"
+)
+
+# A short single line that ends in a colon is a label ("Opcion A:", "Here it is:"),
+# not part of a prompt.
+_LABEL_LINE_RE = re.compile(r"(?s)^[^\n]{0,40}:[ \t]*$")
+
+
+def _first_prompt_only(text: str) -> str:
+    """The first complete prompt when the answer offers alternatives.
+
+    "Option A" and "Option B" under one FIXED_PROMPT marker put three prompts in one
+    candidate, which the contract reads as three overall_soundscape fields and refuses.
+    The first prompt is the one the note asked for; the rest is an offer the editor has
+    no place to show, and their labels are not prompt text either.
+    """
+
+    heads = list(_PROMPT_FIELD_HEAD_RE.finditer(text))
+    if not heads:
+        return text
+    start = heads[0].start()
+    if len(heads) > 1:
+        return text[start: heads[1].start()].rstrip()
+    label = text[:start].strip()
+    if label and _LABEL_LINE_RE.match(label):
+        return text[start:].rstrip()
+    return text
 
 
 def _parse_revision_envelope(text: str) -> dict:
@@ -2810,8 +2864,19 @@ def _parse_revision_envelope(text: str) -> dict:
     matches = list(_REVISION_MARKER_RE.finditer(raw))
     if not matches:
         from services.director.h3_dialogue import looks_like_compiled_h3_prompt
+        head = _PROMPT_FIELD_HEAD_RE.search(raw)
+        if head and looks_like_compiled_h3_prompt(raw[head.start():]):
+            # An answer that explains first and then writes the prompt, without any
+            # marker, used to be read as one prompt: the prose, the quoted fields and
+            # the prompt went into the candidate together and the gate refused it for
+            # having five subject_definitions fields. The prose is the analysis.
+            return {
+                "analysis": raw[: head.start()].strip(),
+                "question": "",
+                "prompt": _first_prompt_only(raw[head.start():].strip()),
+            }
         if looks_like_compiled_h3_prompt(raw):
-            return {"analysis": "", "question": "", "prompt": raw}
+            return {"analysis": "", "question": "", "prompt": _first_prompt_only(raw)}
         return {"analysis": raw, "question": "", "prompt": ""}
     parts = {"analysis": "", "question": "", "prompt": ""}
     for index, match in enumerate(matches):
@@ -2826,6 +2891,7 @@ def _parse_revision_envelope(text: str) -> dict:
             parts["question"] = value
         else:
             parts["prompt"] = value
+    parts["prompt"] = _first_prompt_only(parts["prompt"])
     return parts
 
 
