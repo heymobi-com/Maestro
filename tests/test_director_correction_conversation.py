@@ -303,6 +303,23 @@ class RevisionEnvelopeTests(unittest.TestCase):
         self.assertEqual(parts["prompt"].count("subject_definitions:"), 1)
         self.assertNotIn("Opcion B", parts["prompt"])
 
+    def test_edits_are_read_as_find_and_set_pairs(self):
+        # The cheap answer: point at a sentence and say what it becomes, instead of
+        # re-typing six thousand characters for a two-sentence change.
+        parts = _parse_revision_envelope(
+            "ANALYSIS: two framing statements compete.\n"
+            "EDITS:\n"
+            "1. FIND: By the final beat, the focus tightens on Ricardo's eyes.\n"
+            "   SET: The camera holds a steady medium shot of Ricardo.\n"
+            "FIXED_PROMPT: NONE\n",
+        )
+
+        self.assertEqual(parts["edits"], [{
+            "find": "By the final beat, the focus tightens on Ricardo's eyes.",
+            "set": "The camera holds a steady medium shot of Ricardo.",
+        }])
+        self.assertEqual(parts["prompt"], "")
+
 
 class CorrectionConversationWiringTests(unittest.TestCase):
     """The endpoint and the turn must carry the measurement and the turns."""
@@ -342,6 +359,20 @@ class CorrectionConversationWiringTests(unittest.TestCase):
         self.assertIn("FIXED_PROMPT:", self.pipeline)
         self.assertIn("rejected before the director sees it", self.pipeline)
 
+    def test_the_correction_may_use_a_smaller_model_and_keep_it_loaded(self):
+        # Each correction used to pay for the planning model and for reloading it: the
+        # 26B model is 16.8 GB and the idle timer evicted it after 60 seconds. The
+        # generation paths release the LLM explicitly when they need the VRAM, so the
+        # timer is a safety net and the model is a setting.
+        self.assertIn("director_revision_llm_model_id", self.pipeline)
+        self.assertIn("set_idle_timeout(", self.pipeline)
+        service = open(
+            os.path.join(_APP_DIR, "services", "llm_service.py"), encoding="utf-8",
+        ).read()
+        self.assertIn("_IDLE_TIMEOUT_DEFAULT: float = 600.0", service)
+        self.assertIn("def set_idle_timeout(", service)
+        self.assertIn("MAESTRO_LLM_IDLE_SECONDS", service)
+
     def test_the_assistant_is_required_to_offer_options(self):
         # "The programming is useless" was fair: the envelope had no place for a
         # choice, so a note the prompt cannot answer came back as a bare error.
@@ -366,14 +397,14 @@ class NoOpRewriteTests(unittest.TestCase):
         self.out_dir = self.temp.name
         self.pid = "noop01"
 
-    def _save(self):
+    def _save(self, prompt: str = PROBLEM_PROMPT):
         state = {
             "pipeline_id": self.pid,
             "status": "completed",
             "video_model": "minimax_h3_ref2va_fused_turbo",
             "clips": [{
                 "index": 0,
-                "video_prompt": PROBLEM_PROMPT,
+                "video_prompt": prompt,
                 "_director_duration_sec": 7.29,
                 "_director_h3_prompt_mode": "ref2va",
                 # Dialogue-driven, so the audio-plan finding stays out of this
@@ -491,6 +522,62 @@ class NoOpRewriteTests(unittest.TestCase):
         self.assertEqual(result["errors"], [])
         self.assertEqual(len(result["options"]), 2)
         self.assertIn("no encontró un cambio", result["note"])
+
+    def test_a_local_note_comes_back_as_an_edit_applied_to_the_saved_prompt(self):
+        # Measured cost of the alternative: re-typing the prompt was 1,675 generated
+        # tokens per answer (70-110 seconds with the 26B model in use) and came back
+        # echoed twice, which the contract refused.
+        self._save(FIXED_PROMPT)
+        self._stub([
+            "ANALYSIS: the desk sentence says nothing about the camera yet.\n"
+            "QUESTION: NONE\n"
+            "EDITS:\n"
+            "FIND: Valeria and Ricardo sit facing each other across the desk, "
+            "both in frame.\n"
+            "SET: Valeria and Ricardo sit facing each other across the desk, "
+            "both in frame, the camera easing in slowly.\n"
+            "FIXED_PROMPT: NONE",
+        ])
+
+        result = pipeline.revise_clip_prompt(
+            self.out_dir, self.pid, 0, "ease the camera in",
+        )
+
+        self.assertTrue(result["rewritten"])
+        self.assertEqual(len(result["edits"]), 1)
+        self.assertIn("the camera easing in slowly", result["video_prompt"])
+        # The edit moved one sentence: the fields and the spoken lines are untouched.
+        self.assertEqual(result["video_prompt"].count("subject_definitions:"), 1)
+        self.assertEqual(
+            h3_dialogue_blocks(result["video_prompt"]),
+            h3_dialogue_blocks(FIXED_PROMPT),
+        )
+
+    def test_an_edit_that_does_not_match_the_prompt_is_refused_with_the_reason(self):
+        self._save(FIXED_PROMPT)
+        self._stub([
+            "ANALYSIS: X\nEDITS:\n"
+            "FIND: a sentence the model imagined\n"
+            "SET: something else\n"
+            "FIXED_PROMPT: NONE",
+        ])
+
+        result = pipeline.revise_clip_prompt(self.out_dir, self.pid, 0, "fix it")
+
+        self.assertFalse(result["rewritten"])
+        self.assertIn("is not in the current prompt", result["errors"][0])
+
+    def test_an_ambiguous_edit_is_refused(self):
+        self._save(FIXED_PROMPT)
+        self._stub([
+            "ANALYSIS: X\nEDITS:\nFIND: Valeria\nSET: Ricardo\n"
+            "FIXED_PROMPT: NONE",
+        ])
+
+        result = pipeline.revise_clip_prompt(self.out_dir, self.pid, 0, "fix it")
+
+        self.assertFalse(result["rewritten"])
+        self.assertIn("is ambiguous", result["errors"][0])
 
     def test_a_rewrite_that_edits_the_prompt_is_offered(self):
         self._save()

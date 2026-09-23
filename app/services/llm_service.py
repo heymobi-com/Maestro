@@ -58,9 +58,33 @@ _api_key: str = ""           # API key for OpenAI/Anthropic
 
 # Auto-unload idle timer
 _idle_timer: Optional[threading.Timer] = None
-_idle_timeout: float = 60.0  # seconds before auto-unload
+# Seconds the loaded LLM stays resident while idle. The generation paths release it
+# explicitly before loading a model that needs the VRAM, so this timer is only a safety
+# net -- and at 60 seconds it was not a net but a price: it unloaded a 26B model (16.8 GB
+# to read back from disk) between two questions of the same correction, which is what
+# made "each answer takes so long" for no reason.
+_IDLE_TIMEOUT_DEFAULT: float = 600.0
+_idle_timeout: float = _IDLE_TIMEOUT_DEFAULT
 _idle_generation: int = 0
 _active_uses: int = 0
+
+
+def set_idle_timeout(seconds) -> float:
+    """Override the idle timer (from the service settings, or the environment)."""
+
+    global _idle_timeout
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        return _idle_timeout
+    if value > 0:
+        _idle_timeout = value
+    return _idle_timeout
+
+_IDLE_ENV = os.environ.get("MAESTRO_LLM_IDLE_SECONDS", "").strip()
+if _IDLE_ENV:
+    set_idle_timeout(_IDLE_ENV)
+
 
 # Streaming state — accumulates tokens during generation
 _stream_buffer: str = ""

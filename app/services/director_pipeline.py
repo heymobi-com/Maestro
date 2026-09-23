@@ -2761,7 +2761,7 @@ _REVISE_PROMPT_SYSTEM = """You are the prompt editor for exactly ONE shot of an 
 working in a short conversation with its director. They describe what looks wrong in the \
 rendered clip; you say what in the prompt causes it, and only then rewrite it.
 
-Answer with these four markers and nothing else:
+Answer with these five markers and nothing else:
 
 ANALYSIS: what in the current prompt produces what the director describes. Quote the \
 offending words. Use the MEASUREMENT given to you instead of guessing: it was read from \
@@ -2769,14 +2769,24 @@ the saved shot and names the shots declared, the subjects' positions, the timest
 any contract problem.
 QUESTION: one question, and only when the note is missing an intent you cannot infer. \
 Otherwise write NONE.
+EDITS: the smallest edit that answers the note, one pair of lines per edit and nothing \
+else in this section:
+FIND: a sentence copied EXACTLY from the current prompt, on one line
+SET: what that sentence becomes, on one line
+The FIND text must appear exactly once in the current prompt, character for character, \
+including its punctuation; if you cannot copy it exactly, do not use EDITS. A compiled \
+prompt is several thousand characters long, so re-typing all of it is the slowest and the \
+least reliable way to change two sentences: for a local note, answer with EDITS and write \
+NONE for FIXED_PROMPT.
 OPTIONS: two to four numbered one-line choices of what to do next. Each one is either a \
 change you can make in the prompt or a change that has to happen outside it -- moving \
 the clip's audio window, turning this shot into a non-lip-sync one, splitting the shot, \
 re-cutting the take, re-planning the beat. Always give options when FIXED_PROMPT is \
 NONE, and always give at least one when the note cannot be answered inside the prompt. \
 Never leave the director with nothing to choose.
-FIXED_PROMPT: the complete corrected prompt, or NONE when you asked a question or when \
-the note has to be answered outside the prompt.
+FIXED_PROMPT: the complete corrected prompt, for a change that has to restructure the \
+fields themselves; NONE when you used EDITS, asked a question, or the note has to be \
+answered outside the prompt.
 
 Hard rules for FIXED_PROMPT:
 - Keep the prompt's six fields and their order (subject_definitions, summary, \
@@ -2814,7 +2824,10 @@ headings, no code fences.
 - A prompt you hand back unchanged answers nothing. If a note cannot be answered by \
 editing this prompt, say so in ANALYSIS, write NONE for FIXED_PROMPT and put the ways \
 forward in OPTIONS: an error with no options is not an answer.
-- No commentary outside the four markers."""
+- Prefer EDITS over re-typing: the saved prompt is thousands of characters long and the \
+editor applies EDITS to it, so a local note should move a few words, not the whole text. \
+EDITS are also checked word for word, which is what keeps the spoken lines intact.
+- No commentary outside the five markers."""
 
 
 # A model writes "FIXED_PROMPT:", "**FIXED_PROMPT:**", "## FIXED_PROMPT:" or
@@ -2827,8 +2840,72 @@ forward in OPTIONS: an error with no options is not an answer.
 # both common, and only the first one matched an earlier version of this pattern.
 _REVISION_MARKER_RE = re.compile(
     r"(?mi)^[ \t]*(?:[-*+][ \t]+)?(?:#{1,6}[ \t]*)?[*_`]{0,2}[ \t]*"
-    r"(ANALYSIS|QUESTION|OPTIONS|FIXED_PROMPT)[ \t]*[*_`]{0,2}[ \t]*:[ \t]*[*_`]{0,2}[ \t]*"
+    r"(ANALYSIS|QUESTION|EDITS|OPTIONS|FIXED_PROMPT)[ \t]*[*_`]{0,2}[ \t]*:[ \t]*[*_`]{0,2}[ \t]*"
 )
+
+# One edit is a FIND line followed by a SET line, so a sentence full of colons and commas
+# never has to be escaped into a delimited one-liner.
+_EDIT_FIND_RE = re.compile(r"(?i)^[ \t]*(?:\d+[.)][ \t]*)?(?:[-*+][ \t]*)?FIND[ \t]*:[ \t]*(.*)$")
+_EDIT_SET_RE = re.compile(
+    r"(?i)^[ \t]*(?:\d+[.)][ \t]*)?(?:[-*+][ \t]*)?(?:SET|REPLACE(?:[ \t]+WITH)?|TO)[ \t]*:[ \t]*(.*)$"
+)
+
+
+def _parse_revision_edits(value: str) -> list[dict]:
+    """The FIND/SET pairs the assistant asked for, in order."""
+
+    edits: list[dict] = []
+    find: str | None = None
+    replacement: list[str] = []
+    for line in str(value or "").splitlines():
+        match = _EDIT_FIND_RE.match(line)
+        if match:
+            if find is not None:
+                edits.append({"find": find, "set": " ".join(replacement).strip()})
+            find = match.group(1).strip()
+            replacement = []
+            continue
+        setter = _EDIT_SET_RE.match(line)
+        if setter and find is not None:
+            replacement.append(setter.group(1).strip())
+            continue
+        if find is not None and line.strip():
+            replacement.append(line.strip())
+    if find is not None:
+        edits.append({"find": find, "set": " ".join(replacement).strip()})
+    return [edit for edit in edits if edit["find"]]
+
+
+def _apply_revision_edits(prompt: str, edits: list[dict] | None) -> tuple[str, list[str]]:
+    """The saved prompt with the assistant's edits applied, and any edit that failed.
+
+    The alternative was the assistant re-typing six thousand characters to change two
+    sentences. Measured: that cost 1,675 generated tokens per answer (70-110 seconds with
+    the 26B model in use) and came back with the prompt echoed twice, which the contract
+    then refused -- "expected one overall_soundscape field, found 2 (lines 10, 50)".
+    Applying a small edit to the text on disk is faster and cannot echo anything.
+    """
+
+    text = str(prompt or "")
+    problems: list[str] = []
+    for edit in edits or []:
+        find = str(edit.get("find") or "")
+        if not find:
+            continue
+        occurrences = text.count(find)
+        if occurrences == 0:
+            problems.append(
+                "an edit's FIND text is not in the current prompt, character for "
+                f"character, so it could not be applied: {find[:140]!r}"
+            )
+        elif occurrences > 1:
+            problems.append(
+                f"an edit's FIND text appears {occurrences} times in the prompt, so it "
+                f"is ambiguous: {find[:140]!r}"
+            )
+        else:
+            text = text.replace(find, str(edit.get("set") or ""), 1)
+    return text, problems
 
 
 def _parse_revision_options(value: str) -> list[str]:
@@ -2944,6 +3021,7 @@ def _parse_revision_envelope(text: str, current: str = "") -> dict:
             return {
                 "analysis": raw[: head.start()].strip(),
                 "question": "",
+                "edits": [],
                 "options": [],
                 "prompt": _first_prompt_only(raw[head.start():].strip(), current),
             }
@@ -2951,11 +3029,12 @@ def _parse_revision_envelope(text: str, current: str = "") -> dict:
             return {
                 "analysis": "",
                 "question": "",
+                "edits": [],
                 "options": [],
                 "prompt": _first_prompt_only(raw, current),
             }
-        return {"analysis": raw, "question": "", "options": [], "prompt": ""}
-    parts = {"analysis": "", "question": "", "options": [], "prompt": ""}
+        return {"analysis": raw, "question": "", "edits": [], "options": [], "prompt": ""}
+    parts = {"analysis": "", "question": "", "edits": [], "options": [], "prompt": ""}
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
         value = raw[match.end():end].strip()
@@ -2966,6 +3045,8 @@ def _parse_revision_envelope(text: str, current: str = "") -> dict:
             parts["analysis"] = value
         elif key == "QUESTION":
             parts["question"] = value
+        elif key == "EDITS":
+            parts["edits"] = _parse_revision_edits(value)
         elif key == "OPTIONS":
             parts["options"] = _parse_revision_options(value)
         else:
@@ -3042,7 +3123,9 @@ def _revise_problem_nudge(problems: list[str], expected_lines: list[str] | None 
         "byte for byte, including its [Language] tag. If the note cannot be "
         "satisfied by editing this prompt, write NONE for FIXED_PROMPT, name in "
         "ANALYSIS what outside the prompt blocks it, and put the ways forward in "
-        "OPTIONS: handing the prompt back unchanged answers nothing."
+        "OPTIONS: handing the prompt back unchanged answers nothing. An EDITS line "
+        "whose FIND is not copied character for character from the current prompt "
+        "cannot be applied."
     )
 
 
@@ -3189,14 +3272,30 @@ def revise_clip_prompt(
     from services import llm_service
     from services.studio_enhancement import current_settings
 
-    # Every other Director pass loads the LLM before calling it; this one
-    # called enhance_prompt straight away and died with "LLM not loaded. Call
-    # load_model() first." whenever nothing had been planned in that session.
-    _ensure_llm_loaded(snapshot)
-
     services = current_settings(
         _wgp.server_config.get("services", {}) if _wgp else {}
     )
+    # Two settings exist for this pass alone, because a correction is a small edit and
+    # making it pay for the planning model is what made each answer slow: a smaller model
+    # may be used here, and the idle timer that unloaded the resident model between two
+    # questions of the same correction is now configurable (the generation paths release
+    # the LLM explicitly when they need the VRAM, so the timer is only a safety net).
+    revision_params = dict(snapshot or {})
+    revision_model = str(
+        services.get("director_revision_llm_model_id") or ""
+    ).strip()
+    if revision_model:
+        revision_params["llm_model_id"] = revision_model
+        print(
+            f"[Pipeline {pid}] Shot {clip_index + 1}: correcting with "
+            f"{revision_model}"
+        )
+    llm_service.set_idle_timeout(services.get("llm_idle_timeout_seconds"))
+    # Every other Director pass loads the LLM before calling it; this one
+    # called enhance_prompt straight away and died with "LLM not loaded. Call
+    # load_model() first." whenever nothing had been planned in that session.
+    _ensure_llm_loaded(revision_params)
+
     nsfw = bool(services.get("nsfw_mode"))
 
     def _ask(extra: str = "") -> dict:
@@ -3224,6 +3323,7 @@ def revise_clip_prompt(
         "clip_index": clip_index,
         "analysis": parts["analysis"],
         "question": parts["question"],
+        "edits": list(parts["edits"]),
         "options": list(parts["options"]),
         "note": "",
         "diagnosis": diagnosis,
@@ -3231,7 +3331,27 @@ def revise_clip_prompt(
         "errors": [],
         "video_prompt": "",
     }
-    if not parts["prompt"]:
+
+    def _proposal(answer: dict) -> tuple[str, list[str]]:
+        """The prompt this answer proposes, and why its EDITS could not be applied.
+
+        A local note comes back as EDITS: the assistant points at a sentence and says
+        what it becomes, instead of re-typing six thousand characters. Measured with
+        the 26B model in use, re-typing cost 1,675 generated tokens per answer (70-110
+        seconds) and the prompt came back echoed twice, which the contract refused --
+        "expected one overall_soundscape field, found 2 (lines 10, 50)". The edits are
+        applied to the saved prompt here, and the result still passes every check
+        below, so nothing is trusted on the assistant's word.
+        """
+
+        if answer["prompt"]:
+            return str(answer["prompt"]), []
+        if answer["edits"]:
+            return _apply_revision_edits(prompt, answer["edits"])
+        return "", []
+
+    candidate, problems = _proposal(parts)
+    if not candidate and not problems:
         if parts["question"]:
             print(
                 f"[Pipeline {pid}] Shot {clip_index + 1}: the assistant asked "
@@ -3250,8 +3370,8 @@ def revise_clip_prompt(
                 f"{len(parts['options'])} option(s) instead of a rewrite."
             )
         else:
-            # An answer with no rewrite, no question and no options is a dead end:
-            # it used to look like a completed turn with nothing to show for it.
+            # An answer with no rewrite, no edits, no question and no options is a
+            # dead end: it used to look like a completed turn with nothing to show.
             result["errors"] = [
                 "The assistant explained the prompt without rewriting it, so "
                 "nothing changed. Repeat the note and name what should change.",
@@ -3262,7 +3382,7 @@ def revise_clip_prompt(
             )
         return result
 
-    def _candidate_problems(candidate: dict) -> list[str]:
+    def _candidate_problems(text: str) -> list[str]:
         """Why a candidate cannot be offered as it stands.
 
         Two ways to fail: it leaves the prompt almost intact, so it does not
@@ -3270,7 +3390,6 @@ def revise_clip_prompt(
         spoken lines, which the assistant is told to copy byte for byte.
         """
 
-        text = str(candidate.get("prompt") or "")
         moved = _changed_characters(prompt, text) if text else 0
         moved_words = _changed_words(prompt, text) if text else 0
         if moved < _NO_OP_CHANGE_CHARS and moved_words < _NO_OP_CHANGE_WORDS:
@@ -3289,18 +3408,22 @@ def revise_clip_prompt(
             context_anchors=_h3_plan_context_anchors(clip),
         )
 
-    problems = _candidate_problems(parts)
+    if not problems:
+        problems = _candidate_problems(candidate)
     if problems:
         # One more attempt, told exactly what was wrong with the first.
         second = _ask(_revise_problem_nudge(problems, h3_dialogue_blocks(prompt)))
-        if second["prompt"]:
-            parts = second
+        retry_text, edit_problems = _proposal(second)
         # Whichever answer is the latest, its explanation is the one worth showing.
-        latest = second or parts
+        latest = second
+        if edit_problems:
+            problems = edit_problems
+        elif retry_text:
+            candidate = retry_text
+            parts = second
+            problems = _candidate_problems(candidate)
         if not result["options"]:
             result["options"] = list(latest["options"])
-        if parts["prompt"]:
-            problems = _candidate_problems(parts)
         if problems and _only_no_op(problems):
             # The assistant handed the prompt back, or moved a comma. A no-op is not
             # a broken answer when it comes with the reason and the choices: measured
@@ -3348,11 +3471,13 @@ def revise_clip_prompt(
     # The spoken lines, the single shot and the contract are checked here rather
     # than requested in the system prompt: a rule in a prompt is a request, and
     # this is what decides whether a rewrite reaches the editor.
+    parts["prompt"] = candidate
     result["rewritten"] = True
     result["video_prompt"] = parts["prompt"]
     print(
         f"[Pipeline {pid}] Shot {clip_index + 1}: prompt revised from a director "
-        f"note ({len(prompt)} -> {len(parts['prompt'])} chars)."
+        f"note ({len(prompt)} -> {len(parts['prompt'])} chars, "
+        f"{len(result['edits'])} edit(s))."
     )
     return result
 
