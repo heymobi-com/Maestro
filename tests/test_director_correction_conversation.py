@@ -271,6 +271,38 @@ class RevisionEnvelopeTests(unittest.TestCase):
         self.assertEqual(parts["prompt"], "")
         self.assertEqual(parts["question"], "")
 
+    def test_the_prompt_is_kept_when_the_answer_repeats_its_tail(self):
+        # The refusal measured in the logs right after the marker fix: "expected one
+        # overall_soundscape field, found 2 (lines 10, 50)". The model wrote the whole
+        # prompt and then repeated the last fields, which is an echo of what it had
+        # written, not a second prompt.
+        echoed = (
+            FIXED_PROMPT
+            + "\noverall_soundscape: Natural ambience.\n\nnon_diegetic_music: N/A\n"
+        )
+
+        parts = _parse_revision_envelope(f"ANALYSIS: X\nFIXED_PROMPT: {echoed}")
+
+        self.assertEqual(parts["prompt"].count("overall_soundscape:"), 1)
+        self.assertEqual(parts["prompt"].count("non_diegetic_music:"), 1)
+        self.assertEqual(parts["prompt"], FIXED_PROMPT.strip())
+
+    def test_the_candidate_that_differs_is_the_rewrite(self):
+        # Two prompts in one answer are a menu, and the rewrite is not the first one by
+        # default: it is the one that differs from what is on disk.
+        revised = FIXED_PROMPT.replace(
+            "Natural ambience", "Room tone with a distant hum",
+        )
+
+        parts = _parse_revision_envelope(
+            f"ANALYSIS: X\nFIXED_PROMPT: {FIXED_PROMPT}\nOpcion B:\n{revised}",
+            FIXED_PROMPT,
+        )
+
+        self.assertIn("Room tone with a distant hum", parts["prompt"])
+        self.assertEqual(parts["prompt"].count("subject_definitions:"), 1)
+        self.assertNotIn("Opcion B", parts["prompt"])
+
 
 class CorrectionConversationWiringTests(unittest.TestCase):
     """The endpoint and the turn must carry the measurement and the turns."""

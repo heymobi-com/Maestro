@@ -2851,39 +2851,84 @@ _PROMPT_FIELD_HEAD_RE = re.compile(
     r"(?mi)^[ \t]*(?:subject_definitions|integrated_multimodal_description)[ \t]*:"
 )
 
+# Every field a compiled prompt is made of, for spotting a second copy of it.
+_H3_FIELD_HEAD_RE = re.compile(
+    r"(?mi)^[ \t]*(subject_definitions|summary|retention_analysis|detailed_description|"
+    r"integrated_multimodal_description|overall_soundscape|non_diegetic_music)[ \t]*:"
+)
+
 # A short single line that ends in a colon is a label ("Opcion A:", "Here it is:"),
 # not part of a prompt.
 _LABEL_LINE_RE = re.compile(r"(?s)^[^\n]{0,40}:[ \t]*$")
 
 
-def _first_prompt_only(text: str) -> str:
-    """The first complete prompt when the answer offers alternatives.
+def _first_copy_only(text: str) -> str:
+    """One prompt, cut where a field starts repeating.
 
-    "Option A" and "Option B" under one FIXED_PROMPT marker put three prompts in one
-    candidate, which the contract reads as three overall_soundscape fields and refuses.
-    The first prompt is the one the note asked for; the rest is an offer the editor has
-    no place to show, and their labels are not prompt text either.
+    A valid prompt declares each field once, so the second "overall_soundscape:" is
+    the start of a repeated copy. Measured in the logs of a real session:
+    "expected one overall_soundscape field, found 2 (lines 10, 50)", where line 10 is
+    the real field and line 50 the model repeating the tail of what it had just
+    written. Truncating there keeps the complete prompt and drops the echo.
     """
+
+    seen: set[str] = set()
+    for match in _H3_FIELD_HEAD_RE.finditer(text):
+        name = match.group(1).lower()
+        if name in seen:
+            text = text[: match.start()].rstrip()
+            break
+        seen.add(name)
+    lines = text.rstrip().splitlines()
+    while lines and _LABEL_LINE_RE.match(lines[-1].strip()):
+        lines.pop()
+    return "\n".join(lines).rstrip()
+
+
+def _prompt_blocks(text: str) -> list[str]:
+    """The candidate prompts in one answer, in the order they were written."""
 
     heads = list(_PROMPT_FIELD_HEAD_RE.finditer(text))
     if not heads:
+        return [_first_copy_only(text)] if text.strip() else []
+    return [
+        _first_copy_only(text[head.start(): (
+            heads[index + 1].start() if index + 1 < len(heads) else len(text)
+        )])
+        for index, head in enumerate(heads)
+    ]
+
+
+def _first_prompt_only(text: str, current: str = "") -> str:
+    """The one prompt the answer actually proposes.
+
+    Answers arrive with more than one: "Option A" and "Option B" under a single marker,
+    or the prompt followed by a second copy of its tail fields. Neither is a reason to
+    refuse the turn, and neither should be guessed at -- the prompt that differs from the
+    current one is the rewrite, and a repeat of the same text is no rewrite at all.
+    """
+
+    blocks = _prompt_blocks(text)
+    if not blocks:
         return text
-    start = heads[0].start()
-    if len(heads) > 1:
-        return text[start: heads[1].start()].rstrip()
-    label = text[:start].strip()
-    if label and _LABEL_LINE_RE.match(label):
-        return text[start:].rstrip()
-    return text
+    if len(blocks) > 1 and current:
+        scored = [(_changed_words(current, block), block) for block in blocks]
+        best = max(score for score, _ in scored)
+        if best > 0:
+            return next(block for score, block in scored if score == best)
+    return blocks[0]
 
 
-def _parse_revision_envelope(text: str) -> dict:
-    """Split the assistant's answer into its analysis, question and prompt.
+def _parse_revision_envelope(text: str, current: str = "") -> dict:
+    """Split the assistant's answer into its analysis, choices, question and prompt.
 
     Markers rather than JSON, so a two-thousand-character Context-IR prompt never
     has to be escaped into a JSON string. An answer with no markers is read as the
     analysis alone -- unless it already is a compiled prompt, which is what the
     older single-shot revision returned; that still lands in the editor.
+
+    ``current`` is the prompt being corrected, and it is what tells two candidates
+    apart: the rewrite is the one that differs, not the first or the last.
     """
 
     raw = str(text or "").strip()
@@ -2900,14 +2945,14 @@ def _parse_revision_envelope(text: str) -> dict:
                 "analysis": raw[: head.start()].strip(),
                 "question": "",
                 "options": [],
-                "prompt": _first_prompt_only(raw[head.start():].strip()),
+                "prompt": _first_prompt_only(raw[head.start():].strip(), current),
             }
         if looks_like_compiled_h3_prompt(raw):
             return {
                 "analysis": "",
                 "question": "",
                 "options": [],
-                "prompt": _first_prompt_only(raw),
+                "prompt": _first_prompt_only(raw, current),
             }
         return {"analysis": raw, "question": "", "options": [], "prompt": ""}
     parts = {"analysis": "", "question": "", "options": [], "prompt": ""}
@@ -2925,7 +2970,7 @@ def _parse_revision_envelope(text: str) -> dict:
             parts["options"] = _parse_revision_options(value)
         else:
             parts["prompt"] = value
-    parts["prompt"] = _first_prompt_only(parts["prompt"])
+    parts["prompt"] = _first_prompt_only(parts["prompt"], current)
     return parts
 
 
@@ -3171,7 +3216,7 @@ def revise_clip_prompt(
         answer = str(answer or "").strip()
         if not answer:
             raise ValueError("The model returned no answer; try again.")
-        return _parse_revision_envelope(answer)
+        return _parse_revision_envelope(answer, prompt)
 
     parts = _ask()
 

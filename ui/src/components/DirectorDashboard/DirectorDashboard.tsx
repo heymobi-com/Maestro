@@ -627,23 +627,23 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
               before rewriting. A rewrite reaches the editor only when it keeps
               every spoken line and carries a single shot. */}
           <div className="mt-1.5 rounded border border-border bg-bg-tertiary/60 p-1.5">
-            <div className="flex items-center justify-between mb-0.5">
-              <span className="text-[8px] text-text-muted uppercase tracking-wider">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-[11px] text-text-muted uppercase tracking-wider">
                 Correct this shot
               </span>
               {fixTurns.length > 0 && (
                 <button
                   type="button"
                   onClick={() => { setFixTurns([]); setFixAnswer(null); setFixError('') }}
-                  className="text-[8px] text-text-muted hover:text-text-primary transition-colors">
+                  className="text-[11px] text-text-muted hover:text-text-primary transition-colors">
                   Start over
                 </button>
               )}
             </div>
             {fixTurns.length > 0 && (
-              <div className="mb-1 max-h-28 space-y-0.5 overflow-y-auto">
+              <div className="mb-1 max-h-40 space-y-1 overflow-y-auto">
                 {fixTurns.map((turn, i) => (
-                  <p key={i} className={`text-[9px] ${turn.role === 'director' ? 'text-text-secondary' : 'text-accent-blue/90'}`}>
+                  <p key={i} className={`text-[12px] leading-snug ${turn.role === 'director' ? 'text-text-secondary' : 'text-accent-blue/90'}`}>
                     <span className="text-text-muted">{turn.role === 'director' ? 'You: ' : 'AI: '}</span>
                     {turn.text}
                   </p>
@@ -654,37 +654,37 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
               value={fixNote}
               onChange={e => setFixNote(e.target.value)}
               placeholder="What is wrong? e.g. the man appears twice; they should sit facing each other"
-              className="w-full bg-bg-tertiary border border-border rounded px-1.5 py-1 text-[10px] text-text-primary resize-none focus:outline-none focus:border-accent-blue"
+              className="w-full bg-bg-tertiary border border-border rounded px-2 py-1.5 text-[13px] text-text-primary resize-none focus:outline-none focus:border-accent-blue"
               rows={2}
               disabled={fixing}
             />
-            <div className="flex items-center gap-1.5 mt-1">
+            <div className="flex items-center gap-2 mt-1.5">
               <button
                 onClick={runFixWithAi}
                 disabled={fixing || !fixNote.trim() || busy}
-                className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] bg-accent-blue/15 text-accent-blue hover:bg-accent-blue/25 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                className="flex items-center gap-1 px-2 py-1 rounded text-[12px] bg-accent-blue/15 text-accent-blue hover:bg-accent-blue/25 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 title="The assistant reads the saved shot, says what causes the problem, asks when the note is missing an intent, and rewrites only what survives the checks">
-                <Sparkles size={9} />
+                <Sparkles size={12} />
                 {fixing ? 'Reading shot…' : fixTurns.length > 0 ? 'Send' : 'Fix with AI'}
               </button>
               {fixing && (
-                <span className="text-[9px] text-text-muted">Reading shot {clip.index + 1}…</span>
+                <span className="text-[12px] text-text-muted">Reading shot {clip.index + 1}…</span>
               )}
             </div>
             {!!fixAnswer?.diagnosis?.findings?.length && (
-              <details className="mt-1">
-                <summary className="text-[8px] text-text-muted cursor-pointer">
+              <details className="mt-1.5">
+                <summary className="text-[12px] text-text-muted cursor-pointer">
                   What the measurement found
                 </summary>
                 <ul className="mt-1 space-y-0.5">
                   {fixAnswer.diagnosis.findings.map((finding, i) => (
-                    <li key={i} className="text-[9px] text-text-muted">· {finding}</li>
+                    <li key={i} className="text-[12px] leading-snug text-text-muted">· {finding}</li>
                   ))}
                 </ul>
               </details>
             )}
             {fixAnswer?.question && (
-              <p className="mt-1 rounded border border-accent-blue/30 bg-bg-tertiary p-1 text-[9px] text-accent-blue">
+              <p className="mt-1.5 rounded border border-accent-blue/30 bg-bg-tertiary p-1.5 text-[13px] leading-snug text-accent-blue">
                 {fixAnswer.question}
               </p>
             )}
@@ -692,41 +692,41 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                 cannot be answered inside the prompt has to come back as something
                 the director can pick and send. */}
             {!!fixAnswer?.options?.length && (
-              <div className="mt-1 rounded border border-accent-blue/30 bg-bg-tertiary p-1">
-                <p className="text-[9px] text-accent-blue">Pick one and send it as the next note:</p>
-                <div className="mt-0.5 flex flex-col gap-0.5">
+              <div className="mt-1.5 rounded border border-accent-blue/30 bg-bg-tertiary p-1.5">
+                <p className="text-[12px] text-accent-blue">Pick one and send it as the next note:</p>
+                <div className="mt-1 flex flex-col gap-1">
                   {fixAnswer.options.map((option, i) => (
                     <button
                       key={i}
                       type="button"
                       onClick={() => setFixNote(option)}
-                      className="text-left rounded px-1 py-0.5 text-[9px] text-accent-blue/90 hover:bg-accent-blue/15 transition-colors"
+                      className="text-left rounded px-1.5 py-1 text-[13px] leading-snug text-accent-blue/90 hover:bg-accent-blue/15 transition-colors"
                     >{i + 1}. {option}</button>
                   ))}
                 </div>
               </div>
             )}
             {fixAnswer?.note && (
-              <p className="mt-1 text-[9px] text-text-muted">{fixAnswer.note}</p>
+              <p className="mt-1.5 text-[12px] leading-snug text-text-muted">{fixAnswer.note}</p>
             )}
             {!!fixAnswer?.errors?.length && (
-              <div className="mt-1 rounded border border-indicator-warning/40 bg-bg-tertiary p-1">
-                <p className="text-[9px] text-indicator-warning">
+              <div className="mt-1.5 rounded border border-indicator-warning/40 bg-bg-tertiary p-1.5">
+                <p className="text-[12px] text-indicator-warning">
                   The rewrite was refused, so the prompt is unchanged:
                 </p>
-                <ul className="mt-0.5 space-y-0.5">
+                <ul className="mt-1 space-y-0.5">
                   {fixAnswer.errors.map((problem, i) => (
-                    <li key={i} className="text-[9px] text-indicator-warning/90">· {problem}</li>
+                    <li key={i} className="text-[12px] leading-snug text-indicator-warning/90">· {problem}</li>
                   ))}
                 </ul>
               </div>
             )}
             {fixAnswer?.rewritten && (
-              <p className="mt-1 text-[9px] text-indicator-success">
+              <p className="mt-1.5 text-[12px] text-indicator-success">
                 The rewrite is in the editor above — review it, then save.
               </p>
             )}
-            {fixError && <p role="alert" className="mt-1 text-[9px] text-indicator-warning">{fixError}</p>}
+            {fixError && <p role="alert" className="mt-1.5 text-[12px] text-indicator-warning">{fixError}</p>}
           </div>
 
           {/* The prompt, in a window that can be moved and resized. Kept in
@@ -744,9 +744,9 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
               search
               footer={<>
                 <button onClick={() => setShowPromptWindow(false)}
-                  className="px-2 py-1 rounded text-[10px] text-text-muted hover:text-text-primary transition-colors">Close</button>
+                  className="px-2 py-1 rounded text-[12px] text-text-muted hover:text-text-primary transition-colors">Close</button>
                 <button onClick={saveVideoPrompt} disabled={savingPrompt}
-                  className="px-2 py-1 rounded text-[10px] bg-accent-blue/15 text-accent-blue hover:bg-accent-blue/25 transition-colors disabled:opacity-40">
+                  className="px-2 py-1 rounded text-[12px] bg-accent-blue/15 text-accent-blue hover:bg-accent-blue/25 transition-colors disabled:opacity-40">
                   {savingPrompt ? 'Saving…' : 'Save prompt'}
                 </button>
               </>}
@@ -765,7 +765,7 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                 <div className="flex-1 min-h-0 overflow-auto space-y-2">
                   {editWindowPrompts.map((wp, wi) => (
                     <div key={wi}>
-                      <div className="text-[10px] text-text-muted mb-0.5">Window {wi + 1}</div>
+                      <div className="text-[12px] text-text-muted mb-1">Window {wi + 1}</div>
                       <textarea
                         value={wp}
                         onChange={e => {
@@ -786,12 +786,12 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                   ariaLabel="Text of the video prompt"
                 />
               )}
-              {saveError && <p role="alert" className="mt-1.5 text-[10px] text-indicator-warning shrink-0">{saveError}</p>}
+              {saveError && <p role="alert" className="mt-1.5 text-[12px] text-indicator-warning shrink-0">{saveError}</p>}
 
               {/* The assistant belongs in this window too: a compiled prompt is read
                   and corrected here, so asking must not mean closing the window. */}
               <div className="shrink-0 mt-1.5 border-t border-border pt-1.5 flex items-center gap-2 flex-wrap">
-                <span className="text-[10px] text-text-muted shrink-0">Asistente IA</span>
+                <span className="text-[12px] text-text-muted shrink-0">Asistente IA</span>
                 <input
                   value={fixNote}
                   onChange={e => setFixNote(e.target.value)}
@@ -802,25 +802,25 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                   }}
                   placeholder="Qué corregir… (ej. «la boca no se mueve en la línea de Valeria»)"
                   aria-label="Nota para el asistente"
-                  className="flex-1 min-w-[200px] bg-bg-tertiary border border-border rounded px-2 py-1 text-[11px] text-text-primary focus:outline-none focus:border-accent-blue"
+                  className="flex-1 min-w-[200px] bg-bg-tertiary border border-border rounded px-2 py-1.5 text-[13px] text-text-primary focus:outline-none focus:border-accent-blue"
                 />
                 <button
                   onClick={runFixWithAi}
                   disabled={fixing || !fixNote.trim()}
-                  className="px-2 py-1 rounded text-[10px] bg-accent-blue/15 text-accent-blue hover:bg-accent-blue/25 transition-colors disabled:opacity-40"
+                  className="px-2 py-1 rounded text-[12px] bg-accent-blue/15 text-accent-blue hover:bg-accent-blue/25 transition-colors disabled:opacity-40"
                 >{fixing ? 'Consultando…' : 'Corregir con IA'}</button>
                 {proposalPrompt && (
                   <button
                     onClick={() => setPromptView(promptView === 'diff' ? 'editor' : 'diff')}
-                    className="px-2 py-1 rounded text-[10px] text-text-muted hover:text-text-primary transition-colors"
+                    className="px-2 py-1 rounded text-[12px] text-text-muted hover:text-text-primary transition-colors"
                   >{promptView === 'diff' ? 'Ver editor' : 'Ver comparación'}</button>
                 )}
               </div>
-              {fixError && <p role="alert" className="text-[10px] text-indicator-warning shrink-0">{fixError}</p>}
+              {fixError && <p role="alert" className="text-[12px] text-indicator-warning shrink-0">{fixError}</p>}
               {/* A refusal carries no proposal, so the window has to say why: an
                   answer that changes nothing used to look like nothing happened. */}
               {fixAnswer && !proposalPrompt && (
-                <p className="text-[10px] text-text-muted shrink-0">
+                <p className="text-[13px] leading-snug text-text-muted shrink-0">
                   {fixAnswer.question
                     ? `El asistente pregunta: ${fixAnswer.question}`
                     : fixAnswer.note
@@ -832,27 +832,27 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
               )}
               {!!fixAnswer?.options?.length && (
                 <div className="shrink-0 flex items-center gap-1.5 flex-wrap">
-                  <span className="text-[10px] text-text-muted shrink-0">Opciones:</span>
+                  <span className="text-[12px] text-text-muted shrink-0">Opciones:</span>
                   {fixAnswer.options.map((option, i) => (
                     <button
                       key={i}
                       type="button"
                       onClick={() => setFixNote(option)}
                       title="Usar como nota"
-                      className="max-w-full text-left px-2 py-1 rounded text-[10px] bg-accent-blue/10 text-accent-blue hover:bg-accent-blue/25 transition-colors"
+                      className="max-w-full text-left px-2 py-1 rounded text-[13px] leading-snug bg-accent-blue/10 text-accent-blue hover:bg-accent-blue/25 transition-colors"
                     >{i + 1}. {option}</button>
                   ))}
                 </div>
               )}
               {!!fixAnswer?.diagnosis?.findings?.length && (
-                <ul className="text-[10px] text-text-muted shrink-0 space-y-0.5 max-h-24 overflow-auto">
+                <ul className="text-[12px] leading-snug text-text-muted shrink-0 space-y-0.5 max-h-32 overflow-auto">
                   {fixAnswer.diagnosis.findings.slice(0, 4).map((finding, i) => (
                     <li key={i}>• {finding}</li>
                   ))}
                 </ul>
               )}
               {proposalPrompt && promptView === 'editor' && (
-                <p className="text-[10px] text-text-muted shrink-0">Hay una propuesta esperando: pulsa «Ver comparación».</p>
+                <p className="text-[12px] text-text-muted shrink-0">Hay una propuesta esperando: pulsa «Ver comparación».</p>
               )}
             </FloatingPanel>
           )}

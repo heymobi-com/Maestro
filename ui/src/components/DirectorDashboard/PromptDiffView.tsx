@@ -69,8 +69,8 @@ export function PromptDiffView({
     <div
       className={
         side === 'left'
-          ? 'flex-1 min-w-0 px-2 py-1.5 border-r border-border whitespace-pre-wrap break-words leading-relaxed text-text-primary'
-          : 'flex-1 min-w-0 px-2 py-1.5 whitespace-pre-wrap break-words leading-relaxed text-text-primary'
+          ? 'flex-1 min-w-0 px-2 py-1.5 border-r border-border whitespace-pre-wrap break-words text-[13px] leading-relaxed text-text-primary'
+          : 'flex-1 min-w-0 px-2 py-1.5 whitespace-pre-wrap break-words text-[13px] leading-relaxed text-text-primary'
       }
     >
       {region.truncatedBefore && GAP}
@@ -82,7 +82,7 @@ export function PromptDiffView({
   return (
     <div className="flex-1 min-h-0 flex flex-col gap-1.5">
       <div className="shrink-0 flex items-center gap-2 flex-wrap">
-        <span className="text-[10px] text-text-muted">
+        <span className="text-[12px] leading-snug text-text-muted">
           {diff.changed
             ? `${diff.changed} cambio(s) · ${diff.regions.length || 1} lugar(es) · `
               + `+${diff.added} / −${diff.removed} caracteres`
@@ -91,34 +91,34 @@ export function PromptDiffView({
         <div className="ml-auto flex items-center gap-2">
           <button
             onClick={() => setShowAll(value => !value)}
-            className="px-2 py-1 rounded text-[10px] text-text-muted hover:text-text-primary transition-colors"
+            className="px-2 py-1 rounded text-[12px] text-text-muted hover:text-text-primary transition-colors"
           >{showAll ? 'Solo cambios' : 'Todo el prompt'}</button>
           <button
             onClick={onBack}
-            className="px-2 py-1 rounded text-[10px] text-text-muted hover:text-text-primary transition-colors"
+            className="px-2 py-1 rounded text-[12px] text-text-muted hover:text-text-primary transition-colors"
           >Volver al editor</button>
           {canApply ? (
             <button
               onClick={onApply}
               disabled={applied || !diff.changed}
-              className="px-2 py-1 rounded text-[10px] bg-accent-blue/15 text-accent-blue hover:bg-accent-blue/25 transition-colors disabled:opacity-40"
+              className="px-2 py-1 rounded text-[12px] bg-accent-blue/15 text-accent-blue hover:bg-accent-blue/25 transition-colors disabled:opacity-40"
             >{applied ? 'Aplicado' : 'Aplicar al editor'}</button>
           ) : (
-            <span className="text-[10px] text-text-muted">{note}</span>
+            <span className="text-[12px] text-text-muted">{note}</span>
           )}
         </div>
       </div>
 
       <div className="flex-1 min-h-0 flex flex-col rounded border border-border bg-bg-tertiary/40">
-        <div className="shrink-0 flex border-b border-border text-[10px] text-text-muted">
-          <div className="flex-1 min-w-0 px-2 py-0.5 border-r border-border">Actual</div>
-          <div className="flex-1 min-w-0 px-2 py-0.5">Propuesta</div>
+        <div className="shrink-0 flex border-b border-border text-[12px] text-text-muted">
+          <div className="flex-1 min-w-0 px-2 py-1 border-r border-border">Actual</div>
+          <div className="flex-1 min-w-0 px-2 py-1">Propuesta</div>
         </div>
         <div className="flex-1 min-h-0 overflow-auto divide-y divide-border/60">
           {regions.map(region => (
             <div key={region.index}>
               {pruned && (
-                <div className="px-2 py-0.5 text-[10px] text-accent-blue bg-accent-blue/5">
+                <div className="px-2 py-1 text-[12px] text-accent-blue bg-accent-blue/5">
                   Cambio {region.index} de {diff.regions.length}
                   {region.field ? ` · en ${region.field}` : ''}
                 </div>

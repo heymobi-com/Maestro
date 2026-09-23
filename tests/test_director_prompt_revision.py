@@ -326,6 +326,25 @@ class PromptComparisonTests(unittest.TestCase):
         self.assertIn("options: string[]", client)
         self.assertIn("note: string", client)
 
+    def test_the_instructions_are_big_enough_to_read(self):
+        # Measured complaint: "the font of the instructions is too small, impossible
+        # to read on a laptop screen". The assistant card and the window it opens were
+        # written at 8, 9 and 10 pixels.
+        start = self.dashboard.index("Correct this shot")
+        card = self.dashboard[start - 400:self.dashboard.index("The prompt, in a window", start)]
+        self.assertNotIn("text-[8px]", card)
+        self.assertNotIn("text-[9px]", card)
+        self.assertNotIn("text-[10px]", card)
+        self.assertIn("text-[13px] text-text-primary", card)
+
+        window = self.dashboard[self.dashboard.index("Asistente IA"):]
+        window = window[:window.index("</FloatingPanel>")]
+        self.assertNotIn("text-[10px]", window)
+        self.assertIn("text-[12px] text-text-muted shrink-0\">Opciones:", window)
+
+        self.assertNotIn("text-[10px]", self.view)
+        self.assertIn("text-[13px] leading-relaxed", self.view)
+
 
 if __name__ == "__main__":
     unittest.main()
