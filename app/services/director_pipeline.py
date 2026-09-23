@@ -1571,7 +1571,7 @@ def build_pipeline_first_frame_thumbnail(
     try:
         with _pipeline_file_lock:
             with open(filepath, "r", encoding="utf-8") as handle:
-                state = _backfill_clip_video_filenames(json.load(handle), pipeline_dir)
+                state = _backfill_clip_video_filenames(json.load(handle), pipeline_dir, pid)
     except (OSError, ValueError):
         return None
 
@@ -1632,7 +1632,67 @@ def build_pipeline_first_frame_thumbnail(
     return thumbnail_path if os.path.isfile(thumbnail_path) else None
 
 
-def _backfill_clip_video_filenames(state: dict, state_dir: str) -> dict:
+_sidecar_video_cache: dict[str, tuple[float, dict[int, str]]] = {}
+
+
+def _sidecar_clip_videos(state_dir: str, pid: str) -> dict[int, str]:
+    """clip index -> video filename, read from the sidecars that carry it.
+
+    The state can lose the link while the videos stay on disk. Measured on a real
+    project of 177 clips: only 37 clips still carried a video_filename, while 174
+    sidecars named this pipeline together with their clip index -- so shots 38
+    onward showed no play button, and the Dashboard counted 140 clips as missing
+    and would have regenerated them. A sidecar is written next to the video by the
+    generation itself, and it agrees with the recorded links in 37 cases out of 37,
+    which is why it is trusted over any guess: matching a file by its name would
+    not work, because 65 of the videos in that project open with the same words.
+    """
+
+    key = os.path.join(os.path.abspath(state_dir), pid)
+    try:
+        signature = os.path.getmtime(state_dir)
+    except OSError:
+        return {}
+    with _pipeline_file_lock:
+        cached = _sidecar_video_cache.get(key)
+        if cached and cached[0] == signature:
+            return cached[1]
+    found: dict[int, str] = {}
+    newest: dict[int, float] = {}
+    try:
+        names = os.listdir(state_dir)
+    except OSError:
+        return {}
+    for name in names:
+        if not name.endswith(".json") or name.startswith(_PIPELINE_FILE_PREFIX):
+            continue
+        try:
+            with open(os.path.join(state_dir, name), "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception:
+            continue
+        if not isinstance(data, dict) or str(data.get("director_pipeline_id") or "") != pid:
+            continue
+        index = data.get("director_clip_index")
+        filename = str(data.get("output_filename") or "")
+        if not isinstance(index, int) or not filename:
+            continue
+        if not os.path.isfile(os.path.join(state_dir, filename)):
+            continue
+        try:
+            created = float(data.get("created_at") or 0.0)
+        except (TypeError, ValueError):
+            created = 0.0
+        if index in found and newest.get(index, 0.0) >= created:
+            continue
+        found[index] = filename
+        newest[index] = created
+    with _pipeline_file_lock:
+        _sidecar_video_cache[key] = (signature, found)
+    return found
+
+
+def _backfill_clip_video_filenames(state: dict, state_dir: str, pid: str = "") -> dict:
     """Derive per-clip video filenames from output_files when absent.
 
     Multi-clip (non-seamless) runs produce one video per clip, in clip
@@ -1644,17 +1704,29 @@ def _backfill_clip_video_filenames(state: dict, state_dir: str) -> dict:
     when the per-clip count matches exactly, and only for files that
     still exist next to the pipeline file. Seamless runs (one combined
     output) never match the count and are left untouched.
+
+    That all-or-nothing count is why this could not help a partly generated
+    project: with 37 outputs and 177 clips it returned without filling anything.
+    The sidecars are the second and exact source, and they work per clip.
     """
     clips = state.get("clips") or []
     outputs = [
         filename for filename in (state.get("output_files") or [])
         if "_multiclip" not in os.path.splitext(filename)[0].lower()
     ]
-    if not clips or len(outputs) != len(clips):
-        return state
-    for i, clip in enumerate(clips):
-        if not clip.get("video_filename") and os.path.isfile(os.path.join(state_dir, outputs[i])):
-            clip["video_filename"] = outputs[i]
+    if clips and len(outputs) == len(clips):
+        for i, clip in enumerate(clips):
+            if not clip.get("video_filename") and os.path.isfile(os.path.join(state_dir, outputs[i])):
+                clip["video_filename"] = outputs[i]
+    if clips and pid:
+        derived = _sidecar_clip_videos(state_dir, pid)
+        for clip in clips:
+            if clip.get("video_filename"):
+                continue
+            index = clip.get("index")
+            filename = derived.get(index) if isinstance(index, int) else None
+            if filename:
+                clip["video_filename"] = filename
     return state
 
 
@@ -1889,7 +1961,7 @@ def _load_pipeline_state_locked(out_dir: str, pid: str) -> Optional[dict]:
             state_changed = _repair_saved_h3_frame_lattice(state) or state_changed
             if state_changed:
                 _write_pipeline_json_unlocked(filepath, state)
-            return _backfill_clip_video_filenames(state, out_dir)
+            return _backfill_clip_video_filenames(state, out_dir, pid)
     # Search subdirectories (workspaces)
     if os.path.isdir(out_dir):
         for name in os.listdir(out_dir):
@@ -1907,7 +1979,7 @@ def _load_pipeline_state_locked(out_dir: str, pid: str) -> Optional[dict]:
                     if state_changed:
                         _write_pipeline_json_unlocked(sub, state)
                     return _backfill_clip_video_filenames(
-                        state, os.path.join(out_dir, name),
+                        state, os.path.join(out_dir, name), pid,
                     )
     return None
 
@@ -2038,7 +2110,7 @@ def _update_saved_pipeline_locked(out_dir: str, pid: str, updater) -> Optional[d
         return None
     with open(filepath, "r", encoding="utf-8") as f:
         state = _backfill_clip_video_filenames(
-            repair_payload(json.load(f)), os.path.dirname(filepath),
+            repair_payload(json.load(f)), os.path.dirname(filepath), pid,
         )
     updater(state)
     _write_pipeline_json_unlocked(filepath, state)
@@ -2114,7 +2186,7 @@ def _delete_pipeline_locked(out_dir: str, pid: str) -> dict:
     state = None
     try:
         with open(filepath, "r", encoding="utf-8") as f:
-            state = _backfill_clip_video_filenames(json.load(f), pipeline_dir)
+            state = _backfill_clip_video_filenames(json.load(f), pipeline_dir, pid)
     except Exception:
         pass
 
@@ -2878,6 +2950,59 @@ def _parse_revision_edits(value: str) -> list[dict]:
     return [edit for edit in edits if edit["find"]]
 
 
+# A FIND read loosely is only accepted when it is this long: punctuation, spacing and
+# case are ignored to place it, so a short one could land on the wrong sentence.
+_LOOSE_FIND_MIN_CHARS = 24
+_LOOSE_FIND_MIN_WORDS = 4
+
+
+def _normalized_with_map(text: str) -> tuple[str, list[int]]:
+    """The text reduced to letters, digits and single spaces, with its origin.
+
+    Each kept character remembers where it came from, so a match found in the
+    reduced form can be cut out of the original text.
+    """
+
+    kept: list[str] = []
+    origin: list[int] = []
+    pending_space = False
+    for index, char in enumerate(str(text or "")):
+        if char.isalnum():
+            if pending_space and kept:
+                kept.append(" ")
+                origin.append(index)
+            pending_space = False
+            kept.append(char.lower())
+            origin.append(index)
+        else:
+            pending_space = True
+    return "".join(kept), origin
+
+
+def _find_loosely(prompt: str, find: str) -> tuple[int, int] | None:
+    """Where a FIND that is not verbatim still sits, when that is unambiguous.
+
+    Measured on shot 37 of a real project: the assistant wrote "<Subject 1> ((S2));
+    A cozy loft study with wooden textures..." for a sentence the prompt spells
+    "Subject 1 (S2); A cozy loft study with wooden textures...", and the edit was
+    refused for not matching "character for character". The note came back as an
+    error and nothing could be changed -- "the assistant only throws errors". The
+    sentence is in that prompt exactly once once punctuation, spacing and case are
+    set aside, so it can be placed without guessing.
+    """
+
+    needle, _ = _normalized_with_map(find)
+    if len(needle) < _LOOSE_FIND_MIN_CHARS:
+        return None
+    if len(needle.split()) < _LOOSE_FIND_MIN_WORDS:
+        return None
+    haystack, origin = _normalized_with_map(prompt)
+    if haystack.count(needle) != 1:
+        return None
+    start = haystack.index(needle)
+    return origin[start], origin[start + len(needle) - 1] + 1
+
+
 def _apply_revision_edits(prompt: str, edits: list[dict] | None) -> tuple[str, list[str]]:
     """The saved prompt with the assistant's edits applied, and any edit that failed.
 
@@ -2896,11 +3021,17 @@ def _apply_revision_edits(prompt: str, edits: list[dict] | None) -> tuple[str, l
             continue
         occurrences = text.count(find)
         if occurrences == 0:
-            problems.append(
-                "an edit's FIND text is not in the current prompt, character for "
-                f"character, so it could not be applied: {find[:140]!r}"
-            )
-        elif occurrences > 1:
+            # Not verbatim, but it may still be the sentence the assistant meant.
+            span = _find_loosely(text, find)
+            if span is None:
+                problems.append(
+                    "an edit's FIND text is not in the current prompt, character for "
+                    f"character, so it could not be applied: {find[:300]!r}"
+                )
+                continue
+            text = text[:span[0]] + str(edit.get("set") or "") + text[span[1]:]
+            continue
+        if occurrences > 1:
             problems.append(
                 f"an edit's FIND text appears {occurrences} times in the prompt, so it "
                 f"is ambiguous: {find[:140]!r}"
@@ -3149,8 +3280,19 @@ def _revise_problem_nudge(problems: list[str], expected_lines: list[str] | None 
             f"  {index + 1}. {line}" for index, line in enumerate(expected_lines)
         )
         expected = f"\nThe lines to copy exactly, in order:\n{numbered}\n"
+    # An unappliable EDITS is the most common dead end: the assistant paraphrases a
+    # sentence it can see in THIS SHOT'S TEXT, and the whole turn ends as an error.
+    # Telling it what to do instead is worth more than repeating the rule.
+    edits_note = ""
+    if any("not in the current prompt" in problem for problem in problems):
+        edits_note = (
+            "\nAn EDITS FIND must be copied from THIS SHOT'S TEXT exactly as it is "
+            "written there, punctuation included. If you cannot copy it exactly, do "
+            "not send EDITS at all: send FIXED_PROMPT with the whole shot text, "
+            "changed only where the note asks.\n"
+        )
     return (
-        f"{_REVISE_NUDGE_HEADER}\n{listed}\n{expected}"
+        f"{_REVISE_NUDGE_HEADER}\n{listed}\n{expected}{edits_note}"
         "Answer again with a rewrite that fixes them. Copy every <d>...</d> line "
         "byte for byte, including its [Language] tag. If the note cannot be "
         "satisfied by editing this prompt, write NONE for FIXED_PROMPT, name in "

@@ -51,6 +51,7 @@ from services.director.h3_dialogue import (  # noqa: E402
 from services.director_pipeline import (  # noqa: E402
     _NO_OP_CHANGE_CHARS,
     _NO_OP_CHANGE_WORDS,
+    _apply_revision_edits,
     _changed_characters,
     _changed_words,
     _parse_revision_envelope,
@@ -1593,3 +1594,208 @@ class RefusalNamesTheExactLines(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class LooseEditTests(unittest.TestCase):
+    """An edit the assistant mis-transcribes is applied, not turned into an error.
+
+    From the log of a real session: "an edit's FIND text is not in the current prompt,
+    character for character, so it could not be applied: '<Subject 1> ((S2)); A cozy
+    loft study...'". The prompt spells it "Subject 1 (S2); A cozy loft study...", the
+    sentence is in that prompt once, and because the edit could not be applied the
+    whole turn ended as an error with nothing to change.
+    """
+
+    PROMPT = (
+        "subject_definitions\n<Subject 1> Valeria sits by the window.\n"
+        "detailed_description\nSubject 1 (S2); A cozy loft study with wooden textures, "
+        "books, and warm side lighting. The camera holds a steady medium shot.\n"
+    )
+
+    def test_a_find_with_extra_punctuation_is_placed_and_applied(self):
+        text, problems = _apply_revision_edits(self.PROMPT, [{
+            "find": "<Subject 1> ((S2)); A cozy loft study with wooden textures, books, "
+                    "and warm side lighting.",
+            "set": "Subject 1 (S2); A tidy loft study with wooden textures.",
+        }])
+
+        self.assertEqual(problems, [])
+        self.assertIn("A tidy loft study with wooden textures.", text)
+        self.assertNotIn("A cozy loft study", text)
+
+    def test_a_find_that_is_nowhere_is_still_refused_with_its_text(self):
+        text, problems = _apply_revision_edits(self.PROMPT, [{
+            "find": "A sentence that this prompt does not contain at all, anywhere.",
+            "set": "anything",
+        }])
+
+        self.assertEqual(text, self.PROMPT)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("not in the current prompt", problems[0])
+        self.assertIn("A sentence that this prompt does not contain", problems[0])
+
+    def test_a_short_find_is_never_placed_loosely(self):
+        # "cozyy loft" is not in the prompt and never could be, but it is far too
+        # short to place after ignoring spelling: doing so would land on "cozy loft".
+        text, problems = _apply_revision_edits(self.PROMPT, [{"find": "cozyy loft", "set": "x"}])
+
+        self.assertEqual(text, self.PROMPT)
+        self.assertEqual(len(problems), 1)
+
+    def test_a_loose_find_that_could_be_two_places_is_refused_rather_than_guessed(self):
+        # Ignoring case and punctuation this sentence sits in the prompt twice, so
+        # there is no way to know which one was meant and nothing is changed.
+        prompt = "HELLO world, the camera holds a steady shot. hello world!"
+
+        text, problems = _apply_revision_edits(prompt, [{
+            "find": "Hello world!",
+            "set": "Goodbye world",
+        }])
+
+        self.assertEqual(text, prompt)
+        self.assertEqual(len(problems), 1)
+
+    def test_the_retry_is_told_to_copy_or_switch_to_the_whole_prompt(self):
+        nudge = _revise_problem_nudge([
+            "an edit's FIND text is not in the current prompt, character for character, "
+            "so it could not be applied: 'x'",
+        ])
+
+        self.assertIn("copied from THIS SHOT'S TEXT exactly", nudge)
+        self.assertIn("send FIXED_PROMPT with the whole shot text", nudge)
+
+    def test_a_nudge_without_edit_problems_stays_short(self):
+        nudge = _revise_problem_nudge(["The rewrite changed the spoken words."])
+
+        self.assertNotIn("send FIXED_PROMPT with the whole shot text", nudge)
+
+
+class ClipVideoRecoveryTests(unittest.TestCase):
+    """A clip's video is found in its sidecar when the state lost the link.
+
+    Measured on a real project of 177 clips: the state carried a video_filename for
+    37 of them while 174 sidecars named this pipeline together with their clip index,
+    so shots 38 onward showed no play button and the Dashboard counted 140 clips as
+    missing. Matching by filename cannot replace this: 65 of those videos open with
+    the same words.
+    """
+
+    def _write(self, folder, name, payload):
+        with open(os.path.join(folder, name), "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+    def test_missing_links_are_read_from_the_sidecars(self):
+        with tempfile.TemporaryDirectory() as folder:
+            open(os.path.join(folder, "video_a.mp4"), "wb").close()
+            open(os.path.join(folder, "video_b.mp4"), "wb").close()
+            self._write(folder, "sidecar_a.json", {
+                "director_pipeline_id": "abc123",
+                "director_clip_index": 4,
+                "output_filename": "video_a.mp4",
+                "created_at": 10.0,
+            })
+            self._write(folder, "sidecar_b.json", {
+                "director_pipeline_id": "abc123",
+                "director_clip_index": 5,
+                "output_filename": "video_b.mp4",
+                "created_at": 11.0,
+            })
+            state = {"clips": [
+                {"index": 4}, {"index": 5}, {"index": 6},
+            ]}
+
+            filled = pipeline._backfill_clip_video_filenames(state, folder, "abc123")
+
+            self.assertEqual(filled["clips"][0]["video_filename"], "video_a.mp4")
+            self.assertEqual(filled["clips"][1]["video_filename"], "video_b.mp4")
+            self.assertIsNone(filled["clips"][2].get("video_filename"))
+
+    def test_a_recorded_link_is_never_replaced(self):
+        with tempfile.TemporaryDirectory() as folder:
+            open(os.path.join(folder, "video_a.mp4"), "wb").close()
+            open(os.path.join(folder, "video_new.mp4"), "wb").close()
+            self._write(folder, "sidecar.json", {
+                "director_pipeline_id": "abc123",
+                "director_clip_index": 0,
+                "output_filename": "video_new.mp4",
+                "created_at": 99.0,
+            })
+            state = {"clips": [{"index": 0, "video_filename": "video_a.mp4"}]}
+
+            pipeline._backfill_clip_video_filenames(state, folder, "abc123")
+
+            self.assertEqual(state["clips"][0]["video_filename"], "video_a.mp4")
+
+    def test_sidecars_of_another_pipeline_and_missing_files_are_ignored(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self._write(folder, "other.json", {
+                "director_pipeline_id": "other",
+                "director_clip_index": 0,
+                "output_filename": "video_a.mp4",
+                "created_at": 5.0,
+            })
+            self._write(folder, "gone.json", {
+                "director_pipeline_id": "abc123",
+                "director_clip_index": 0,
+                "output_filename": "not_on_disk.mp4",
+                "created_at": 5.0,
+            })
+            state = {"clips": [{"index": 0}]}
+
+            pipeline._backfill_clip_video_filenames(state, folder, "abc123")
+
+            self.assertIsNone(state["clips"][0].get("video_filename"))
+
+    def test_the_newest_sidecar_wins_for_a_regenerated_clip(self):
+        with tempfile.TemporaryDirectory() as folder:
+            open(os.path.join(folder, "old.mp4"), "wb").close()
+            open(os.path.join(folder, "new.mp4"), "wb").close()
+            self._write(folder, "old.json", {
+                "director_pipeline_id": "abc123",
+                "director_clip_index": 7,
+                "output_filename": "old.mp4",
+                "created_at": 1.0,
+            })
+            self._write(folder, "new.json", {
+                "director_pipeline_id": "abc123",
+                "director_clip_index": 7,
+                "output_filename": "new.mp4",
+                "created_at": 2.0,
+            })
+            state = {"clips": [{"index": 7}]}
+
+            pipeline._backfill_clip_video_filenames(state, folder, "abc123")
+
+            self.assertEqual(state["clips"][0]["video_filename"], "new.mp4")
+
+    def test_the_exact_count_path_still_works_without_sidecars(self):
+        with tempfile.TemporaryDirectory() as folder:
+            open(os.path.join(folder, "one.mp4"), "wb").close()
+            open(os.path.join(folder, "two.mp4"), "wb").close()
+            state = {"output_files": ["one.mp4", "two.mp4"], "clips": [{"index": 0}, {"index": 1}]}
+
+            pipeline._backfill_clip_video_filenames(state, folder, "abc123")
+
+            self.assertEqual(
+                [clip["video_filename"] for clip in state["clips"]],
+                ["one.mp4", "two.mp4"],
+            )
+
+    def test_a_merged_answer_is_split_into_one_chip_per_proposal_in_the_window(self):
+        # The backend splits too, but a running server keeps the parser it started
+        # with, so the window splits what it is given: two proposals on one line came
+        # back as a single chip carrying both, and that chip executes neither.
+        with open(
+            os.path.join(_ROOT, "ui", "src", "components", "DirectorDashboard", "DirectorDashboard.tsx"),
+            encoding="utf-8",
+        ) as handle:
+            dashboard = handle.read()
+        with open(
+            os.path.join(_ROOT, "ui", "src", "lib", "revisionOptions.ts"),
+            encoding="utf-8",
+        ) as handle:
+            helper = handle.read()
+
+        self.assertEqual(dashboard.count("splitRevisionOptions(fixAnswer.options)"), 2)
+        self.assertNotIn("fixAnswer.options.map", dashboard)
+        self.assertIn("export function splitRevisionOptions(", helper)
+        self.assertIn("(?<=\\s)(?=\\d{1,2}[.)][ \\t]+\\S)", helper)
+        self.assertIn("' | '", helper)

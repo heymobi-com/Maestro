@@ -7,6 +7,7 @@ import type { PipelineClipState, SavedPipelineState } from '../../types'
 import { multipleShotWarning } from '../../lib/h3Prompt'
 import { HighlightedTextarea } from './HighlightedTextarea'
 import { PromptDiffView } from './PromptDiffView'
+import { splitRevisionOptions } from '../../lib/revisionOptions'
 
 /** Safely coerce any value to a displayable string */
 function safeStr(val: unknown): string {
@@ -699,7 +700,7 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
               <div className="mt-1.5 rounded border border-accent-blue/30 bg-bg-tertiary p-1.5">
                 <p className="text-[12px] text-accent-blue">Elige una: el asistente la aplica como la siguiente instrucción.</p>
                 <div className="mt-1 flex flex-col gap-1">
-                  {fixAnswer.options.map((option, i) => (
+                  {splitRevisionOptions(fixAnswer.options).map((option, i) => (
                     <button
                       key={i}
                       type="button"
@@ -855,7 +856,7 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
               {!!fixAnswer?.options?.length && (
                 <div className="shrink-0 flex items-center gap-1.5 flex-wrap">
                   <span className="text-[12px] text-text-muted shrink-0">Opciones:</span>
-                  {fixAnswer.options.map((option, i) => (
+                  {splitRevisionOptions(fixAnswer.options).map((option, i) => (
                     <button
                       key={i}
                       type="button"
