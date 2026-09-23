@@ -1146,6 +1146,8 @@ export interface RevisionAnswer {
   options: string[]
   /** What to say when there is no proposal and no question: never a bare refusal. */
   note: string
+  /** Words in the proposal that look damaged while re-typing, not corrected. */
+  warnings: string[]
   diagnosis: ShotDiagnosis
   rewritten: boolean
   errors: string[]

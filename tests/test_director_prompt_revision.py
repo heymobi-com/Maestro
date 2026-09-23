@@ -326,6 +326,13 @@ class PromptComparisonTests(unittest.TestCase):
         self.assertIn("options: string[]", client)
         self.assertIn("note: string", client)
 
+    def test_a_damaged_word_is_shown_as_a_warning(self):
+        # The contract cannot see the prose, so a word mangled while re-typing has to be
+        # named in the window; the diff marks it, the warning says what it was.
+        self.assertIn("fixAnswer?.warnings", self.dashboard)
+        self.assertIn("⚠", self.dashboard)
+        self.assertIn("warnings: string[]", _read("api", "client.ts"))
+
     def test_the_instructions_are_big_enough_to_read(self):
         # Measured complaint: "the font of the instructions is too small, impossible
         # to read on a laptop screen". The assistant card and the window it opens were

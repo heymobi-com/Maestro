@@ -709,6 +709,18 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
             {fixAnswer?.note && (
               <p className="mt-1.5 text-[12px] leading-snug text-text-muted">{fixAnswer.note}</p>
             )}
+            {/* Damage the contract cannot see: the prose is free, so a word mangled while
+                re-typing (measured: "Vestuario" -> "Vestología", "tightens" -> "tights")
+                would otherwise only be findable by reading six thousand characters. */}
+            {!!fixAnswer?.warnings?.length && (
+              <ul className="mt-1.5 space-y-0.5">
+                {fixAnswer.warnings.slice(0, 4).map((warning, i) => (
+                  <li key={i} className="text-[12px] leading-snug text-indicator-warning">
+                    ⚠ {warning}
+                  </li>
+                ))}
+              </ul>
+            )}
             {!!fixAnswer?.errors?.length && (
               <div className="mt-1.5 rounded border border-indicator-warning/40 bg-bg-tertiary p-1.5">
                 <p className="text-[12px] text-indicator-warning">
@@ -843,6 +855,13 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                     >{i + 1}. {option}</button>
                   ))}
                 </div>
+              )}
+              {!!fixAnswer?.warnings?.length && (
+                <ul className="shrink-0 text-[12px] leading-snug text-indicator-warning space-y-0.5">
+                  {fixAnswer.warnings.slice(0, 4).map((warning, i) => (
+                    <li key={i}>⚠ {warning}</li>
+                  ))}
+                </ul>
               )}
               {!!fixAnswer?.diagnosis?.findings?.length && (
                 <ul className="text-[12px] leading-snug text-text-muted shrink-0 space-y-0.5 max-h-32 overflow-auto">

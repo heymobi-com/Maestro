@@ -39,6 +39,7 @@ from services.director.h3_dialogue import (  # noqa: E402
     compile_h3_clip_plans,
     diagnose_h3_clip_prompt,
     h3_dialogue_blocks,
+    h3_proposal_warnings,
     reconcile_audio_plan_with_dialogue,
     retain_dialogue_beats,
     review_h3_revision,
@@ -579,6 +580,27 @@ class NoOpRewriteTests(unittest.TestCase):
         self.assertFalse(result["rewritten"])
         self.assertIn("is ambiguous", result["errors"][0])
 
+    def test_the_proposal_carries_warnings_about_damaged_words(self):
+        self._save(FIXED_PROMPT)
+        self._stub([
+            "ANALYSIS: X\nQUESTION: NONE\nEDITS:\n"
+            "FIND: Valeria and Ricardo sit facing each other across the desk, "
+            "both in frame.\n"
+            "SET: Valeria and Ricardo sit facing each other acros the desk, "
+            "both in frame, the camera easing in slowly.\n"
+            "FIXED_PROMPT: NONE",
+        ])
+
+        result = pipeline.revise_clip_prompt(
+            self.out_dir, self.pid, 0, "ease the camera in",
+        )
+
+        self.assertTrue(result["rewritten"])
+        self.assertEqual(
+            result["warnings"],
+            ["posible errata: 'acros' donde el prompt dice 'across'"],
+        )
+
     def test_a_rewrite_that_edits_the_prompt_is_offered(self):
         self._save()
         self._stub([self._answer(PROBLEM_PROMPT), self._answer(FIXED_PROMPT)])
@@ -1092,6 +1114,74 @@ class ReviewedPromptGetsItsCanonicalAnchor(unittest.TestCase):
         self.assertEqual(
             problems, [f"missing canonical identity/world context: {self.ENVIRONMENT}"],
         )
+
+
+class ProposalDamageTests(unittest.TestCase):
+    """The damage a re-typed prompt does, which the contract cannot see.
+
+    The gate protects the spoken lines, the fields, the shots and the anchors. The rest of
+    the prose is free, and that is where a re-typed prompt gets hurt silently. Measured on
+    one real proposal, against a saved prompt that was clean in all five places:
+    "Vestuario" came back as "Vestología", "focus tightens" as "focus tights", "jeans
+    oscuros" as "jeans oscamericanos", the speaker rule "(S1) y (S2)" as "(S1) y (2)", and
+    a stretch of the dialogue contract as "i/s/a/f/d...rced/m/b/c/u/t/i/n/g".
+    """
+
+    def test_a_mangled_stretch_of_text_is_refused(self):
+        problems = review_h3_revision(
+            FIXED_PROMPT,
+            FIXED_PROMPT.replace(
+                "Valeria and Ricardo sit facing each other",
+                "i/s/a/f/d rced/m/b/c/u/t/i/n/g Valeria and Ricardo sit facing each other",
+            ),
+        )
+
+        self.assertTrue(
+            any("is not prose" in problem for problem in problems), problems,
+        )
+
+    def test_editorial_text_in_the_prompt_is_refused(self):
+        problems = review_h3_revision(
+            FIXED_PROMPT,
+            FIXED_PROMPT.replace(
+                "Valeria and Ricardo sit facing each other",
+                "The current prompt contains redundant descriptions. "
+                "Valeria and Ricardo sit facing each other",
+            ),
+        )
+
+        self.assertTrue(
+            any("editorial text" in problem for problem in problems), problems,
+        )
+
+    def test_a_mangled_word_is_warned_rather_than_refused(self):
+        proposal = FIXED_PROMPT.replace("across the desk", "acros the desk")
+
+        # Not a refusal: a correction may introduce a word. It just may not do it in
+        # silence, six thousand characters into a diff.
+        self.assertEqual(review_h3_revision(FIXED_PROMPT, proposal), [])
+        self.assertEqual(
+            h3_proposal_warnings(FIXED_PROMPT, proposal),
+            ["posible errata: 'acros' donde el prompt dice 'across'"],
+        )
+
+    def test_a_word_rewritten_on_purpose_is_not_warned_about(self):
+        proposal = FIXED_PROMPT.replace(
+            "Valeria and Ricardo sit facing each other across the desk, both in frame.",
+            "Valeria and Ricardo face each other over the desk, the camera easing in slowly.",
+        )
+
+        self.assertEqual(h3_proposal_warnings(FIXED_PROMPT, proposal), [])
+
+    def test_a_clean_edit_has_no_warnings_and_no_refusals(self):
+        proposal = FIXED_PROMPT.replace(
+            "Valeria and Ricardo sit facing each other across the desk, both in frame.",
+            "Valeria and Ricardo sit facing each other across the desk, both in frame, "
+            "the camera easing in slowly.",
+        )
+
+        self.assertEqual(review_h3_revision(FIXED_PROMPT, proposal), [])
+        self.assertEqual(h3_proposal_warnings(FIXED_PROMPT, proposal), [])
 
 
 class SavedPromptKeepsTheSpeechPlan(unittest.TestCase):

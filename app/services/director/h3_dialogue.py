@@ -8,6 +8,7 @@ and malformed or contradictory prompts are rejected before GPU generation.
 
 from __future__ import annotations
 
+import difflib
 import math
 import re
 from typing import Any, Iterable, Mapping, MutableMapping, Sequence
@@ -1936,6 +1937,83 @@ def reconcile_audio_plan_with_dialogue(
     return resolved
 
 
+# A model that re-types thousands of characters damages them. Measured on one real
+# proposal: "Vestuario" came back as "Vestología", "focus tightens" as "focus tights",
+# "jeans oscuros" as "jeans oscamericanos", the speaker rule "(S1) y (S2)" as
+# "(S1) y (2)", and a stretch of the dialogue contract as
+# "i/s/a/f/d...rced/m/b/c/u/t/i/n/g". The saved prompt was clean in all five places, and
+# every check here looked at the spoken lines, the fields and the shots instead.
+_GARBLED_TEXT_RE = re.compile(r"(?:\b[A-Za-z0-9]/){4,}[A-Za-z0-9/]*")
+
+_EDITORIAL_LEAK_RE = re.compile(
+    r"\bthe current prompt\b|\bthe rewrite\b|\bthe director's note\b|"
+    r"^[ \t]*(?:ANALYSIS|QUESTION|OPTIONS|EDITS|FIXED_PROMPT)[ \t]*:",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _edit_distance(left: str, right: str) -> int:
+    """Levenshtein distance, small enough for word-length strings."""
+
+    previous = list(range(len(right) + 1))
+    for i, a in enumerate(left, start=1):
+        current = [i]
+        for j, b in enumerate(right, start=1):
+            current.append(min(
+                previous[j] + 1,
+                current[j - 1] + 1,
+                previous[j - 1] + (a != b),
+            ))
+        previous = current
+    return previous[-1]
+
+
+def _looks_damaged(before: str, after: str) -> bool:
+    """True when one word looks like a mangled copy of another."""
+
+    old = str(before or "").strip(".,;:()'\"").casefold()
+    new = str(after or "").strip(".,;:()'\"").casefold()
+    if not old or not new or old == new or len(new) < 5:
+        return False
+    if abs(len(old) - len(new)) > 3:
+        return False
+    if _edit_distance(old, new) <= 2:
+        return True
+    # "Vestología" against "Vestuario": six edits apart, same opening, same job.
+    return len(old) >= 6 and len(new) >= 6 and old[:4] == new[:4]
+
+
+def h3_proposal_warnings(prompt: str, proposal: str) -> list[str]:
+    """Words that look damaged while re-typing rather than corrected.
+
+    A correction changes what the note asked for; damage looks different from the
+    outside -- the same number of words, one of them mangled. Measured on a real
+    proposal: "Vestuario" came back as "Vestología" and "focus tightens" as "focus
+    tights", inside text no check looks at. Comparing the whole vocabulary was tried
+    first and flagged unrelated words instead ("last" against "loft"), so only
+    same-length replacements are compared, which is what a typo is. These are warnings
+    rather than refusals: a correction may introduce a word, it is just not allowed to
+    do it invisibly six thousand characters into a diff.
+    """
+
+    left = str(prompt or "").split()
+    right = str(proposal or "").split()
+    warnings: list[str] = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, left, right).get_opcodes():
+        if tag != "replace" or (i2 - i1) != (j2 - j1) or (i2 - i1) > 2:
+            continue
+        for old, new in zip(left[i1:i2], right[j1:j2]):
+            if _looks_damaged(old, new):
+                shown_new = new.strip(".,;:()'\"")
+                shown_old = old.strip(".,;:()'\"")
+                warning = (
+                    f"posible errata: '{shown_new}' donde el prompt dice '{shown_old}'"
+                )
+                if warning not in warnings:
+                    warnings.append(warning)
+    return warnings
+
+
 def review_h3_revision(
     original: str,
     revised: str,
@@ -1981,6 +2059,20 @@ def review_h3_revision(
         )
     elif not shots:
         problems.append("The rewrite lost its [Shot 1] marker.")
+
+    garbled = _GARBLED_TEXT_RE.search(text)
+    if garbled:
+        problems.append(
+            "the rewrite contains text that is not prose "
+            f"({garbled.group(0)[:50]!r}), which is what re-typing thousands of "
+            "characters does to them. Send the sentences to change instead, as EDITS."
+        )
+    leaked = _EDITORIAL_LEAK_RE.search(text)
+    if leaked:
+        problems.append(
+            "the rewrite contains editorial text instead of only the prompt "
+            f"({leaked.group(0)[:50]!r})."
+        )
 
     # A rewrite is judged on what it changed, not on what it inherited. A reviewed
     # prompt is rendered verbatim, so the compiler never inserted the canonical

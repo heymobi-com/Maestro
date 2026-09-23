@@ -3212,6 +3212,7 @@ def revise_clip_prompt(
         _h3_plan_context_anchors,
         diagnose_h3_clip_prompt,
         h3_dialogue_blocks,
+        h3_proposal_warnings,
         review_h3_revision,
     )
 
@@ -3329,9 +3330,9 @@ def revise_clip_prompt(
         "diagnosis": diagnosis,
         "rewritten": False,
         "errors": [],
+        "warnings": [],
         "video_prompt": "",
     }
-
     def _proposal(answer: dict) -> tuple[str, list[str]]:
         """The prompt this answer proposes, and why its EDITS could not be applied.
 
@@ -3472,6 +3473,10 @@ def revise_clip_prompt(
     # than requested in the system prompt: a rule in a prompt is a request, and
     # this is what decides whether a rewrite reaches the editor.
     parts["prompt"] = candidate
+    # Damage the contract cannot see, because the prose is free: measured on a real
+    # proposal, "Vestuario" came back as "Vestología" and "focus tightens" as "focus
+    # tights". The diff marks them; these name them.
+    result["warnings"] = h3_proposal_warnings(prompt, candidate)
     result["rewritten"] = True
     result["video_prompt"] = parts["prompt"]
     print(
