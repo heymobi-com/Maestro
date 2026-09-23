@@ -7172,6 +7172,7 @@ def get_services_config():
         "llm_remote_api_key_set": bool(services.get("llm_remote_api_key", "")),
         "enhance_llm_model_id": services.get("enhance_llm_model_id", ""),
         "enhance_llm_device": services.get("enhance_llm_device", "cuda"),
+        "revision_llm_model_id": services.get("revision_llm_model_id", ""),
         "google_api_key": _mask_key(services.get("google_api_key", "")),
         "google_api_key_set": bool(services.get("google_api_key", "")),
         "openai_api_key": _mask_key(services.get("openai_api_key", "")),
@@ -7255,7 +7256,7 @@ async def update_services_config(request: Request):
 
     ALLOWED_KEYS = {
         "llm_model_id", "llm_device", "llm_provider", "llm_remote_url",
-        "enhance_llm_model_id", "enhance_llm_device",
+        "enhance_llm_model_id", "enhance_llm_device", "revision_llm_model_id",
         "google_api_key", "llm_remote_api_key", "openai_api_key", "anthropic_api_key",
         "use_director_v2", "nsfw_mode", "nsfw_accepted_at", "director_prompt_polish",
         "civitai_api_key", "voice_reference_enabled", "ltx_progressive_pipeline",

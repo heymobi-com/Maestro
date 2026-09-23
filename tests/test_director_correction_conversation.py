@@ -376,7 +376,7 @@ class CorrectionConversationWiringTests(unittest.TestCase):
         # 26B model is 16.8 GB and the idle timer evicted it after 60 seconds. The
         # generation paths release the LLM explicitly when they need the VRAM, so the
         # timer is a safety net and the model is a setting.
-        self.assertIn("director_revision_llm_model_id", self.pipeline)
+        self.assertIn("revision_llm_model_id", self.pipeline)
         self.assertIn("set_idle_timeout(", self.pipeline)
         service = open(
             os.path.join(_APP_DIR, "services", "llm_service.py"), encoding="utf-8",
@@ -384,6 +384,35 @@ class CorrectionConversationWiringTests(unittest.TestCase):
         self.assertIn("_IDLE_TIMEOUT_DEFAULT: float = 600.0", service)
         self.assertIn("def set_idle_timeout(", service)
         self.assertIn("MAESTRO_LLM_IDLE_SECONDS", service)
+
+    def test_that_smaller_model_is_a_setting_the_director_can_actually_find(self):
+        # The pipeline read a key that nothing else knew about: it was not in
+        # SETTING_KEYS, so no endpoint saved it, and the settings panel never rendered
+        # it. The feature existed and the director could not reach it.
+        from services.studio_enhancement import SETTING_KEYS, captured_settings
+
+        self.assertIn("revision_llm_model_id", SETTING_KEYS)
+        self.assertEqual(captured_settings({})["revision_llm_model_id"], "")
+        self.assertIn('"revision_llm_model_id": services.get', self.launch)
+        # The settings endpoint persists every accepted key, so being accepted is
+        # enough to round-trip through wgp_config.json.
+        block = self.launch.split("ALLOWED_KEYS = {")[-1].split("}")[0]
+        self.assertIn('"revision_llm_model_id"', block)
+
+    def test_the_setting_is_visible_where_the_other_llms_are_chosen(self):
+        panel_path = os.path.join(
+            _ROOT, "ui", "src", "components", "SettingsDrawer", "ServicesSettingsPanel.tsx",
+        )
+        with open(panel_path, encoding="utf-8") as handle:
+            panel = handle.read()
+        self.assertIn("revision_llm_model_id", panel)
+        # Behind the Experimental toggle the option might as well not exist.
+        self.assertLess(
+            panel.index("revision_llm_model_id"),
+            panel.index("show_experimental"),
+        )
+        with open(os.path.join(_ROOT, "ui", "src", "types", "index.ts"), encoding="utf-8") as handle:
+            self.assertIn("revision_llm_model_id: string", handle.read())
 
     def test_the_assistant_is_required_to_offer_options(self):
         # "The programming is useless" was fair: the envelope had no place for a

@@ -1199,6 +1199,8 @@ export interface ServicesConfig {
   llm_remote_api_key_set: boolean
   enhance_llm_model_id: string
   enhance_llm_device: string
+  /** Separate, smaller LLM for the shot-correction assistant; empty uses the main one. */
+  revision_llm_model_id: string
   google_api_key: string
   google_api_key_set: boolean
   openai_api_key: string

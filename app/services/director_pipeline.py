@@ -3312,7 +3312,7 @@ def revise_clip_prompt(
     # the LLM explicitly when they need the VRAM, so the timer is only a safety net).
     revision_params = dict(snapshot or {})
     revision_model = str(
-        services.get("director_revision_llm_model_id") or ""
+        services.get("revision_llm_model_id") or ""
     ).strip()
     if revision_model:
         revision_params["llm_model_id"] = revision_model

@@ -18,14 +18,15 @@ _request_context: ContextVar[dict | None] = ContextVar("studio_enhancement", def
 _disk_lock = threading.RLock()
 SETTING_KEYS = (
     "llm_provider", "llm_model_id", "llm_device", "llm_remote_url",
-    "enhance_llm_model_id", "enhance_llm_device", "nsfw_mode",
+    "enhance_llm_model_id", "enhance_llm_device", "revision_llm_model_id", "nsfw_mode",
 )
 
 
 def captured_settings(services: dict) -> dict:
     # Credentials are resolved at execution, never copied into jobs/sidecars.
     defaults = {"llm_provider": "local", "llm_remote_url": "", "llm_device": "cuda",
-                "enhance_llm_model_id": "", "enhance_llm_device": "cuda", "nsfw_mode": False}
+                "enhance_llm_model_id": "", "enhance_llm_device": "cuda",
+                "revision_llm_model_id": "", "nsfw_mode": False}
     result = {key: deepcopy(services.get(key, defaults.get(key))) for key in SETTING_KEYS}
     result["nsfw_mode"] = bool(result["nsfw_mode"])
     if result["enhance_llm_model_id"]:
