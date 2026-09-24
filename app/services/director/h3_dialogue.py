@@ -1869,6 +1869,73 @@ def h3_shared_line_speaker_problems(
     return problems
 
 
+# A spoken line whose cue names nobody. The renderer resolves the speaker from a name or a
+# <Subject N> tag beside the line and refuses to guess a voice, so such a shot cannot be
+# generated at all. Measured on clip 38 of a real project:
+# "H3SpeakerBindingError: MiniMax H3 Omni could not determine which referenced character
+# speaks '[Spanish] B\u00e1slyamente, un proyecto donde importa much\u00edsimo m\u00e1s la...'".
+_H3_SUBJECT_TAG_RE = re.compile(r"<Subject\s*\d+>")
+_H3_SUBJECT_NAME_RE = re.compile(
+    r"(?mi)^[ \t]*subject_definitions[ \t]*:[ \t]*(.+)$"
+)
+_H3_DECLARED_NAME_RE = re.compile(
+    r"<Subject\s*\d+>\s*(?:\(S\d+\))?\s*:?\s*"
+    r"([A-Z\u00c1\u00c9\u00cd\u00d3\u00da\u00d1][\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]+)"
+)
+
+
+def h3_unresolved_speaker_cue_problems(prompt: str, *, window: int = 160) -> list[str]:
+    """Spoken lines whose cue identifies no speaker, which makes the shot unrenderable.
+
+    The renderer reads the character from a name or a <Subject N> tag beside the line; a
+    bare pronoun is not enough and it refuses rather than hand a line to the wrong voice.
+    Measured across the project's 177 clips, two lines have this and both are in clip 38,
+    which is exactly the clip that could not be generated: "His voice carries wisdom as he
+    says:" names nobody, while the shot declares <Subject 1> = Valeria.
+    """
+
+    text = str(prompt or "")
+    head = _H3_SUBJECT_NAME_RE.search(text)
+    declared: list[str] = []
+    if head:
+        declared = [
+            name for name in _H3_DECLARED_NAME_RE.findall(head.group(1)) if name
+        ]
+    # The names the prompt binds, too: a cue that says "Ricardo says" is readable even in a
+    # shot whose field head happens to declare only the other subject.
+    declared.extend(
+        match.group(3) for match in _H3_SUBJECT_BOUND_RE.finditer(text)
+    )
+    field_head_re = re.compile(
+        r"(?im)^[ \t]*(?:subject_definitions|summary|retention_analysis|"
+        r"detailed_description|integrated_multimodal_description|overall_soundscape|"
+        r"non_diegetic_music)[ \t]*:"
+    )
+    problems: list[str] = []
+    previous_end = 0
+    for match in re.finditer(r"<d\b[^>]*>(.*?)</d>", text, re.S):
+        # The cue is read inside the line's own field: the fields are independent
+        # contracts, and reaching back into subject_definitions found the "(S1)" of the
+        # field head, which is not the speaker of the line.
+        field_start = 0
+        for header in field_head_re.finditer(text, 0, match.start()):
+            field_start = header.end()
+        cue = text[max(previous_end, field_start, match.start() - window):match.start()]
+        previous_end = match.end()
+        if _H3_SUBJECT_TAG_RE.search(cue) or _H3_SPEAKER_ID_RE.search(cue):
+            continue
+        if any(name and name in cue for name in declared):
+            continue
+        spoken = " ".join(match.group(1).split())[:70]
+        cue_shown = " ".join(cue.split())[-90:]
+        problems.append(
+            f"The line \"{spoken}\" is introduced by \"{cue_shown}\", which names no "
+            "character and carries no speaker tag. The renderer cannot tell whose voice "
+            "reads it and refuses to render the shot: name the speaker beside the line."
+        )
+    return problems
+
+
 def _h3_gender_mismatch_finding(
     text: str, spoken_ids: set[str],
 ) -> str:
@@ -1894,16 +1961,33 @@ def _h3_gender_mismatch_finding(
     speaker_gender = stated.pop()
     other = "masculine" if speaker_gender == "feminine" else "feminine"
     matcher = _H3_FEMININE_WORDS_RE if other == "feminine" else _H3_MASCULINE_WORDS_RE
-    culprits: list[str] = []
+    culprit_sentences: list[str] = []
+    # Two readings, because each one misses what the other finds, and both are true:
+    #  - a cue is often glued to the line it introduces ("His voice carries wisdom as he
+    #    says: <d>...</d>"), so the sentence is judged with the line cut out of it --
+    #    skipping every sentence that holds a tag is what hid the contradiction in clip 38,
+    #    which could not be rendered;
+    #  - and a speaking sentence standing on its own is judged as it is written, which is
+    #    what found the shots whose prose says "she" in a sentence of its own.
+    # Together they are a superset of either, so nothing that was named before is lost.
     for sentence in re.split(r"(?<=[.!?])\s+", str(text or "")):
-        if not _H3_SPEAKING_SENTENCE_RE.search(sentence):
-            continue
-        # The lines themselves name their own speaker, so they are not the prose that
-        # describes who is on camera.
         if "<d>" in sentence:
             continue
-        if matcher.search(sentence) and _h3_gender_of(sentence) == other:
-            culprits.append(sentence.strip()[:120])
+        if (
+            _H3_SPEAKING_SENTENCE_RE.search(sentence)
+            and matcher.search(sentence)
+            and _h3_gender_of(sentence) == other
+        ):
+            culprit_sentences.append(" ".join(sentence.split())[:120])
+    for sentence in re.split(r"(?<=[.!?])\s+", str(text or "")):
+        cue = re.sub(r"<d\b[^>]*>.*?</d>", " ", sentence, flags=re.S)
+        if not _H3_SPEAKING_SENTENCE_RE.search(cue):
+            continue
+        if matcher.search(cue) and _h3_gender_of(cue) == other:
+            shown = " ".join(cue.split())[:120]
+            if shown and shown not in culprit_sentences:
+                culprit_sentences.append(shown)
+    culprits = culprit_sentences
     if not culprits:
         return ""
     ids = ", ".join(f"({speaker_id})" for speaker_id in sorted(spoken_ids))
@@ -2152,6 +2236,7 @@ def diagnose_h3_clip_prompt(
         findings.append(mismatch)
 
     findings.extend(h3_subject_binding_problems(text))
+    findings.extend(h3_unresolved_speaker_cue_problems(text))
 
     # The gesture paired with each line, because the global lip-sync instruction is
     # already in the prompt: a note that asks for lip-sync has nothing to add until

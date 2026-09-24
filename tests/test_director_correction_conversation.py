@@ -48,6 +48,7 @@ from services.director.h3_dialogue import (  # noqa: E402
     h3_shared_line_speaker_problems,
     h3_shared_project_phrases,
     h3_subject_binding_problems,
+    h3_unresolved_speaker_cue_problems,
     reconcile_audio_plan_with_dialogue,
     retain_dialogue_beats,
     review_h3_revision,
@@ -2209,3 +2210,57 @@ class ReferenceAndReasoningTests(unittest.TestCase):
 
         self.assertEqual(dashboard.count("Su lectura del shot"), 2)
         self.assertIn("{fixAnswer.analysis}", dashboard)
+
+
+class UnrenderableShotTests(unittest.TestCase):
+    """A spoken line whose cue names nobody is named before a render is attempted.
+
+    Measured on clip 38 of magnifica-humanitas, which could not be generated at all:
+    "H3SpeakerBindingError: MiniMax H3 Omni could not determine which referenced character
+    speaks '[Spanish] Báslyamente, un proyecto donde importa muchísimo más la...'". Its
+    second line is introduced by "His voice carries wisdom as he says:", which names no
+    character and carries no tag -- only a pronoun -- and the renderer refuses to hand a
+    line to a voice it cannot identify. Two lines in the whole project have this and both
+    are in that clip.
+    """
+
+    GOOD = (
+        "subject_definitions: <Subject 1> (S1): Valeria, a young woman.\n"
+        "detailed_description: [Shot 1] (S1) is seen finishing her thought: "
+        "<d>[Spanish] hola.</d>. Ricardo says: <d>[Spanish] adios.</d>.\n"
+        "- <Subject 1> (S1) = Valeria = [Speaker_01] = <Picture 1> + <Audio 1>.\n"
+        "- <Subject 2> (S2) = Ricardo = [Speaker_02] = <Picture 2> + <Audio 2>.\n"
+        "non_diegetic_music: N/A\n"
+    )
+
+    def test_a_cue_that_names_nobody_is_named_with_its_line(self):
+        prompt = (
+            "subject_definitions: <Subject 1> (S1): Valeria, a young woman.\n"
+            "detailed_description: [Shot 1] His voice carries wisdom as he says: "
+            "<d>[Spanish] Báslyamente, un proyecto.</d>.\n"
+            "non_diegetic_music: N/A\n"
+        )
+
+        problems = h3_unresolved_speaker_cue_problems(prompt)
+
+        self.assertEqual(len(problems), 1)
+        self.assertIn("His voice carries wisdom as he says", problems[0])
+        self.assertIn("Báslyamente", problems[0])
+        self.assertIn("refuses to render the shot", problems[0])
+
+    def test_a_tag_beside_the_line_is_enough(self):
+        self.assertEqual(h3_unresolved_speaker_cue_problems(self.GOOD), [])
+
+    def test_the_diagnosis_reports_it(self):
+        prompt = (
+            "subject_definitions: <Subject 1> (S1): Valeria, a young woman.\n"
+            "detailed_description: [Shot 1] His voice carries wisdom as he says: "
+            "<d>[Spanish] hola.</d>.\n"
+            "non_diegetic_music: N/A\n"
+        )
+
+        findings = " ".join(
+            str(finding) for finding in diagnose_h3_clip_prompt(prompt)["findings"]
+        )
+
+        self.assertIn("names no character", findings)
