@@ -2264,3 +2264,60 @@ class UnrenderableShotTests(unittest.TestCase):
         )
 
         self.assertIn("names no character", findings)
+
+    def _plan(self, prompt: str) -> dict:
+        return {
+            "video_prompt": prompt,
+            "_director_h3_source_prompt": prompt,
+            "_director_h3_compiled_prompt": "",
+            "_director_dialogue_beats": [],
+            "_director_subjects_on_screen": [1, 2],
+            "_director_h3_prompt_mode": "ref2va",
+            "_director_h3_model_family": "ref2va",
+            "_director_project_context": "RESTRICCIONES GLOBALES DEL PROYECTO",
+            "_director_audio_plan": {},
+        }
+
+    def test_the_preflight_refuses_it_before_the_model_is_loaded(self):
+        """The refusal used to happen inside the model, after 20 GB of weights.
+
+        Measured on clip 38: preflight printed "passed for 1 shot(s), 3 canonical
+        dialogue line(s)" and the renderer then refused the shot, so the prompt came
+        back unchanged and the cost was a full model load.
+        """
+
+        prompt = self.GOOD.replace(
+            "(S1) is seen finishing her thought: <d>[Spanish] hola.</d>",
+            "His voice carries wisdom as he says: <d>[Spanish] hola.</d>",
+        )
+
+        with self.assertRaises(ValueError) as caught:
+            pipeline._preflight_h3_director_prompts(
+                "minimax_h3_ref2va_fused_turbo", [self._plan(prompt)], pid="test"
+            )
+
+        message = str(caught.exception)
+        self.assertIn("shot 1", message)
+        self.assertIn("no cue names the character", message)
+
+    def test_the_preflight_accepts_a_shot_whose_lines_name_their_speaker(self):
+        plan = self._plan(self.GOOD)
+
+        pipeline._preflight_h3_director_prompts(
+            "minimax_h3_ref2va_fused_turbo", [plan], pid="test"
+        )
+
+        self.assertIn("<d>", plan["video_prompt"])
+
+    def test_one_voice_needs_no_cue(self):
+        """A single character is resolved implicitly, so nothing is refused."""
+
+        prompt = (
+            "subject_definitions: <Subject 1> (S1): Valeria, a young woman.\n"
+            "detailed_description: [Shot 1] She speaks: <d>[Spanish] hola.</d>.\n"
+            "non_diegetic_music: N/A\n"
+        )
+
+        pipeline._preflight_h3_director_prompts(
+            "minimax_h3_ref2va_fused_turbo", [self._plan(prompt)], pid="test"
+        )

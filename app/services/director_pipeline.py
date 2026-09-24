@@ -8650,6 +8650,40 @@ def _apply_h3_music_audio_contract(video_model: str, clip_plans: list[dict], par
             ]
 
 
+# Distinct subject/speaker identities a compiled prompt declares. The renderer only has to
+# pick a voice when there is more than one; with a single character it resolves implicitly.
+_H3_SUBJECT_ID_RE = re.compile(r"[(\[](S\d+)[)\]]|<Subject\s*(\d+)>", re.IGNORECASE)
+
+
+def _h3_unrenderable_speaker_lines(clip_plans: list[dict]) -> list[str]:
+    """Spoken lines the renderer will refuse, found before the model is loaded.
+
+    The renderer reads the character of a line from a name or an explicit ``<Subject N>``
+    tag beside it and raises rather than guess a voice. That check ran only inside the
+    model, so a shot whose cue named nobody loaded 20 GB of weights and then failed with
+    the prompt still unchanged. The same condition is measured here instead.
+    """
+
+    from services.director.h3_dialogue import h3_unresolved_speaker_cue_problems
+
+    problems: list[str] = []
+    for index, plan in enumerate(clip_plans):
+        prompt = str(plan.get("video_prompt") or "")
+        if not prompt:
+            continue
+        identities = {
+            # ``(S1)`` and ``<Subject 1>`` name the same character, so both forms are
+            # read as one identity rather than two.
+            int((letter_id or number_id).lstrip("Ss"))
+            for letter_id, number_id in _H3_SUBJECT_ID_RE.findall(prompt)
+        }
+        if len(identities) < 2:
+            continue
+        for problem in h3_unresolved_speaker_cue_problems(prompt):
+            problems.append(f"shot {index + 1}: {problem}")
+    return problems
+
+
 def _preflight_h3_director_prompts(
     video_model: str,
     clip_plans: list[dict],
@@ -8677,6 +8711,15 @@ def _preflight_h3_director_prompts(
         durations=durations,
         reference_manifests=reference_manifests,
     )
+    unrenderable = _h3_unrenderable_speaker_lines(clip_plans)
+    if unrenderable:
+        raise ValueError(
+            "MiniMax H3 Omni would refuse these spoken lines: no cue names the character "
+            "who speaks them, and the shot has more than one voice. Name the speaker "
+            "beside each line (for example '<Subject 2> says: <d>...</d>') or place that "
+            "character's explicit tag beside it.\n  - "
+            + "\n  - ".join(unrenderable)
+        )
     label = f"[Pipeline {pid}]" if pid else "[Pipeline]"
     dialogue_count = sum(
         str(plan.get("video_prompt") or "").lower().count("<d>")
@@ -8685,7 +8728,7 @@ def _preflight_h3_director_prompts(
     print(
         f"{label} H3 prompt preflight passed for {len(clip_plans)} "
         f"shot(s), {dialogue_count} canonical dialogue line(s), official "
-        "Context-IR field order verified."
+        "Context-IR field order verified, every spoken line names its speaker."
     )
     return clip_plans
 
