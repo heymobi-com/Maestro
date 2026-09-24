@@ -2914,7 +2914,7 @@ EDITS are also checked word for word, which is what keeps the spoken lines intac
 # both common, and only the first one matched an earlier version of this pattern.
 _REVISION_MARKER_RE = re.compile(
     r"(?mi)^[ \t]*(?:[-*+][ \t]+)?(?:#{1,6}[ \t]*)?[*_`]{0,2}[ \t]*"
-    r"(ANALYSIS|QUESTION|EDITS|OPTIONS|FIXED_PROMPT)[ \t]*[*_`]{0,2}[ \t]*:[ \t]*[*_`]{0,2}[ \t]*"
+    r"(ANALYSIS|QUESTION|FIXES|FIXED_PROMPT|EDITS|OPTIONS)[ \t]*[*_`]{0,2}[ \t]*:[ \t]*[*_`]{0,2}[ \t]*"
 )
 
 # One edit is a FIND line followed by a SET line, so a sentence full of colons and commas
@@ -3186,6 +3186,7 @@ def _parse_revision_envelope(text: str, current: str = "") -> dict:
                 "question": "",
                 "edits": [],
                 "options": [],
+                "fixes": [],
                 "prompt": _first_prompt_only(raw[head.start():].strip(), current),
             }
         if looks_like_compiled_h3_prompt(raw):
@@ -3194,10 +3195,14 @@ def _parse_revision_envelope(text: str, current: str = "") -> dict:
                 "question": "",
                 "edits": [],
                 "options": [],
+                "fixes": [],
                 "prompt": _first_prompt_only(raw, current),
             }
-        return {"analysis": raw, "question": "", "edits": [], "options": [], "prompt": ""}
-    parts = {"analysis": "", "question": "", "edits": [], "options": [], "prompt": ""}
+        return {
+            "analysis": raw, "question": "", "edits": [], "options": [],
+            "fixes": [], "prompt": "",
+        }
+    parts = {"analysis": "", "question": "", "edits": [], "options": [], "prompt": "", "fixes": []}
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
         value = raw[match.end():end].strip()
@@ -3208,6 +3213,13 @@ def _parse_revision_envelope(text: str, current: str = "") -> dict:
             parts["analysis"] = value
         elif key == "QUESTION":
             parts["question"] = value
+        elif key == "FIXES":
+            from services.director.prompt_fixes import parse_prompt_fixes
+
+            try:
+                parts["fixes"] = parse_prompt_fixes(value)
+            except Exception as exc:  # a malformed decision is not a crash
+                parts["analysis"] = (parts["analysis"] + f"\n\n({exc})").strip()
         elif key == "EDITS":
             parts["edits"] = _parse_revision_edits(value)
         elif key == "OPTIONS":
@@ -3635,8 +3647,19 @@ def revise_clip_prompt(
     task.extend([
         "",
         "THE DIRECTOR'S NOTE — fix exactly this:",
-        note,        "",
-        "Answer with ANALYSIS, QUESTION and FIXED_PROMPT.",
+        note,
+        "",
+        "Answer with ANALYSIS, QUESTION, FIXES and optionally FIXED_PROMPT.",
+        "ANALYSIS and QUESTION are free prose: the diagnosis, what is wrong and why.",
+        "FIXES is how the correction is applied, one decision per line, and it is applied to the",
+        "saved prompt by the pipeline itself -- so never re-type the shot to change one thing:",
+        "    SET_SPEAKER <line number> <Sx>    that spoken line belongs to that speaker",
+        "    SET_SUBJECT <number> <Name>       <Subject n> is that participant (a swapped cast)",
+        "    NAME_SUBJECT <number> <Name>      that cast entry never says who it is",
+        "    MERGE_SUBJECTS                    subject_definitions is declared more than once",
+        "Use NO_FIX on its own line when the note must be resolved outside this prompt, and say",
+        "what you decided and why in ANALYSIS. Keep FIXED_PROMPT for a rewrite of this shot's",
+        "text that the vocabulary above cannot express.",
     ])
 
     from services import llm_service
@@ -3706,6 +3729,7 @@ def revise_clip_prompt(
         "question": parts["question"],
         "edits": list(parts["edits"]),
         "options": list(parts["options"]),
+        "fixes": list(parts.get("fixes") or []),
         "note": "",
         "diagnosis": diagnosis,
         "rewritten": False,
@@ -3727,6 +3751,28 @@ def revise_clip_prompt(
         below, so nothing is trusted on the assistant's word.
         """
 
+        if answer.get("fixes"):
+            # What the assistant is good at is the decision -- "the third line is Ricardo's" --
+            # and what code is good at is applying it. Measured with the model in use, re-typing
+            # the shot cost 1,675 generated tokens per answer and any paraphrase was refused for
+            # not matching character for character, so a correction loop read as errors only.
+            from services.director.prompt_fixes import apply_prompt_fixes
+
+            try:
+                fixed, notes = apply_prompt_fixes(
+                    prompt,
+                    answer["fixes"],
+                    project_context=str(clip.get("_director_project_context") or ""),
+                )
+            except Exception as exc:
+                return "", [f"la corrección no se pudo aplicar: {exc}"]
+            if notes:
+                print(
+                    f"[Pipeline {pid}] Shot {clip_index + 1}: applied "
+                    f"{len(notes)} correction(s): " + "; ".join(notes)
+                )
+            if fixed != prompt:
+                return fixed, []
         if answer["prompt"]:
             # The answer may be the whole prompt or only this shot's text, which is what
             # the task asks for when it sends THIS SHOT'S TEXT and the project text as
