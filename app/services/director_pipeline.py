@@ -3541,6 +3541,7 @@ def revise_clip_prompt(
         h3_clip_text,
         h3_dialogue_blocks,
         h3_proposal_warnings,
+        h3_restore_shot_marker,
         h3_shared_line_speaker_problems,
         h3_shared_project_phrases,
         review_h3_revision,
@@ -3657,6 +3658,11 @@ def revise_clip_prompt(
         "    SET_SUBJECT <number> <Name>       <Subject n> is that participant (a swapped cast)",
         "    NAME_SUBJECT <number> <Name>      that cast entry never says who it is",
         "    MERGE_SUBJECTS                    subject_definitions is declared more than once",
+        "For a contradiction inside the prose (a sentence that describes the speaker as feminine",
+        "when the tagged lines are (S2), for instance), send EDITS: FIND the sentence, SET it with",
+        "the speaker named, so the renderer has nothing to interpret. Do not re-type the whole shot.",
+        "The [Shot 1] marker, the identity/world anchors and the project text are written by",
+        "Maestro: never type them, and losing one is not a reason to be refused.",
         "Use NO_FIX on its own line when the note must be resolved outside this prompt, and say",
         "what you decided and why in ANALYSIS. Keep FIXED_PROMPT for a rewrite of this shot's",
         "text that the vocabulary above cannot express.",
@@ -3782,7 +3788,10 @@ def revise_clip_prompt(
             placed = _clip_scoped_rewrite(prompt, text, frozen)
             if placed is not None:
                 return placed, []
-            return text, []
+            # Judged as a whole prompt from here on, and the [Shot 1] marker is written by the
+            # compiler: an answer that carries the shot's text without it was refused as a whole
+            # and the correction was lost, which is what a director saw as "no corrige nada".
+            return h3_restore_shot_marker(prompt, text), []
         if answer["edits"]:
             return _apply_revision_edits(prompt, answer["edits"])
         return "", []

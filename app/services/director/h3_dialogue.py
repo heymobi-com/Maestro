@@ -2685,6 +2685,42 @@ def review_h3_revision(
             problems.append(problem)
     return problems
 
+
+def h3_restore_shot_marker(original: str, revised: str) -> str:
+    """Put the ``[Shot 1]`` marker back when a rewrite dropped it.
+
+    Measured on a real correction of shot 109: the assistant named the cause correctly -- the prose
+    describes as feminine the person whose three spoken lines belong to (S2), described as
+    masculine -- and the whole answer was thrown away with "La propuesta fue rechazada: The rewrite
+    lost its [Shot 1] marker." The marker is written by Maestro: the compiler inserts it into the
+    body it builds, so an answer that rewrites a shot's text can legitimately not carry one, and
+    refusing the correction over it costs the director the fix it asked for.
+
+    Restored where the original had it, by anchoring on the words that follow it; when those words
+    are not in the rewrite either, the marker goes at the head of the action field, which is where
+    the compiler writes it. Nothing else is touched.
+    """
+
+    text = str(revised or "")
+    if _declared_shot_numbers(text):
+        return text
+    if 1 not in _declared_shot_numbers(str(original or "")):
+        # The prompt being corrected does not carry one either: there is nothing to restore, and
+        # requiring one would refuse every answer, which is the fault this function exists for.
+        return text
+    anchor = re.search(r"\[Shot\s+1\]\s*(.{0,60})", str(original or ""), re.S | re.IGNORECASE)
+    if anchor:
+        tail = anchor.group(1).strip()
+        if tail and tail in text:
+            return text.replace(tail, f"[Shot 1] {tail}", 1)
+    head = re.search(
+        r"(?mi)^[ \t]*(?:detailed_description|integrated_multimodal_description)[ \t]*:[ \t]*",
+        text,
+    )
+    if head:
+        return text[: head.end()] + "[Shot 1] " + text[head.end():]
+    return text
+
 def _source_prompt_parts(
     prompt: str,
     *,

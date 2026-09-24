@@ -24,7 +24,7 @@ from services.director.prompt_fixes import (  # noqa: E402
     set_line_speaker,
     set_subject_person,
 )
-from services.director.h3_dialogue import h3_dialogue_blocks  # noqa: E402
+from services.director.h3_dialogue import h3_dialogue_blocks, h3_restore_shot_marker  # noqa: E402
 from services.director.prompt_normalize import subject_label_skeleton  # noqa: E402
 
 FIELD_NAMES = (
@@ -197,6 +197,49 @@ class ParsingTests(unittest.TestCase):
         self.assertIn("(S2) <d>[Spanish] Baslyamente", fixed)
         self.assertIn("Ricardo, facial", fixed)
         self.assertEqual(len(notes), 2)
+
+
+class ShotMarkerTests(unittest.TestCase):
+    """A correction must not be thrown away over a marker Maestro writes itself.
+
+    Measured on shot 109: the diagnosis was right -- the prose describes as feminine the person
+    whose three lines belong to (S2) -- and the answer was rejected with "The rewrite lost its
+    [Shot 1] marker", so the director got no fix at all.
+    """
+
+    ORIGINAL = (
+        "detailed_description: The target video keeps its texture. [Shot 1] The scene continues "
+        "in the loft. (S2) speaks thoughtfully: <d>[Spanish] hola.</d>.\n"
+    )
+
+    def test_the_marker_goes_back_where_the_original_had_it(self):
+        rewritten = (
+            "detailed_description: The target video keeps its texture. The scene continues "
+            "in the loft. (S2) speaks thoughtfully: <d>[Spanish] hola.</d>.\n"
+        )
+
+        fixed = h3_restore_shot_marker(self.ORIGINAL, rewritten)
+
+        self.assertIn("[Shot 1] The scene continues in the loft.", fixed)
+
+    def test_a_rewrite_that_keeps_its_marker_is_untouched(self):
+        self.assertEqual(h3_restore_shot_marker(self.ORIGINAL, self.ORIGINAL), self.ORIGINAL)
+
+    def test_nothing_is_invented_when_the_original_has_no_marker(self):
+        original = "detailed_description: (S2) speaks: <d>[Spanish] hola.</d>.\n"
+        rewritten = "detailed_description: (S2) speaks: <d>[Spanish] hola.</d>.\n"
+
+        self.assertEqual(h3_restore_shot_marker(original, rewritten), rewritten)
+
+    def test_the_marker_lands_at_the_action_head_when_the_words_are_gone(self):
+        rewritten = (
+            "detailed_description: A man and a woman talk in a loft, warmly.\n"
+            "overall_soundscape: Quiet room tone.\n"
+        )
+
+        fixed = h3_restore_shot_marker(self.ORIGINAL, rewritten)
+
+        self.assertIn("detailed_description: [Shot 1] A man and a woman talk", fixed)
 
 
 if __name__ == "__main__":
