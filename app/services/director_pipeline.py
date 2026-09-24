@@ -8733,6 +8733,28 @@ def _preflight_h3_director_prompts(
     return clip_plans
 
 
+def _audit_prompts_before_generating(pid: str, clip_plans: list[dict]) -> None:
+    """Report the project's own inconsistencies before any model is loaded.
+
+    Measured on a real 177-shot project: 56 shots declare a Subject for the wrong person
+    (the project's own SUBJECT LOCK says otherwise), 20 emit ``subject_definitions`` twice,
+    8 give a line to a different speaker than the neighbouring shot gives it, and 131 write
+    their action as loose prose. The director was finding these by hand after render; a
+    director's time is the expensive part of this pipeline, so they are named here, in
+    seconds, with no GPU. Nothing is changed or blocked.
+    """
+
+    from services.director.prompt_audit import audit_project_prompts, format_audit_report
+
+    label = f"[Pipeline {pid}]" if pid else "[Pipeline]"
+    try:
+        audit = audit_project_prompts(clip_plans)
+    except Exception as exc:  # an audit must never stop a render
+        print(f"{label} prompt audit skipped: {exc}")
+        return
+    print(f"{label} " + format_audit_report(audit, limit=5))
+
+
 def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                           planned_clips: list[dict], clip_images: list[str],
                           clip_keyframes: Optional[list[list[str]]] = None,
@@ -8740,6 +8762,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
     """Generate multi-clip video with optional keyframe injection. Returns list of output filenames."""
     _validate_director_models(params, stages=("video",))
     video_model = params.get("video_model") or "ltx2_22B_distilled_1_1"
+    _audit_prompts_before_generating(pid, clip_plans)
     _apply_h3_music_audio_contract(video_model, clip_plans, params)
     _preflight_h3_director_prompts(video_model, clip_plans, pid=pid)
     video_params = params.get("video_params", {})
