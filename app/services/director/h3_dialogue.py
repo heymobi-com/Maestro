@@ -4272,12 +4272,44 @@ def _reference_relationships(
     )
 
 
+# The project's own subject lock, written by the director in the project text:
+#     SUBJECT LOCK (critico, no negociable):
+#     - <Subject 1> es SIEMPRE Valeria. <Subject 2> es SIEMPRE Ricardo.
+# It is the authority on which participant is which Subject, so it is parsed here and used
+# when the compiled definitions are numbered.
+_SUBJECT_LOCK_RE = re.compile(
+    r"<Subject\s*(\d+)>\s*(?:es\s+SIEMPRE|is\s+ALWAYS)\s+"
+    r"([A-Za-z\u00c1\u00c9\u00cd\u00d3\u00da\u00dc\u00d1"
+    r"\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc\u00f1]+)",
+    re.IGNORECASE,
+)
+
+
+def project_subject_lock(project_context: str) -> dict[int, str]:
+    """The Subject-to-participant map a project declares in its own SUBJECT LOCK block."""
+
+    lock: dict[int, str] = {}
+    for match in _SUBJECT_LOCK_RE.finditer(str(project_context or "")):
+        lock[int(match.group(1))] = match.group(2)
+    return lock
+
+
 _H3_SUBJECT_SLOT_RE = re.compile(r"<\s*Subject\s+(\d+)\s*>", re.IGNORECASE)
 _H3_SPEAKER_TOKEN_RE = re.compile(r"\(\s*S\s*(\d+)\s*\)", re.IGNORECASE)
 
+# The participant a row starts with, before any other words: "Ricardo (S2), leaning in".
+_H3_SUBJECT_ROW_NAME_RE = re.compile(
+    r"^\s*(?:<\s*Subject\s*\d+\s*>\s*)?(?:\(\s*S\s*\d+\s*\)\s*)?\s*"
+    r"([A-Za-z\u00c1\u00c9\u00cd\u00d3\u00da\u00dc\u00d1\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc\u00f1'\-]+)"
+)
 
-def _planner_subject_slot(subject: Any, position: int) -> tuple[int, str]:
-    """Recover the planner's own ``<Subject N>`` slot and ``(Sx)`` speaker.
+
+def _planner_subject_slot(
+    subject: Any,
+    position: int,
+    lock: Mapping[int, str] | None = None,
+) -> tuple[int, str]:
+    """Recover the planner's ``<Subject N>`` slot and ``(Sx)`` speaker for a participant.
 
     The short-film planner emits ``subjects_on_screen`` rows whose only fields
     are ``visual_description`` and ``position_or_relation``, and it names the
@@ -4288,8 +4320,17 @@ def _planner_subject_slot(subject: Any, position: int) -> tuple[int, str]:
     numbering while ``subject_definitions`` swapped it, so one ``<Subject 1>``
     was bound to ``(S1)`` in one field and to ``(S2)`` in the other. The model
     resolved that contradiction by giving one participant the other's reference
-    appearance. Trust the explicit label, and fall back to list position only
-    when the planner omits it.
+    appearance.
+
+    Measured again on a 177-shot project: the rows arrive in *frame* order and
+    carry the participant's own label inline -- ``"Ricardo (S2), leaning into the
+    frame."`` -- without the ``<Subject N>`` wrapper this parser required, so
+    every one of them fell through to list position. That is how 56 of those
+    shots were built on the other person, which is what puts one character's
+    voice on the other one. The name is now the first thing consulted, against
+    the project's SUBJECT LOCK; the explicit label and the inline number follow,
+    and list position stays as the last resort for a project with no lock and no
+    labelling at all.
     """
 
     raw = _field(subject, "visual_description", "")
@@ -4297,9 +4338,26 @@ def _planner_subject_slot(subject: Any, position: int) -> tuple[int, str]:
         raw = subject
     text = str(raw or "")
     tag = _H3_SUBJECT_SLOT_RE.search(text)
-    slot = int(tag.group(1)) if tag and int(tag.group(1)) > 0 else position
     token = _H3_SPEAKER_TOKEN_RE.search(text)
-    return slot, (f"S{int(token.group(1))}" if token else "")
+    inline_speaker = f"S{int(token.group(1))}" if token else ""
+
+    slot = 0
+    locked = dict(lock or {})
+    if locked:
+        named = _H3_SUBJECT_ROW_NAME_RE.match(text)
+        person = named.group(1).casefold() if named else ""
+        for number, name in locked.items():
+            if person and str(name).casefold() == person:
+                slot = int(number)
+                break
+    if not slot and tag and int(tag.group(1)) > 0:
+        slot = int(tag.group(1))
+    if not slot and token and int(token.group(1)) > 0:
+        # This pipeline numbers its speakers as identities -- "S1 is always
+        # Valeria, reused when she speaks again, never S3" -- so the label the
+        # planner wrote inline is that participant's number.
+        slot = int(token.group(1))
+    return slot or position, inline_speaker
 
 
 def _subject_description_without_label(subject: Any) -> str:
@@ -4338,22 +4396,27 @@ def _ref2va_subject_definitions(
     registry: Mapping[str, Any],
     source_bindings: Mapping[int, Sequence[str]] | None = None,
     body: str = "",
+    project_context: str = "",
 ) -> list[str]:
-    """Emit one definition per participant, numbered as the shot numbers them.
+    """Emit one definition per participant, numbered as the project numbers them.
 
     ``body`` is the compiled action text, which already carries the canonical
     ``<Subject N> (Sx)`` pairs. Reusing them here is what keeps the identity
     block and the action text describing the same person; without it the two
     disagreed for every shot whose ``subjects_on_screen`` rows arrived in a
     different order than the planner numbered them.
+
+    ``project_context`` carries the project's SUBJECT LOCK when it has one, which
+    is the authority on who is which Subject.
     """
 
     source_bindings = source_bindings or {}
     body_bindings = _h3_body_subject_bindings(body)
+    lock = project_subject_lock(project_context)
     rows: list[dict[str, Any]] = []
     seen: dict[int, int] = {}
     for position, subject in enumerate(subjects or [], start=1):
-        slot, inline_speaker = _planner_subject_slot(subject, position)
+        slot, inline_speaker = _planner_subject_slot(subject, position, lock)
         character_id = _normalized_space(_field(subject, "character_id", ""))
         speaker_name = _normalized_space(_field(subject, "speaker_name", ""))
         name = _clean_h3_metadata(speaker_name or character_id, 80)
@@ -4607,6 +4670,7 @@ def compile_h3_official_prompt(
             registry,
             subject_sources,
             body=body,
+            project_context=project_context,
         )
         definitions = "\n".join([*subject_definitions, *reference_definitions])
         if not definitions:

@@ -36,17 +36,33 @@ from services.director.h3_dialogue import (
     h3_subject_binding_problems,
     h3_unresolved_speaker_cue_problems,
 )
-
-# The project's subject lock, written by the director: "<Subject 1> es SIEMPRE Valeria."
-_SUBJECT_LOCK_RE = re.compile(
-    r"<Subject\s*(\d+)>\s*es\s+SIEMPRE\s+([A-Za-z\u00c1\u00c9\u00cd\u00d3\u00da\u00dc\u00d1"
-    r"\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc\u00f1]+)",
-    re.IGNORECASE,
-)
+from services.director.h3_dialogue import project_subject_lock as _project_subject_lock
 
 # One ``subject_definitions:`` field head. Emitting it twice is how a shot ends up
 # declaring its cast in two blocks.
 _SUBJECT_FIELD_RE = re.compile(r"(?mi)^[ \t]*subject_definitions[ \t]*:")
+
+# Where the cast block ends: at the next Context-IR field.
+_NEXT_FIELD_RE = re.compile(
+    r"(?m)^[ \t]*(?:summary|retention_analysis|detailed_description|"
+    r"integrated_multimodal_description|overall_soundscape|non_diegetic_music)[ \t]*:"
+)
+
+
+def subject_block(text: str) -> str:
+    """The ``subject_definitions`` block alone.
+
+    Scanned on its own because a Subject is mentioned all over the prompt -- ``<Subject 1>
+    (appears in [Shot 1]): fully_preserved`` in ``retention_analysis`` is not a cast entry, and
+    reading those as entries reported a fault in every one of 177 shots.
+    """
+
+    source = str(text or "")
+    head = _SUBJECT_FIELD_RE.search(source)
+    if not head:
+        return ""
+    rest = _NEXT_FIELD_RE.search(source, head.end())
+    return source[head.start():rest.start()] if rest else source[head.start():]
 
 # The cast a shot declares in its own head, accepting the dialects found in the wild:
 #   "<Subject 1> (S1): Valeria", "<Subject 1> is Valeria (S1):", "<Subject 1> = Valeria ="
@@ -54,6 +70,14 @@ _SUBJECT_HEAD_NAME_RE = re.compile(
     r"<Subject\s*(\d+)>\s*(?:(?:\(S\d+\)\s*[:=])|(?:is\s+)|(?:=\s*))"
     r"\s*([A-Za-z\u00c1\u00c9\u00cd\u00d3\u00da\u00dc\u00d1\u00e1\u00e9\u00ed\u00f3\u00fa"
     r"\u00fc\u00f1]+)",
+    re.IGNORECASE,
+)
+
+# One entry of the cast, with the participant it names (or the boilerplate where the name
+# should be). The (Sx) label is optional because a shot may omit it entirely.
+_SUBJECT_HEAD_ENTRY_RE = re.compile(
+    r"<Subject\s*\d+>\s*(?:\(?\s*S?\s*\d+\s*\)?\s*)?[:=]?\s*"
+    r"([A-Za-z\u00c1\u00c9\u00cd\u00d3\u00da\u00dc\u00d1\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc\u00f1]+)",
     re.IGNORECASE,
 )
 
@@ -69,10 +93,7 @@ _DRAFT_PROJECT_TEXT_CHARS = 2000
 def project_subject_lock(project_context: str) -> dict[int, str]:
     """The Subject-to-person map the project declares, from its own SUBJECT LOCK block."""
 
-    lock: dict[int, str] = {}
-    for match in _SUBJECT_LOCK_RE.finditer(str(project_context or "")):
-        lock[int(match.group(1))] = match.group(2)
-    return lock
+    return _project_subject_lock(project_context)
 
 
 def _findings_for_shot(
@@ -146,6 +167,24 @@ def _findings_for_shot(
                 if len(head_vs_binding) > 2 else ""
             ),
         )
+
+    # An entry whose text never says who the participant is, only what to preserve. Measured on
+    # a real project: "<Subject 2> (S2): facial, bodily, and character identity come from
+    # <Picture 2>." -- a reference bound to nobody, which is one of the ways the same person
+    # ends up on screen twice. The audit read the name as the word "facial" before this check.
+    if lock:
+        names = {str(name).casefold() for name in lock.values()}
+        for entry in _SUBJECT_HEAD_ENTRY_RE.finditer(subject_block(prompt)):
+            name = entry.group(1)
+            if name.casefold() not in names:
+                add(
+                    "subject-entry-unnamed",
+                    "error",
+                    f"An entry in subject_definitions names no participant (it reads "
+                    f"'{entry.group(0).strip()[:70]}'), so its reference is bound to nobody. "
+                    "The entry has to say who the participant is before what to preserve.",
+                )
+                break
 
     unnameable = h3_unresolved_speaker_cue_problems(prompt)
     if unnameable:
