@@ -792,6 +792,7 @@ function ClipCard({ clip, pipeline, busy = false, onTag, onRerunImage, onRerunVi
                   scope={fixAnswer?.clip_prompt
                     ? `${fixAnswer.clip_prompt.length} caracteres son de este clip; el resto es el texto del proyecto, que no cambia`
                     : undefined}
+                  persistKey={`prompt-${pipeline.pipeline_id}-${clip.index}`}
                   applied={!windowed && editVideoPrompt === proposalPrompt}
                   canApply={!windowed}
                   note="Este clip usa varios prompts por ventana: aplica el cambio a mano en la ventana que corresponda."
