@@ -14,6 +14,7 @@ import { formatSeconds, recommendedWindowProfile } from './DurationSlider'
 import { DurationPresetControl } from './DurationPresetControl'
 import { LONG_FORM_MAX_SECONDS, formatDuration } from '../../lib/durationPlanning'
 import { formatEstimatedClock, formatEtaDuration } from '../../lib/format'
+import { parseDirectorScript } from '../../lib/directorScript'
 import type { DirectorPipelineType, DirectorShotImageGuidance, DirectorSkill, ModelOptions, ShortFilmCharacter, ShortFilmPath } from '../../types'
 
 // AUDIO_ACCEPT lists both audio formats AND video formats. When a video
@@ -535,6 +536,19 @@ export function DirectorChat() {
   const autoMode = useStore(s => s.directorAutoMode)
   const skill = useStore(s => s.directorSkill)
   const setSkill = useStore(s => s.setDirectorSkill)
+  // Podcast and Viral Video accept written words as well as recorded audio.
+  const scriptSource = useStore(s => s.directorScriptSource)
+  const scriptText = useStore(s => s.directorScriptText)
+  const setScriptSource = useStore(s => s.setDirectorScriptSource)
+  const setScriptText = useStore(s => s.setDirectorScriptText)
+  // Only the two skills whose planners read a written transcript offer the script source.
+  const scriptCapable = skill === 'podcast' || skill === 'viral_video'
+  const scriptSummary = useMemo(() => {
+    const parsed = parseDirectorScript(scriptText)
+    const spoken = parsed.transcript.length
+    if (!spoken) return 'No speaker rows yet. Write NAME: line so the model has words to say.'
+    return `${spoken} spoken turn${spoken === 1 ? '' : 's'}, ${parsed.wordCount} words, about ${Math.round(parsed.duration)}s of speech`
+  }, [scriptText])
   const musicSource = useStore(s => s.directorMusicSource)
   const setMusicSource = useStore(s => s.setDirectorMusicSource)
   const songDescription = useStore(s => s.directorSongDescription)
@@ -905,7 +919,33 @@ export function DirectorChat() {
           </div>
         )}
 
-        {skill && (!isShortFilm || shortFilmPath === 'audio') && (atStep('upload') || atStep('analyze') || pastStep('analyze')) && (
+        {/* Podcast and Viral Video take written words as well as recorded audio. */}
+        {scriptCapable && scriptSource === null && atStep('upload') && (
+          <SystemBubble>
+            <p className="text-xs text-text-secondary mb-2">
+              {skillLabel}: where do the words come from?
+            </p>
+            <ScriptSourceChooser onSelect={setScriptSource} />
+          </SystemBubble>
+        )}
+        {scriptCapable && scriptSource === 'script' && (
+          <SystemBubble>
+            <p className="text-xs text-text-secondary mb-2">
+              Write the script. One row per turn: <span className="font-mono">NAME: line</span>, and{' '}
+              <span className="font-mono">&lt;d&gt;[Spanish] ...&lt;/d&gt;</span> to fix the spoken language.
+            </p>
+            <textarea
+              value={scriptText}
+              onChange={event => setScriptText(event.target.value)}
+              rows={8}
+              spellCheck={false}
+              placeholder={'VALERIA: <d>[Spanish] La dignidad humana no se negocia.</d>\nRICARDO: <d>[Spanish] ¿Y qué propones para defenderla hoy?</d>'}
+              className="w-full rounded-lg border border-border bg-bg-tertiary/50 p-2 text-xs text-text-primary font-mono resize-y focus:border-accent-blue focus:outline-none"
+            />
+            <p className="text-[10px] text-text-muted mt-1">{scriptSummary}</p>
+          </SystemBubble>
+        )}
+        {skill && (!isShortFilm || shortFilmPath === 'audio') && scriptSource !== 'script' && (atStep('upload') || atStep('analyze') || pastStep('analyze')) && (
           <>
             {!audioFile && !pastStep('analyze') ? (
               <SystemBubble>
@@ -1625,6 +1665,28 @@ function SkillSelector({ onSelect }: { onSelect: (skill: DirectorSkill) => void 
               Soon
             </span>
           )}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function ScriptSourceChooser({ onSelect }: { onSelect: (source: 'audio' | 'script') => void }) {
+  const sources = [
+    { id: 'audio' as const, label: 'Upload Audio', desc: 'A recording, a song or a podcast', icon: Upload },
+    { id: 'script' as const, label: 'Write a Script', desc: 'Characters and dialogue you author', icon: FileText },
+  ]
+  return (
+    <div className="grid grid-cols-2 gap-2">
+      {sources.map((source) => (
+        <button
+          key={source.id}
+          onClick={() => onSelect(source.id)}
+          className="p-3 rounded-lg border border-accent-blue/30 bg-bg-tertiary/50 hover:border-accent-blue hover:bg-accent-blue/5 cursor-pointer text-left transition-all"
+        >
+          <source.icon size={16} className="text-accent-blue mb-1.5" />
+          <div className="text-xs font-medium text-text-primary">{source.label}</div>
+          <div className="text-[10px] text-text-muted mt-0.5">{source.desc}</div>
         </button>
       ))}
     </div>

@@ -5,6 +5,7 @@ import { applyTtsVoices, ttsAudioModeForCount, ttsCharacterEnhancePrompt, ttsSpe
 import { vigglePreparationKey, viggleTimeline } from '../lib/viggle'
 import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, StudioVideoWorkflow, StudioVideoCreateRoute, StudioVideoEffectiveCreateRoute, StudioImageWorkflow, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineClipState, PipelineRepairState, SavedPipelineState, DirectorQueueState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping, H3WindowPlan, MiniMaxH3Reference, AppMode } from '../types'
 import * as api from '../api/client'
+import { parseDirectorScript } from '../lib/directorScript'
 import { applyThemePrefs, getStoredPrefs, type FamilyId, type ThemeMode, type ThemePrefs } from '../lib/theme'
 import {
   effectiveH3OmniSequenceFrames,
@@ -2082,6 +2083,13 @@ interface AppState {
   setDirectorSeamless: (v: boolean) => void
   setDirectorShotImageGuidance: (v: DirectorShotImageGuidance) => void
   setDirectorSkill: (skill: DirectorSkill) => void
+  /** Where a project's words come from: recorded audio, or a written script. */
+  directorScriptSource: 'audio' | 'script' | null
+  directorScriptText: string
+  directorScriptClips: PlannedClip[]
+  directorScriptTranscript: Array<{ start: number; end: number; speaker: string; text: string }>
+  setDirectorScriptSource: (source: 'audio' | 'script') => void
+  setDirectorScriptText: (text: string) => void
   setDirectorResolution: (preset: ResolutionPreset) => void
   setDirectorAspectRatio: (ratio: AspectRatio) => void
   setDirectorVideoInferenceSteps: (modelType: string, steps: number | null) => void
@@ -9835,6 +9843,10 @@ export const useStore = create<AppState>((set, get) => ({
   directorSkill: null,
   directorMusicSource: null,
   directorMusicModel: DEFAULT_MUSIC_MODEL,
+  directorScriptSource: null,
+  directorScriptText: '',
+  directorScriptClips: [],
+  directorScriptTranscript: [],
   directorSongDescription: '',
   directorSongInstrumental: false,
   directorSongStyle: '',
@@ -9898,6 +9910,22 @@ export const useStore = create<AppState>((set, get) => ({
     if (last && last.stage === stage && last.text === t) return {}
     return { directorLlmLog: [...s.directorLlmLog, { stage, text: t }] }
   }),
+  // A written script needs no audio pass, so choosing it lands on the step that
+  // already collects the scene description. The story path does the same.
+  setDirectorScriptSource: (source) => set(state => ({
+    directorScriptSource: source,
+    ...(source === 'script' && state.directorStep === 'upload' ? { directorStep: 'style' as const } : {}),
+  })),
+  // The timeline and the transcript are derived here rather than at send time, so
+  // the review steps show the clips the render will actually use.
+  setDirectorScriptText: (text) => {
+    const parsed = parseDirectorScript(text)
+    set({
+      directorScriptText: text,
+      directorScriptClips: parsed.clips as unknown as PlannedClip[],
+      directorScriptTranscript: parsed.transcript,
+    })
+  },
   setDirectorSkill: (skill) => {
     set({ directorSkill: skill })
     const state = get()
@@ -10535,7 +10563,11 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   directorPlanPrompts: async () => {
-    const { directorPlannedClips, directorSceneDescription, directorAnalysis } = get()
+    const { directorSceneDescription, directorAnalysis } = get()
+    // A written script replaces the analysed timeline: the clips and their lines are
+    // the authored ones, so the planner reads exactly what the user wrote.
+    const scriptMode = get().directorScriptSource === 'script' && get().directorScriptClips.length > 0
+    const directorPlannedClips = scriptMode ? get().directorScriptClips : get().directorPlannedClips
     if (!directorPlannedClips.length || !directorSceneDescription.trim()) return
     set({ directorLoading: true, directorError: null, directorStep: 'plan' })
     try {
@@ -10587,7 +10619,10 @@ export const useStore = create<AppState>((set, get) => ({
           ...timelineOptions,
           clips: directorPlannedClips,
           scene_description: directorSceneDescription,
-          lyrics: directorAnalysis?.lyrics ?? undefined,
+          lyrics: scriptMode ? get().directorScriptTranscript : (directorAnalysis?.lyrics ?? undefined),
+          // The authored rows reach the planner as the source document too, so the
+          // H3 ledger locks the written lines instead of accepting a paraphrase.
+          ...(scriptMode ? { story_description: get().directorScriptText } : {}),
           bpm: directorAnalysis?.bpm ?? 120,
           reference_image_path: refImagePath ?? undefined,
           ...extraRefs,
@@ -11002,6 +11037,10 @@ export const useStore = create<AppState>((set, get) => ({
       directorLlmLog: [],
       directorSkill: null,
       directorMusicSource: null,
+      directorScriptSource: null,
+      directorScriptText: '',
+      directorScriptClips: [],
+      directorScriptTranscript: [],
       directorSongDescription: '',
       directorSongInstrumental: false,
       directorSongStyle: '',
@@ -13572,7 +13611,9 @@ export const useStore = create<AppState>((set, get) => ({
       _director_project_id: state.directorProjectId || undefined,
       _director_parent_pipeline_id: state.directorSourcePipelineId || undefined,
       scene_description: directorSceneDescription,
-      audio_path: effectiveDirectorAudioPath,
+      // A written script has no soundtrack: H3 generates the voices for its lines.
+      audio_path: state.directorScriptSource === 'script' && state.directorScriptClips.length > 0
+        ? undefined : effectiveDirectorAudioPath,
       // Audio analysis already produced this reusable stem for transcription.
       // LTX-2.5 can condition mouth motion on it while Director keeps the
       // untouched song as the final joined soundtrack.
@@ -13588,7 +13629,8 @@ export const useStore = create<AppState>((set, get) => ({
       character_ref_labels: state.directorCharacterRefLabels.length > 0 ? state.directorCharacterRefLabels : undefined,
       location_ref_paths: locPaths.length > 0 ? locPaths : undefined,
       location_ref_labels: state.directorLocationRefLabels.length > 0 ? state.directorLocationRefLabels : undefined,
-      planned_clips: directorPlannedClips,
+      planned_clips: state.directorScriptSource === 'script' && state.directorScriptClips.length > 0
+        ? state.directorScriptClips : directorPlannedClips,
       prepared_clip_plans: state.directorClipPlans.length > 0
         ? state.directorClipPlans : undefined,
       prepared_planned_clips: state.directorClipPlans.length > 0
@@ -13612,7 +13654,8 @@ export const useStore = create<AppState>((set, get) => ({
       llm_model_id: state.servicesConfig?.llm_model_id || state.llmStatus?.model_id,
       llm_device: state.servicesConfig?.llm_device || state.llmStatus?.device,
       llm_provider: state.servicesConfig?.llm_provider || 'local',
-      lyrics: directorAnalysis?.lyrics || '',
+      lyrics: state.directorScriptSource === 'script' && state.directorScriptTranscript.length > 0
+        ? state.directorScriptTranscript : (directorAnalysis?.lyrics || ''),
       bpm: directorAnalysis?.bpm,
       speaker_mappings: directorSpeakerMappings,
       characters: shortFilmCharacters,

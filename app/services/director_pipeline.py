@@ -7878,9 +7878,16 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
             "lyrics": params.get("lyrics"),
         })
     elif pipeline_type in ("podcast", "viral_video"):
+        # A written script arrives as structured rows and an audio project arrives as
+        # the analysis transcript; the planner reads both the same way. A plain string
+        # is not a transcript -- iterating it would hand the planner single characters.
+        written = params.get("transcript")
+        if not isinstance(written, list):
+            analysed = params.get("lyrics")
+            written = analysed if isinstance(analysed, list) else None
         planner_kwargs.update({
             "clips": planned_clips if planned_clips else None,
-            "transcript": params.get("lyrics"),
+            "transcript": written,
             "audio_path": params.get("audio_path"),
             "concept": scene_description,
             "visual_style": params.get("visual_style", ""),
