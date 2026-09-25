@@ -10562,6 +10562,13 @@ export const useStore = create<AppState>((set, get) => ({
       // (legacy v1 path); only fall back to true when servicesConfig
       // hasn't loaded yet or the field is undefined.
       const useV2 = get().servicesConfig?.use_director_v2 ?? true
+      // The planner is chosen by the Director skill, not by the field this action
+      // used to hardcode: a podcast planned as a music video loses the conversation
+      // structure the podcast planner exists to build.
+      const directorSkill = get().directorSkill
+      const skillType = directorSkill === 'podcast' || directorSkill === 'viral_video'
+        ? directorSkill
+        : 'music_video'
       const timelineOptions = await _directorTimelineOptions(get())
       let plans: ClipPlan[]
       let timeline = directorPlannedClips
@@ -10569,7 +10576,14 @@ export const useStore = create<AppState>((set, get) => ({
       if (useV2) {
         // Director v2: structured planning → rendering → validation
         const result = await api.directorV2Plan({
-          skill_type: 'music_video',
+          skill_type: skillType,
+          ...(skillType === 'viral_video' ? {
+            // The viral planner is concept-driven and clamps its length to the
+            // platform's norm; both are defaults the user can tune afterwards.
+            concept: directorSceneDescription,
+            platform: 'general',
+            style: 'cinematic',
+          } : {}),
           ...timelineOptions,
           clips: directorPlannedClips,
           scene_description: directorSceneDescription,
@@ -13538,9 +13552,13 @@ export const useStore = create<AppState>((set, get) => ({
       }
     }
 
-    // Determine pipeline type
+    // Determine pipeline type. Podcast and viral video are first-class skills the
+    // planner layer has always supported, so they select their own planner here
+    // instead of silently falling back to the music-video pipeline.
     let pipelineType = 'music_video'
-    if (shortFilmPath === 'story') pipelineType = 'short_film_story'
+    if (state.directorSkill === 'podcast') pipelineType = 'podcast'
+    else if (state.directorSkill === 'viral_video') pipelineType = 'viral_video'
+    else if (shortFilmPath === 'story') pipelineType = 'short_film_story'
     else if (shortFilmPath === 'audio') pipelineType = 'short_film_audio'
 
     const pipelineParams: Record<string, unknown> = {

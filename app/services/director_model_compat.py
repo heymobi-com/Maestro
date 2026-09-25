@@ -30,6 +30,11 @@ DIRECTOR_PIPELINE_TYPES = (
     "music_video",
     "short_film_audio",
     "short_film_story",
+    # The planner layer has always supported these two: they are listed so the
+    # capability table the model picker reads has an entry per workflow instead of
+    # an undefined lookup, which is what kept them out of the UI.
+    "podcast",
+    "viral_video",
 )
 
 
@@ -309,6 +314,12 @@ def assess_director_model(
             "music_video": dict(audio_video),
             "short_film_audio": dict(audio_video),
             "short_film_story": story_video,
+            # A podcast is driven by its conversation audio exactly as a music video is
+            # driven by its song, so it needs the same requirement satisfied.
+            "podcast": dict(audio_video),
+            # The viral planner writes dialogue beats for its hook and payoff, so the
+            # model has to generate synchronized speech, like a story-driven short.
+            "viral_video": dict(story_video),
             "seamless": seamless,
         },
         # Keep input and output audio separate.  The old supports_audio field

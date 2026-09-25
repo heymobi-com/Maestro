@@ -573,6 +573,9 @@ export function DirectorChat() {
   const isShortFilm = skill === 'short_film'
   const isStoryPath = isShortFilm && shortFilmPath === 'story'
   const isMusicVideo = !!skill && !isShortFilm
+  const skillLabel = skill === 'podcast' ? 'Video Podcast'
+    : skill === 'viral_video' ? 'Viral Video'
+    : isShortFilm ? 'Short Film' : 'Music Video'
   // Music Video "Generate a track" setup: the bottom chat IS the song
   // description, and Send kicks off the whole write-song → render → video chain.
   const isMvGenerate = isMusicVideo && musicSource === 'generate'
@@ -771,14 +774,19 @@ export function DirectorChat() {
         {/* Header with Start Over */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-1.5">
-            {isShortFilm ? <Film size={14} className="text-accent-blue" /> : <Music size={14} className="text-accent-blue" />}
+            <SkillGlyph skill={skill} size={14} className="text-accent-blue" />
             <span className="text-xs font-medium text-text-primary">Director</span>
-            {analysis && !isShortFilm && (
+            {analysis && skill === 'music_video' && (
               <span className="text-[10px] text-text-muted">
                 {analysis.bpm.toFixed(0)} BPM
               </span>
             )}
             {analysis && isShortFilm && (
+              <span className="text-[10px] text-text-muted">
+                {formatTime(analysis.duration)}
+              </span>
+            )}
+            {analysis && (skill === 'podcast' || skill === 'viral_video') && (
               <span className="text-[10px] text-text-muted">
                 {formatTime(analysis.duration)}
               </span>
@@ -822,8 +830,8 @@ export function DirectorChat() {
         ) : (
           <UserBubble>
             <div className="flex items-center gap-1.5 text-xs text-text-primary">
-              {isShortFilm ? <Film size={12} className="text-accent-blue" /> : <Music size={12} className="text-accent-blue" />}
-              <span>{isShortFilm ? 'Short Film' : 'Music Video'}</span>
+              <SkillGlyph skill={skill} size={12} className="text-accent-blue" />
+              <span>{skillLabel}</span>
             </div>
           </UserBubble>
         )}
@@ -1579,12 +1587,21 @@ function DirectorSetupPanel({ locked }: { locked: boolean }) {
   )
 }
 
+/** The skill's own glyph, so the chat header and its skill chip name the workflow
+ *  actually running instead of falling back to the music-video icon. */
+function SkillGlyph({ skill, size, className }: { skill: DirectorSkill | null; size: number; className?: string }) {
+  if (skill === 'short_film') return <Film size={size} className={className} />
+  if (skill === 'podcast') return <Mic size={size} className={className} />
+  if (skill === 'viral_video') return <Sparkles size={size} className={className} />
+  return <Music size={size} className={className} />
+}
+
 function SkillSelector({ onSelect }: { onSelect: (skill: DirectorSkill) => void }) {
   const skills = [
     { id: 'music_video' as DirectorSkill, label: 'Music Video', desc: 'Automated music video from audio', icon: Music, active: true },
     { id: 'short_film' as DirectorSkill, label: 'Short Film', desc: 'Dialogue-driven scenes from audio', icon: Film, active: true },
-    { id: 'music_video' as DirectorSkill, label: 'Video Podcast', desc: 'Coming Soon', icon: Mic, active: false },
-    { id: 'music_video' as DirectorSkill, label: 'Viral Video', desc: 'Coming Soon', icon: Sparkles, active: false },
+    { id: 'podcast' as DirectorSkill, label: 'Video Podcast', desc: 'The conversation drives the shots', icon: Mic, active: true },
+    { id: 'viral_video' as DirectorSkill, label: 'Viral Video', desc: 'Hook-first short for shorts, reels and TikTok', icon: Sparkles, active: true },
   ]
 
   return (
@@ -2687,9 +2704,13 @@ function DirectorModelPicker({ mode, value, onChange, disabled = false }: {
 
   const pipelineType: DirectorPipelineType = directorSkill === 'music_video'
     ? 'music_video'
-    : shortFilmPath === 'audio'
-      ? 'short_film_audio'
-      : 'short_film_story'
+    : directorSkill === 'podcast'
+      ? 'podcast'
+      : directorSkill === 'viral_video'
+        ? 'viral_video'
+        : shortFilmPath === 'audio'
+          ? 'short_film_audio'
+          : 'short_film_story'
 
   const groups = useMemo(() =>
     getFamiliesForMode(mode, families).map(family => ({
