@@ -59,7 +59,7 @@ _FIELD_ORDER_RE = re.compile(
 
 _FIX_LINE_RE = re.compile(
     r"(?i)^[ \t]*(?:\d+[.)][ \t]*)?(?:[-*+][ \t]*)?"
-    r"(SET_SPEAKER|SET_SUBJECT|NAME_SUBJECT|MERGE_SUBJECTS|NO_FIX)\b[ \t]*(.*)$"
+    r"(SET_SPEAKER|SET_SUBJECT|NAME_SUBJECT|MERGE_SUBJECTS|TAG_LINES|NO_FIX)\b[ \t]*(.*)$"
 )
 
 
@@ -244,6 +244,54 @@ def merge_subject_definitions(prompt: str) -> tuple[str, str]:
     return fixed, f"the {len(matches) - 1} extra cast head(s) were folded into the first one"
 
 
+def tag_line_cues_with_subjects(prompt: str) -> tuple[str, str]:
+    """Put the speaker's identity tag beside every spoken line.
+
+    A cue that carries only ``(Sx)`` does not name a character: the renderer's own message says
+    "(Sx) labels only identify vocal-event order", and it resolves a line from a name or an
+    explicit ``<Subject N>``. Whether ``(S1)`` happens to resolve depends on the alias table the
+    request was built with -- measured on shots 139 and 140 of a real project, the same text was
+    accepted by an offline check that had the reference labels and refused by the render (which
+    had the characters' names), so the shot could not be generated at all.
+
+    The tag is *added* beside the line rather than replacing the ``(Sx)``: the identity becomes
+    explicit and the event-order label the project already wrote stays where it is. Only the
+    labels move, so every other byte survives.
+    """
+
+    text = str(prompt or "")
+    lines = list(_SPOKEN_LINE_RE.finditer(text))
+    if not lines:
+        raise PromptFixError("the shot has no spoken lines")
+    pieces: list[str] = []
+    cursor = 0
+    notes: list[str] = []
+    for index, match in enumerate(lines, start=1):
+        previous_end = lines[index - 2].end() if index > 1 else 0
+        cue_start = max(previous_end, match.start() - _CUE_WINDOW)
+        cue = text[cue_start:match.start()]
+        if _SUBJECT_LABEL_RE.search(cue):
+            continue
+        boundary = max(
+            cue.rfind("."), cue.rfind("!"), cue.rfind("?"), cue.rfind(";"), cue.rfind("\n"),
+        ) + 1
+        labels = list(_SPEAKER_LABEL_RE.finditer(cue, boundary))
+        if not labels:
+            raise PromptFixError(
+                f"line {index} carries no label to read its speaker from, so say who speaks it"
+            )
+        number = int(labels[-1].group(1))
+        pieces.append(text[cursor:match.start()])
+        pieces.append(f"<Subject {number}> ")
+        cursor = match.start()
+        notes.append(f"line {index} -> <Subject {number}>")
+    if not notes:
+        raise PromptFixError("every spoken line already carries its <Subject N>")
+    fixed = "".join(pieces) + text[cursor:]
+    _refuse_if_anything_else_changed(text, fixed, "tagging the spoken lines")
+    return fixed, "; ".join(notes)
+
+
 def parse_prompt_fixes(value: str) -> list[dict[str, Any]]:
     """The decisions in a ``FIXES:`` block, as operations this module can apply."""
 
@@ -299,6 +347,8 @@ def apply_prompt_fixes(
             text, note = name_subject_entry(text, fix["subject"], fix["person"])
         elif operation == "MERGE_SUBJECTS":
             text, note = merge_subject_definitions(text)
+        elif operation == "TAG_LINES":
+            text, note = tag_line_cues_with_subjects(text)
         else:
             raise PromptFixError(f"'{operation}' is not an operation this code applies")
         notes.append(note)

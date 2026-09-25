@@ -3658,6 +3658,8 @@ def revise_clip_prompt(
         "    SET_SUBJECT <number> <Name>       <Subject n> is that participant (a swapped cast)",
         "    NAME_SUBJECT <number> <Name>      that cast entry never says who it is",
         "    MERGE_SUBJECTS                    subject_definitions is declared more than once",
+        "    TAG_LINES                         a spoken line's cue carries only (Sx), which names",
+        "                                      no character: tag it with its <Subject N>",
         "For a contradiction inside the prose (a sentence that describes the speaker as feminine",
         "when the tagged lines are (S2), for instance), send EDITS: FIND the sentence, SET it with",
         "the speaker named, so the renderer has nothing to interpret. Do not re-type the whole shot.",
