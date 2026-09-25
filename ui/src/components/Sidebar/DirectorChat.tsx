@@ -8,6 +8,7 @@ import { DirectorLoraSelector } from '../SettingsDrawer/DirectorLoraSelector'
 import { DirectorSongSetup } from './DirectorSongSetup'
 import { DirectorH3Optimizations } from './DirectorH3Optimizations'
 import { OmniReferenceSection } from './OmniReferenceSection'
+import { GalleryInput } from '../shared/GalleryInput'
 import { InfoTooltip } from './InfoTooltip'
 import { formatSeconds, recommendedWindowProfile } from './DurationSlider'
 import { DurationPresetControl } from './DurationPresetControl'
@@ -1695,11 +1696,12 @@ function UploadZone({
 }
 
 function ReferenceImageUpload({
-  referenceImage, refImagePreview, setReferenceImage,
+  referenceImage, refImagePreview, setReferenceImage, disabled = false,
 }: {
   referenceImage: File | null
   refImagePreview: string | null
   setReferenceImage: (file: File | null) => void
+  disabled?: boolean
 }) {
   const fixedMediaStrength = useStore(s => {
     const selected = s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
@@ -1720,6 +1722,9 @@ function ReferenceImageUpload({
 
   return (
     <div className="space-y-2">
+      <GalleryInput kind="image" label="Director reference image" onFile={setReferenceImage}
+        getImages={() => referenceImage ? [referenceImage] : refImagePreview ? [{url: refImagePreview, name: 'Director reference'}] : []}
+        disabledReason={disabled ? 'References are currently locked.' : undefined} />
       {referenceImage && refImagePreview ? (
         <div className="relative">
           <label className="cursor-pointer block">
@@ -1812,8 +1817,9 @@ function DirectorReferenceInputs({
         referenceImage={referenceImage}
         refImagePreview={refImagePreview}
         setReferenceImage={setReferenceImage}
+        disabled={disabled}
       />
-      <AdditionalRefsSection />
+      <AdditionalRefsSection disabled={disabled} />
     </>
   )
 }
@@ -1864,7 +1870,7 @@ function DraggableRefRow({ file, label, index, onRemove, onLabelChange, onReorde
   )
 }
 
-function AdditionalRefsSection() {
+function AdditionalRefsSection({ disabled = false }: { disabled?: boolean }) {
   const charRefs = useStore(s => s.directorCharacterRefs)
   const charLabels = useStore(s => s.directorCharacterRefLabels)
   const locRefs = useStore(s => s.directorLocationRefs)
@@ -1917,6 +1923,12 @@ function AdditionalRefsSection() {
       </button>
       {expanded && (
         <div className="mt-1.5 space-y-2 pl-1">
+          <GalleryInput kind="image" label="Director character reference" onFile={addCharRef}
+            getImages={() => charRefs}
+            disabledReason={disabled ? 'References are currently locked.' : undefined} />
+          <GalleryInput kind="image" label="Director location reference" onFile={addLocRef}
+            getImages={() => locRefs}
+            disabledReason={disabled ? 'References are currently locked.' : undefined} />
           {/* Character References */}
           <div>
             <div className="flex items-center justify-between mb-1">

@@ -664,14 +664,22 @@ def _dialogue_payload(
     Maestro renders the speaker itself; a second, contradictory label inside
     the block is what mis-assigned the voices.
 
-    An explicit ``default_language`` wins over a tag the planner wrote into the
-    line: the planner hard-codes ``[English]`` even for Spanish projects, so its
-    own tag is not trustworthy once the project language is known.
+    Language precedence, strongest first: the structured ``language`` field of a Director beat,
+    the caller's project language, an inline ``[Language]`` tag, and finally the line's own text.
+    A beat's field and the project language are decisions; the inline tag is prose the planner
+    hard-codes to ``[English]`` even on Spanish projects, so it cannot outrank either. Nothing is
+    defaulted to English up front, because that mistagged Spanish lines the moment nothing else
+    had decided -- which is exactly what a hand-edited prompt looks like -- and ``h3_dialogue_tag``
+    reads its language through this function.
     """
 
-    text = _H3_DIALOGUE_TOKEN_RE.sub("", str(value or "")).strip()
+    structured_language = (
+        _normalized_space(_field(value, "language", "")) if isinstance(value, Mapping) else ""
+    )
+    text_value = _field(value, "spoken_text", value)
+    text = _H3_DIALOGUE_TOKEN_RE.sub("", str(text_value or "")).strip()
     language = ""
-    language_prefix = re.match(r"^\[([^\]\r\n]+)\]\s*(.*)$", text, re.DOTALL)
+    language_prefix = re.match(r"^\[([^\]]+)\]\s*(.*)$", text, re.DOTALL)
     if language_prefix:
         language = language_prefix.group(1).strip()
         text = language_prefix.group(2).strip()
@@ -680,12 +688,12 @@ def _dialogue_payload(
     if not text:
         raise H3DialogueContractError("MiniMax H3 dialogue contains an empty line.")
     resolved = (
-        _normalized_space(default_language)
+        structured_language
+        or _normalized_space(default_language)
         or _normalized_space(language)
-        # Neither the caller nor the line named a language. Hard-coding English
-        # here mistagged Spanish lines the moment nothing else had decided --
-        # which is what a hand-edited prompt does, because saving an edit
-        # clears the beat cache on purpose. Read the line itself instead.
+        # Nothing named a language. Hard-coding English here mistagged Spanish lines the moment
+        # nothing else had decided, which is what a hand-edited prompt does (saving an edit clears
+        # the beat cache on purpose). Read the line itself instead.
         or _detect_dialogue_language(text)
     )
     return resolved, text
@@ -2804,6 +2812,11 @@ def _source_prompt_parts(
     # like it already carried the context lost the guard with it. 113 of a real
     # project's 177 shots were left free to cut and fade inside a single clip.
     scope = "" if multi_shot_source else f"{_H3_SINGLE_SHOT_SCOPE} "
+    if scope and _H3_SINGLE_SHOT_SCOPE in body:
+        # A compiled prompt fed back through the compiler already carries the guard: the
+        # recompile path, the correction assistant and the saved-plan refresh all do this.
+        # Prepending it again states it twice and makes the compile non-idempotent.
+        scope = ""
     if context and not _meaningful_context_present(context, body):
         # The project context describes the WHOLE film and is injected into every
         # shot. A real project's context read "the lighting and framing evolve
@@ -3431,6 +3444,11 @@ def _speaker_label_for_identity(
     A dialogue beat may name its speaker by character id rather than by label.
     That character's subject row states the label in its visual description, so
     the row is the authority for the identity-to-label mapping.
+
+    This is also how the speaker registry tells two participants apart, so it must never answer
+    from row position: numbering a participant by where their row happens to sit is what renamed
+    a project's cast from one shot to the next. ``_subject_position_label`` covers the one case
+    that has nothing else to go on.
     """
 
     for subject in subjects or []:
@@ -3443,6 +3461,24 @@ def _speaker_label_for_identity(
         _slot, label = _planner_subject_slot(subject, 0)
         if label:
             return f"({label})"
+    return ""
+
+
+def _subject_position_label(subjects: Sequence[Any], folded_key: str) -> str:
+    """The label a participant gets from their place in the subjects list, e.g. ``(S1)``.
+
+    Only for a plain subjects list handed to the compiler with no project SUBJECT LOCK and no
+    speaker registry: there, ``<Subject N>`` being the Nth subject is the H3 contract and the
+    list is the only statement of identity available. The registry builder never calls this.
+    """
+
+    for index, subject in enumerate(subjects or [], start=1):
+        keys = {
+            _normalized_space(_field(subject, "character_id", "")).casefold(),
+            _normalized_space(_field(subject, "speaker_name", "")).casefold(),
+        }
+        if folded_key in keys:
+            return f"(S{index})"
     return ""
 
 
@@ -3880,6 +3916,10 @@ def _compile_official_dialogue(
 ) -> tuple[str, str]:
     """Place exact tagged lines and stable speaker IDs in the visual field."""
 
+    # The project's SUBJECT LOCK, when it declares one, is what decides which participant
+    # owns which label: the rows arrive in frame order, so without it a shot built on the
+    # wrong person looks exactly like a correct one.
+    lock = project_subject_lock(project_context)
     valid_beats: list[dict[str, str]] = []
     if not default_language:
         default_language = _detect_dialogue_language(
@@ -3888,12 +3928,24 @@ def _compile_official_dialogue(
                 for beat in (dialogue_beats or [])
             ) or body,
         )
-    for beat in dialogue_beats or []:
+    # Both: an audio-driven shot takes its speech from the mapped soundtrack so its beats
+    # are not compiled into the prompt (upstream), while the project language is still
+    # detected from them, which is what kept a Spanish project's lines from coming back
+    # as [English] (ours).
+    for beat in ([] if has_driving_audio else (dialogue_beats or [])):
         spoken = normalize_h3_text(_field(beat, "spoken_text", ""))
         # A no-speech marker is a valid planning outcome, not a broken line.
         if is_silent_dialogue(spoken):
             continue
-        _, words = _dialogue_payload(spoken, default_language)
+        beat_payload = dict(beat) if isinstance(beat, Mapping) else {
+            "spoken_text": spoken,
+            "language": _field(beat, "language", ""),
+        }
+        beat_payload["spoken_text"] = spoken
+        # The project's language is passed as the default: the planner hard-codes
+        # [English] even on Spanish projects, so its own tag is not trustworthy
+        # once the project language is known.
+        language, words = _dialogue_payload(beat_payload, default_language)
         speaker_key = _normalized_space(_field(beat, "speaker_id", ""))
         entry = _speaker_registry_entry(registry, speaker_key)
         if entry:
@@ -3908,6 +3960,10 @@ def _compile_official_dialogue(
             stable_id = _label_encoded_in_key(speaker_key)
             if not stable_id:
                 stable_id = _speaker_label_for_identity(subjects, speaker_key)
+            if not stable_id and not registry and not lock:
+                # A plain subjects list with no lock and no registry: its order is the only
+                # thing left that says which participant is which.
+                stable_id = _subject_position_label(subjects, speaker_key)
             if not stable_id:
                 # Say it where the log is read. A line with no resolvable
                 # speaker is a planning defect, not something to guess at.
@@ -3918,7 +3974,7 @@ def _compile_official_dialogue(
                 )
         valid_beats.append({
             "words": normalize_h3_text(words),
-            "tag": h3_dialogue_tag(spoken, default_language),
+            "tag": f"<d>[{language}] {normalize_h3_text(words)}</d>",
             "stable_id": stable_id,
             "speaker_name": _clean_h3_metadata(speaker_name),
             "delivery": _clean_h3_metadata(_field(beat, "delivery", "")),
@@ -3939,14 +3995,32 @@ def _compile_official_dialogue(
         body = _strip_dialogue_for_driving_audio(body)
         existing_blocks = []
     spans, malformed = _dialogue_spans(body)
-    if malformed:
-        # Prompt review, a truncated planner answer, or a hand-edited prompt
-        # can leave nested or unterminated tags. Salvage the spoken words so a
-        # valid clip is still queued instead of failing the whole render.
-        body, salvaged_blocks = _repair_unbalanced_dialogue(body)
-        if not valid_beats:
-            body = _insert_dialogue_blocks(body, salvaged_blocks)
+    if valid_beats and spans:
+        # A complete top-level block is safely identifiable as dialogue even
+        # if it contains duplicated inner tags. Drop that whole block first;
+        # recovery below is reserved for an unmatched outer duplicate whose
+        # trailing depth-one prose may contain visual action/continuity.
+        body = _replace_spans(body, spans, [""] * len(spans))
         spans, malformed = _dialogue_spans(body)
+    if malformed:
+        # The visual prompt is best-effort prose; a duplicated nested opener cannot override
+        # the exact structured dialogue and speaker map. Its inner tagged payload is discarded
+        # as untrusted speech, while prose after the inner close remains action/continuity.
+        # With no structured lines there is nothing that outranks the broken markup, so the
+        # prompt is refused rather than guessed at.
+        if not valid_beats or not _has_nested_dialogue_open(body):
+            raise H3DialogueContractError(
+                "MiniMax H3 dialogue tags are unbalanced and cannot be repaired safely."
+            )
+        body = _strip_malformed_dialogue_markup_for_structured_beats(
+            body,
+            [beat["words"] for beat in valid_beats],
+        )
+        spans, malformed = _dialogue_spans(body)
+    if malformed:
+        raise H3DialogueContractError(
+            "MiniMax H3 dialogue tags are unbalanced and cannot be repaired safely."
+        )
 
     if valid_beats:
         # Structured dialogue is authoritative. Remove any planner-authored
@@ -4032,9 +4106,10 @@ def _compile_official_dialogue(
             if music_driven:
                 from .music_performance import music_performance_direction
                 direction = music_performance_direction(subjects, vocal_activity, project_context=project_context)
-                if "vocal ownership stays with the assigned singer" not in body.casefold():
+                if direction and direction not in body:
                     body = _insert_h3_vocal_detail(body, direction)
-                driver_contract = f"{driver_contract} {direction}"
+                if direction:
+                    driver_contract = f"{driver_contract} {direction}"
             contract = driver_contract
         else:
             silence = (
@@ -4048,6 +4123,93 @@ def _compile_official_dialogue(
 
     body = _normalized_space(body)
     return body, contract
+
+
+def _strip_malformed_dialogue_markup_for_structured_beats(
+    prompt: str,
+    authoritative_lines: Sequence[str],
+) -> str:
+    """Keep visual prose while discarding malformed dialogue delimiters.
+
+    This recovery is safe only when structured dialogue supplies the exact
+    replacement lines and speaker order. Content at a duplicated inner tag
+    depth is discarded as untrusted generated speech; text after its close is
+    retained as visual prose. Exact copies of authoritative lines in retained
+    tagged prose are removed before the canonical lines are reinserted once.
+    """
+
+    text = str(prompt or "")
+    parts: list[tuple[str, bool, int]] = []
+    cursor = 0
+    depth = 0
+    for token in _H3_DIALOGUE_TOKEN_RE.finditer(text):
+        content = text[cursor:token.start()]
+        if content:
+            marked = depth > 0
+            level = depth
+            if parts and parts[-1][1:] == (marked, level):
+                prior, _, _ = parts[-1]
+                parts[-1] = (prior + content, marked, level)
+            else:
+                parts.append((content, marked, level))
+        if not token.group(1):
+            depth += 1
+        elif depth:
+            depth -= 1
+        cursor = token.end()
+    tail = text[cursor:]
+    if tail:
+        marked = depth > 0
+        level = depth
+        if parts and parts[-1][1:] == (marked, level):
+            prior, _, _ = parts[-1]
+            parts[-1] = (prior + tail, marked, level)
+        else:
+            parts.append((tail, marked, level))
+
+    cleaned: list[str] = []
+    for content, marked, level in parts:
+        if marked and level > 1:
+            continue
+        if not marked:
+            cleaned.append(content)
+            continue
+
+        had_authoritative_line = False
+        for line in authoritative_lines:
+            words = _normalized_space(line)
+            if not words:
+                continue
+            phrase = r"\s+".join(re.escape(word) for word in words.split())
+            content, count = re.subn(
+                rf"(?<!\w){phrase}(?!\w)",
+                "",
+                content,
+            )
+            had_authoritative_line = had_authoritative_line or count > 0
+        if had_authoritative_line:
+            content = re.sub(
+                r"^\s*\[[^\]\r\n]+\]\s*",
+                "",
+                content,
+                count=1,
+            )
+        cleaned.append(content)
+    return "".join(cleaned)
+
+
+def _has_nested_dialogue_open(prompt: str) -> bool:
+    """Return whether any dialogue opener occurs before the prior one closes."""
+
+    depth = 0
+    for token in _H3_DIALOGUE_TOKEN_RE.finditer(str(prompt or "")):
+        if not token.group(1):
+            if depth:
+                return True
+            depth = 1
+        elif depth:
+            depth -= 1
+    return False
 
 
 def _reference_relationships(
@@ -4652,9 +4814,6 @@ def compile_h3_official_prompt(
     )
     audio_mode = _normalized_space(_field(audio_plan or {}, "mode", "")).casefold()
     if audio_mode == "music_driven":
-        # The supplied soundtrack already contains the sung words. Do not let
-        # an LLM's transcript become a competing generated-dialogue request.
-        dialogue_beats = []
         from .music_performance import constrain_music_performance
         activity = _field(audio_plan or {}, "vocal_activity", None)
         prompt = constrain_music_performance(
@@ -4666,6 +4825,13 @@ def compile_h3_official_prompt(
         closing_blocking = constrain_music_performance(
             closing_blocking, subjects, activity, project_context=project_context,
         )
+    if has_driving_audio or audio_mode in {"audio_driven", "music_driven"}:
+        # Supplied driving audio owns every audible voice. Structured beats in
+        # an audio-driven plan are transcript annotations for timing and
+        # performance only; they must not become a second generated-speech
+        # request. Story-driven plans without source audio keep their exact
+        # structured dialogue as the spoken authority.
+        dialogue_beats = []
     if audio_mode in {"audio_driven", "music_driven"}:
         # Initial Director preflight runs before concrete Ref2VA manifests are
         # assembled. The shot's audio plan still proves that a mapped source
@@ -5092,6 +5258,35 @@ def compile_h3_clip_plans(
     Ref2VA wrapper around a previously compiled prompt.
     """
 
+    references_by_plan = [
+        (
+            reference_manifests[index]
+            if reference_manifests is not None and index < len(reference_manifests)
+            else plan.get("_director_h3_reference_manifest") or []
+        )
+        for index, plan in enumerate(clip_plans)
+    ]
+
+    # Audio transcript beats remain useful identity and continuity metadata.
+    # Track separately which beats are actual generated dialogue so prompt
+    # compilation and final validation never treat a source transcript as a
+    # second speech request.
+    transcript_only = []
+    for plan, references in zip(clip_plans, references_by_plan):
+        audio_mode = _normalized_space(
+            _field(plan.get("_director_audio_plan") or {}, "mode", "")
+        ).casefold()
+        has_driving_audio_reference = any(
+            str(_field(reference, "type", "")).strip().casefold() == "audio"
+            and str(_field(reference, "audio_intent", "voice") or "voice")
+            .strip().casefold() == "drive"
+            for reference in references or []
+        )
+        transcript_only.append(
+            audio_mode in {"audio_driven", "music_driven"}
+            or has_driving_audio_reference
+        )
+
     _repair_h3_phantom_dialogue_subjects(clip_plans)
     _canonicalize_h3_project_subject_names(clip_plans)
     _split_multi_speaker_subject_rows(clip_plans)
@@ -5125,9 +5320,6 @@ def compile_h3_clip_plans(
     project_language = _detect_dialogue_language(spoken_sample)
     for index, plan in enumerate(clip_plans):
         beats = plan.get("_director_dialogue_beats") or []
-        if _normalized_space(_field(plan.get("_director_audio_plan") or {}, "mode", "")).casefold() == "music_driven":
-            beats = []
-            plan["_director_dialogue_beats"] = []
         for beat in beats:
             if isinstance(beat, MutableMapping) and "spoken_text" in beat:
                 beat["spoken_text"] = normalize_h3_text(beat["spoken_text"])
@@ -5201,17 +5393,14 @@ def compile_h3_clip_plans(
             if durations is not None and index < len(durations)
             else plan.get("_director_duration_sec") or 0.0
         )
-        references = (
-            reference_manifests[index]
-            if reference_manifests is not None and index < len(reference_manifests)
-            else plan.get("_director_h3_reference_manifest") or []
-        )
+        references = references_by_plan[index]
+        speech_beats = [] if transcript_only[index] else beats
         context_anchors = _h3_plan_context_anchors(plan)
         plan["_director_required_context_anchors"] = context_anchors
         prompt, contract = compile_h3_official_prompt(
             source_prompt,
             plan.get("_director_subjects_on_screen") or [],
-            beats,
+            speech_beats,
             mode=mode,
             duration_seconds=duration,
             references=references,
@@ -5251,7 +5440,7 @@ def compile_h3_clip_plans(
         plan["_director_speaker_registry"] = registry
         errors = validate_h3_prompt_contract(
             prompt,
-            beats,
+            speech_beats,
             mode=mode,
             references=references,
             subjects=plan.get("_director_subjects_on_screen") or [],
