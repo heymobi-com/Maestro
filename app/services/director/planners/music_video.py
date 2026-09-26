@@ -685,8 +685,9 @@ class MusicVideoPlanner(BasePlanner):
         """Call LLM to generate structured shot plans."""
         from ..nsfw_guidance import inject_nsfw_if_enabled
 
+        batch_size = self.long_form_batch_size()
         if (
-            len(clips) > self._LONG_FORM_BATCH_SIZE
+            len(clips) > batch_size
             and not kwargs.get("_bounded_music_batch")
         ):
             forwarded_kwargs = {
@@ -720,7 +721,14 @@ class MusicVideoPlanner(BasePlanner):
                     "repeat completed clip ideas. Preserve performer identity, "
                     "wardrobe, world, and established visual grammar unless "
                     "the song section motivates a visible change.\n"
-                    f"Previous planned ending: {previous_ending}"
+                    f"Previous planned ending: {previous_ending}\n\n"
+                    # The batch used to see only its own clips, with the previous
+                    # ending as its sole reference, and a small model satisfied
+                    # that by staying where it was. The whole list is context: it
+                    # shows what is still ahead so this batch can differ from it.
+                    "THE WHOLE TIMELINE (context only: see where this batch sits "
+                    f"and what is still ahead; plan ONLY clips {start + 1}-{end}):\n"
+                    + "\n".join(clip_contexts)
                 )
                 return self._plan_with_llm(
                     clips=batch_clips,
@@ -738,7 +746,7 @@ class MusicVideoPlanner(BasePlanner):
 
             return self._run_checkpointed_json_batches(
                 items=clips,
-                batch_size=self._LONG_FORM_BATCH_SIZE,
+                batch_size=batch_size,
                 checkpoint_key="music_video_batches",
                 stage="music_video_batch",
                 progress_label="music-video",
@@ -957,12 +965,12 @@ Write {len(clips)} structured shot plans. Go:"""
             user_prompt=user_prompt,
             system_prompt=system_prompt,
             max_tokens=max_tokens,
-            # A long timeline is already divided into a bounded, explicit clip
-            # batch. Keep that structured transformation grammar-constrained
-            # and spend reasoning only on the historical short-form path.
-            thinking_budget=(
-                0 if kwargs.get("_bounded_music_batch") else 4096
-            ),
+            # A bounded batch keeps its reasoning. It used to force thinking off
+            # here, and the model notes in base.py say a small Gemma misses the
+            # structured rules without it: the middle of a long project is where
+            # that showed. The base helper gives a bounded Gemma a shorter budget
+            # than a whole short-form plan, and leaves Qwen thinking off.
+            bounded=bool(kwargs.get("_bounded_music_batch")),
             image_paths=image_paths,
             json_schema=_music_shot_schema(
                 len(clips),

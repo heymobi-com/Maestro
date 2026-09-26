@@ -46,7 +46,19 @@ def _discover_plan() -> str:
                 data = json.load(handle)
         except (OSError, ValueError):
             continue
-        if data.get("clips"):
+        if not data.get("clips"):
+            continue
+        # The regressions below resolve TWO raw ids to their stable labels. The
+        # playlist in app/outputs keeps growing, and a newer single-speaker project
+        # used to become the fixture: measured 2026-09-25 the newest plan on disk was
+        # a one-speaker project and the two-speaker assertions failed for a reason
+        # that had nothing to do with the code under test.
+        params = data.get("_params_snapshot") or {}
+        speakers = {
+            str(row.get("speaker")) for row in (params.get("lyrics") or [])
+            if isinstance(row, dict) and row.get("speaker")
+        }
+        if len(speakers) >= 2:
             return candidate
     return ""
 

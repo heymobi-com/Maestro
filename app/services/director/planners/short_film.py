@@ -6794,7 +6794,8 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
         """Plan shots from existing audio-segmented clips."""
         from ..nsfw_guidance import inject_nsfw_if_enabled
 
-        if len(clips) > 12 and not _bounded_batch:
+        batch_size = self.long_form_batch_size()
+        if len(clips) > batch_size and not _bounded_batch:
             def call_batch(
                 batch_number: int,
                 start: int,
@@ -6814,6 +6815,12 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
                 previous_ending = str(
                     (previous or {}).get("ending_beat") or ""
                 ).strip()
+                timeline_overview = "\n".join(
+                    f"Clip {index + 1}: {float(clip.get('start', 0) or 0):.1f}-"
+                    f"{float(clip.get('end', 0) or 0):.1f}s"
+                    + (f" [{clip.get('label')}]" if clip.get("label") else "")
+                    for index, clip in enumerate(clips)
+                )
                 batch_story = (
                     f"{story_description}\n\n"
                     "LONG-FORM AUDIO TIMELINE CONTRACT:\n"
@@ -6822,7 +6829,14 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
                     "the same staging, identities, props, and story state; never "
                     "restart or repeat completed action.\n"
                     f"Previous planned ending: "
-                    f"{previous_ending or 'No prior clip; establish the opening.'}"
+                    f"{previous_ending or 'No prior clip; establish the opening.'}\n\n"
+                    # The batch used to see only its own clips, with the previous
+                    # ending as its sole reference, and a small model satisfied
+                    # that by staying where it was. The whole list is context: it
+                    # shows what is still ahead so this batch can differ from it.
+                    "THE WHOLE TIMELINE (context only: see where this batch sits "
+                    f"and what is still ahead; plan ONLY clips {start + 1}-{end}):\n"
+                    f"{timeline_overview}"
                 )
                 batch_shots = self._plan_audio_driven(
                     clips=batch_clips,
@@ -6877,7 +6891,7 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
 
             serialized = self._run_checkpointed_json_batches(
                 items=clips,
-                batch_size=12,
+                batch_size=batch_size,
                 checkpoint_key="short_film_audio_batches",
                 stage="short_film_audio_batch",
                 progress_label="audio-film",
@@ -7228,7 +7242,9 @@ Shots to plan:
             user_prompt=user_prompt,
             system_prompt=system_prompt,
             max_tokens=max_tokens,
-            thinking_budget=0 if _bounded_batch else None,
+            # No explicit budget: the shared helper picks the model-aware one, and
+            # bounded tells it this is a single batch of a long timeline.
+            bounded=_bounded_batch,
             image_paths=image_paths,
             json_schema=audio_schema,
         )

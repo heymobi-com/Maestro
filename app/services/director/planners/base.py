@@ -252,6 +252,7 @@ class BasePlanner(ABC):
                     )
                     rows = []
 
+                filled = 0
                 while len(rows) < expected:
                     item_index = start + len(rows)
                     fallback = (
@@ -259,6 +260,15 @@ class BasePlanner(ABC):
                         if callable(fallback_factory) else {}
                     )
                     rows.append(dict(fallback or {}))
+                    filled += 1
+                if filled:
+                    # Said out loud: a generic clip is a batch that did not come back, not
+                    # the model running out of ideas, and the two looked identical before.
+                    print(
+                        f"[Planner] {filled} of {expected} {progress_label} plans in batch "
+                        f"{batch_index} were filled deterministically because the model's "
+                        "answer did not cover them; those clips are generic."
+                    )
 
                 stored_batches[key] = {
                     "count": expected,
@@ -306,6 +316,34 @@ class BasePlanner(ABC):
 
     # ── Shared LLM Helpers ───────────────────────────────────────────
 
+    @staticmethod
+    def long_form_batch_size(default: int = 12) -> int:
+        """How many timeline items one planning batch carries, for the model in use.
+
+        A long timeline is planned in batches, and a small model degrades inside its
+        own long answer: measured on a real 16-clip project, the later items of a
+        12-item batch collapsed onto the staging the earlier items had just written,
+        which is what "from the middle on it only walks down the street" looked like.
+        A shorter batch keeps each answer short enough to hold its own variety, at the
+        cost of one more call.
+        """
+
+        try:
+            from services import llm_service
+            entry = llm_service._active_registry_entry()
+            descriptor = " ".join(
+                str(value) for value in entry.values()
+            ).lower() if isinstance(entry, dict) else str(entry or "").lower()
+        except Exception:
+            return default
+        # A whole size token, so that "14b" is a 14-billion model and not a 4B one:
+        # matching the digits of "4b" inside "14b" reported every 14B model as small.
+        sizes = [
+            int(match) for match in
+            re.findall(r"(?<![0-9])([0-9]{1,2})b(?![0-9a-z])", descriptor)
+        ]
+        return 8 if any(size <= 4 for size in sizes) else default
+
     def _call_llm_json(
         self,
         user_prompt: str,
@@ -318,6 +356,7 @@ class BasePlanner(ABC):
         frequency_penalty: float = 0.3,
         presence_penalty: float = 0.1,
         json_schema: Optional[dict] = None,
+        bounded: bool = False,
     ) -> list[dict]:
         """Call LLM and parse JSON array response with retry on failure.
 
@@ -357,6 +396,14 @@ class BasePlanner(ABC):
             rules under cognitive load.
           - Other / unknown: budget=0, thinking off (conservative default).
         Callers can still pass an explicit thinking_budget to override.
+
+        bounded marks one batch of a long timeline. It used to force thinking
+        off there ("spend reasoning only on the short-form path"), which removed
+        exactly the help the model notes above say a small Gemma needs, and the
+        middle of a long project is where that showed. A bounded batch now gets
+        a smaller budget instead of none: enough to hold the rules, short of the
+        full pass. Qwen keeps thinking off either way, its documented runaway
+        case, and a failed parse still retries with thinking off and grammar on.
         """
         gen_fn = self._generate_streaming if (streaming and self._generate_streaming) else self._generate
         if gen_fn is None:
@@ -375,7 +422,9 @@ class BasePlanner(ABC):
                 entry = llm_service._active_registry_entry()
                 style = (entry or {}).get("thinking_style", "qwen") if isinstance(entry, dict) else "qwen"
                 if style == "gemma":
-                    thinking_budget = 4096
+                    # A bounded batch of a long timeline: reasoning on, but a shorter
+                    # budget than a whole short-form plan gets.
+                    thinking_budget = 2048 if bounded else 4096
                 else:
                     # Qwen and any unknown style: thinking off
                     thinking_budget = 0

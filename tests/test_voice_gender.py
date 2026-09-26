@@ -42,7 +42,16 @@ def _discover_plan() -> str:
         except (OSError, ValueError):
             continue
         params = data.get("_params_snapshot") or {}
-        if params.get("lyrics"):
+        speakers = {
+            str(row.get("speaker")) for row in (params.get("lyrics") or [])
+            if isinstance(row, dict) and row.get("speaker")
+        }
+        # Two voices, because that is what these regressions measure. The playlist in
+        # app/outputs keeps growing, and a newer single-speaker project used to become
+        # the fixture: measured 2026-09-25 the newest plan on disk was a one-speaker
+        # project and every two-voice assertion failed for a reason that had nothing to
+        # do with the code under test.
+        if params.get("lyrics") and len(speakers) >= 2:
             return candidate
     return ""
 
