@@ -36,6 +36,7 @@ class PlanProgressCardTests(unittest.TestCase):
         self.client = _read(_UI_DIR, "api", "client.ts")
         # The call itself lives in a module of ours; the client re-exports it.
         self.plan_operation = _read(_UI_DIR, "api", "directorPlanOperation.ts")
+        self.routing = _read(_UI_DIR, "stores", "directorPlanRouting.ts")
         self.store = _read(_UI_DIR, "stores", "useStore.ts")
 
     def test_the_card_shows_the_planners_own_counters(self):
@@ -95,9 +96,9 @@ class PlanProgressCardTests(unittest.TestCase):
     def test_a_stopped_pass_does_not_replace_the_plans_under_review(self):
         # The endpoint answers a Stop with an empty plan, so the store has to
         # bail out before that empty result overwrites the reviewed plan. All
-        # three v2 planning actions need it.
-        self.assertEqual(self.store.count("if (result.cancelled) {"), 3)
-        self.assertIn("directorLoading: false, directorError: null", self.store)
+        # three v2 planning actions need it, and all three call our own helper.
+        self.assertEqual(self.store.count("if (result.cancelled) return clearDirectorPass(set)"), 3)
+        self.assertIn("set({ directorLoading: false, directorError: null })", self.routing)
 
 
 class PlanOperationEndpointWiringTests(unittest.TestCase):

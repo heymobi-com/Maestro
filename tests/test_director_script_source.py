@@ -22,6 +22,9 @@ ROOT = Path(__file__).resolve().parents[1]
 PARSER = ROOT / "ui/src/lib/directorScript.ts"
 CHAT = ROOT / "ui/src/components/Sidebar/DirectorChat.tsx"
 STORE = ROOT / "ui/src/stores/useStore.ts"
+# The written-script source is ours, so its state and patches live outside the
+# store: see ui/src/stores/directorSlice.ts.
+SLICE = ROOT / "ui/src/stores/directorScriptSlice.ts"
 PIPELINE = ROOT / "app/services/director_pipeline.py"
 
 
@@ -78,41 +81,50 @@ class SourceChoiceTests(unittest.TestCase):
         self.assertIn("scriptSource !== 'script' && (atStep('upload')", chat)
 
     def test_the_step_advances_without_an_audio_pass(self):
-        store = _read(STORE)
+        slice_source = _read(SLICE)
+
         self.assertIn(
             "source === 'script' && state.directorStep === 'upload' ? { directorStep: 'style' as const } : {}",
-            store,
+            slice_source,
         )
         # The timeline and the transcript are derived when the script changes, so the
         # review steps show the clips the render will use.
-        self.assertIn("const parsed = parseDirectorScript(text)", store)
-        self.assertIn("directorScriptClips: parsed.clips", store)
+        self.assertIn("const parsed = parseDirectorScript(text)", slice_source)
+        self.assertIn("directorScriptClips: parsed.clips", slice_source)
+        # The store only delegates, so its half of the seam stays one line.
+        self.assertIn(
+            "setDirectorScriptText: (text) => set(directorScriptTextPatch(text))",
+            _read(STORE),
+        )
 
 
 class RequestRoutingTests(unittest.TestCase):
     def test_the_plan_request_uses_the_script_timeline_and_lines(self):
         store = _read(STORE)
+        slice_source = _read(SLICE)
+
+        # The store reads the script state and hands it to the planner...
         self.assertIn(
-            "const scriptMode = get().directorScriptSource === 'script' && get().directorScriptClips.length > 0",
+            "const directorPlannedClips = directorScriptTimeline(get(), get().directorPlannedClips)",
             store,
         )
-        self.assertIn("const directorPlannedClips = scriptMode ? get().directorScriptClips : get().directorPlannedClips", store)
-        self.assertIn("lyrics: scriptMode ? get().directorScriptTranscript : (directorAnalysis?.lyrics ?? undefined)", store)
+        self.assertIn("...directorScriptPlanFields(get(), directorAnalysis?.lyrics),", store)
+        # ...and the decision itself lives in our own module.
+        self.assertIn("return directorScriptIsActive(state) ? state.directorScriptClips : analysed", slice_source)
         # The authored rows are the source document too, so the H3 ledger locks the
         # written lines and cannot accept a paraphrase instead.
-        self.assertIn("...(scriptMode ? { story_description: get().directorScriptText } : {})", store)
+        self.assertIn("lyrics: state.directorScriptTranscript,", slice_source)
+        self.assertIn("story_description: state.directorScriptText,", slice_source)
 
     def test_the_generation_request_drops_the_missing_soundtrack(self):
         store = _read(STORE)
-        self.assertIn("let pipelineType = 'music_video'", store)
-        self.assertIn(
-            "audio_path: state.directorScriptSource === 'script' && state.directorScriptClips.length > 0",
-            store,
-        )
-        self.assertIn(
-            "planned_clips: state.directorScriptSource === 'script' && state.directorScriptClips.length > 0",
-            store,
-        )
+        slice_source = _read(SLICE)
+
+        self.assertIn("const scriptFields = directorScriptPipelineFields(", store)
+        self.assertIn("audio_path: scriptFields.audio_path,", store)
+        self.assertIn("planned_clips: scriptFields.planned_clips,", store)
+        self.assertIn("audio_path: undefined,", slice_source)
+        self.assertIn("planned_clips: state.directorScriptClips,", slice_source)
 
     def test_the_pipeline_never_hands_the_planner_a_string_transcript(self):
         pipeline = _read(PIPELINE)

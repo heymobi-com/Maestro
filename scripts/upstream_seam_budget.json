@@ -31,7 +31,7 @@
     "ui/src/components/SettingsDrawer/ServicesSettingsPanel.tsx": 27,
     "ui/src/components/Sidebar/DirectorChat.tsx": 215,
     "ui/src/components/Sidebar/DirectorPanel.tsx": 0,
-    "ui/src/stores/useStore.ts": 193,
+    "ui/src/stores/useStore.ts": 80,
     "ui/src/types/index.ts": 17
   },
   "notes": {

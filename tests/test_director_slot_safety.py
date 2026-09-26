@@ -34,6 +34,8 @@ _CLIENT = Path(_HERE).parent / "ui" / "src" / "api" / "client.ts"
 # a module of ours so an upstream edit to client.ts stays a seam we can see.
 _DELETE_CLIENT = Path(_HERE).parent / "ui" / "src" / "api" / "outputDelete.ts"
 _STORE = Path(_HERE).parent / "ui" / "src" / "stores" / "useStore.ts"
+# The guard itself is ours, so it lives in its own module; the store spreads it.
+_DELETE_GUARD = Path(_HERE).parent / "ui" / "src" / "stores" / "directorDeleteGuard.ts"
 _MAIN_CONTENT = (
     Path(_HERE).parent / "ui" / "src" / "components" / "MainContent" / "MainContent.tsx"
 )
@@ -231,17 +233,19 @@ class DeleteGuardTests(unittest.TestCase):
         self.assertIn("params.set('force', 'true')", module)
         # Forcing is what the user's answer sends, so the flag has to reach the
         # request rather than only being accepted by the signature.
-        self.assertIn("deleteOutput(blocked.output.name, blocked.output.workspace, true)", _STORE.read_text(encoding="utf-8"))
+        self.assertIn(
+            "deleteOutput(blocked.output.name, blocked.output.workspace, true)",
+            _DELETE_GUARD.read_text(encoding="utf-8"),
+        )
 
     def test_the_refused_delete_is_held_for_the_users_answer(self):
         store = _STORE.read_text(encoding="utf-8")
+        guard = _DELETE_GUARD.read_text(encoding="utf-8")
 
-        self.assertIn("/is using for shot/.test(message)", store)
-        self.assertIn("blockedDelete: { output, message }", store)
-        # The file is only removed once the user answered in the app's dialog.
-        self.assertIn(
-            "api.deleteOutput(blocked.output.name, blocked.output.workspace, true)", store,
-        )
+        self.assertIn("isShotInUseRefusal(message)", store)
+        self.assertIn("export function isShotInUseRefusal(message: string): boolean", guard)
+        self.assertIn("/is using for shot/.test(message)", guard)
+        self.assertIn("set({ blockedDelete: { output, message } })", store)
 
     def test_the_question_is_not_a_native_dialog(self):
         store = _STORE.read_text(encoding="utf-8")
@@ -250,13 +254,14 @@ class DeleteGuardTests(unittest.TestCase):
         # webviews dismiss it and return true, so pressing cancel still deleted
         # the take with force. The guard has to own the question.
         self.assertNotIn("window.confirm(", store)
+        self.assertNotIn("window.confirm(", _DELETE_GUARD.read_text(encoding="utf-8"))
         self.assertNotIn("window.confirm(", _BLOCKED_DIALOG.read_text(encoding="utf-8"))
 
     def test_cancelling_can_only_keep_the_clip(self):
-        store = _STORE.read_text(encoding="utf-8")
+        guard = _DELETE_GUARD.read_text(encoding="utf-8")
         # The implementation, not the interface declaration above it.
-        start = store.index("cancelBlockedDelete: () => {")
-        body = store[start:start + 260]
+        start = guard.index("cancelBlockedDelete: () => {")
+        body = guard[start:start + 300]
 
         self.assertIn("set({ blockedDelete: null })", body)
         # Nothing on the cancel path may reach the API.

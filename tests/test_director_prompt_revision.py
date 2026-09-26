@@ -331,16 +331,17 @@ class PromptComparisonTests(unittest.TestCase):
         self.assertIn("Opciones:", self.dashboard)
         self.assertIn("setFixNote(option)", self.dashboard)
         self.assertIn("fixAnswer.note", self.dashboard)
-        client = _read("api", "client.ts")
-        self.assertIn("options: string[]", client)
-        self.assertIn("note: string", client)
+        # The answer's shape is ours, so it lives outside client.ts now.
+        revision = _read("api", "directorRevision.ts")
+        self.assertIn("options: string[]", revision)
+        self.assertIn("note: string", revision)
 
     def test_a_damaged_word_is_shown_as_a_warning(self):
         # The contract cannot see the prose, so a word mangled while re-typing has to be
         # named in the window; the diff marks it, the warning says what it was.
         self.assertIn("fixAnswer?.warnings", self.dashboard)
         self.assertIn("⚠", self.dashboard)
-        self.assertIn("warnings: string[]", _read("api", "client.ts"))
+        self.assertIn("warnings: string[]", _read("api", "directorRevision.ts"))
 
     def test_the_comparison_shows_only_the_part_that_varies(self):
         # "That part is much smaller, which makes accepting or rejecting easier."
@@ -348,9 +349,9 @@ class PromptComparisonTests(unittest.TestCase):
         self.assertIn("fixAnswer?.clip_proposed", self.dashboard)
         self.assertIn("son de este clip", self.dashboard)
         self.assertIn("scope", self.view)
-        client = _read("api", "client.ts")
-        self.assertIn("clip_prompt: string", client)
-        self.assertIn("clip_proposed: string", client)
+        revision = _read("api", "directorRevision.ts")
+        self.assertIn("clip_prompt: string", revision)
+        self.assertIn("clip_proposed: string", revision)
 
     def test_the_instructions_are_big_enough_to_read(self):
         # Measured complaint: "the font of the instructions is too small, impossible

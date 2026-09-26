@@ -45,6 +45,12 @@ def _store_source() -> str:
     return (ROOT / "ui/src/stores/useStore.ts").read_text(encoding="utf-8")
 
 
+def _routing_source() -> str:
+    # The routing rules are ours, so they live in their own module rather than in
+    # the store upstream edits every release.
+    return (ROOT / "ui/src/stores/directorPlanRouting.ts").read_text(encoding="utf-8")
+
+
 def _skill_card_line(label: str) -> str:
     for line in _chat_source().splitlines():
         if f"label: '{label}'" in line:
@@ -77,28 +83,34 @@ class SkillSelectorTests(unittest.TestCase):
 class RequestRoutingTests(unittest.TestCase):
     def test_the_plan_request_sends_the_selected_skill(self):
         store = _store_source()
-        self.assertIn(
-            "const skillType = directorSkill === 'podcast' || directorSkill === 'viral_video'",
-            store,
-        )
+        routing = _routing_source()
+
+        # The store hands the selected skill over through our own module...
+        self.assertIn("const skillType = directorPlannerSkill(directorSkill)", store)
         self.assertIn("skill_type: skillType,", store)
+        # ...and the routing rule itself lives there.
+        self.assertIn(
+            "return skill === 'podcast' || skill === 'viral_video' ? skill : 'music_video'",
+            routing,
+        )
 
     def test_the_viral_plan_request_carries_its_concept_and_style(self):
         store = _store_source()
-        self.assertIn("concept: directorSceneDescription,", store)
-        self.assertIn("platform: 'general',", store)
-        self.assertIn("style: 'cinematic',", store)
+        routing = _routing_source()
+
+        self.assertIn("...directorViralPlanOptions(skillType, directorSceneDescription),", store)
+        self.assertIn("return { concept, platform: 'general', style: 'cinematic' }", routing)
 
     def test_the_generation_request_sends_the_selected_pipeline_type(self):
         store = _store_source()
+        routing = _routing_source()
+
         self.assertIn(
-            "if (state.directorSkill === 'podcast') pipelineType = 'podcast'",
+            "const pipelineType = directorPipelineType(state.directorSkill, shortFilmPath)",
             store,
         )
-        self.assertIn(
-            "else if (state.directorSkill === 'viral_video') pipelineType = 'viral_video'",
-            store,
-        )
+        self.assertIn("if (skill === 'podcast') return 'podcast'", routing)
+        self.assertIn("if (skill === 'viral_video') return 'viral_video'", routing)
 
     def test_the_model_picker_asks_about_the_running_skill(self):
         chat = _chat_source()

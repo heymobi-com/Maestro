@@ -77,10 +77,14 @@ class GalleryClipRegenerateTests(unittest.TestCase):
 
     def test_the_studio_reroll_is_never_a_silent_no_op(self):
         store = _read("ui", "src", "stores", "useStore.ts")
+        routing = _read("ui", "src", "stores", "directorPlanRouting.ts")
 
-        self.assertIn("if (meta?.director_pipeline_id) {", store)
-        self.assertIn("This clip belongs to a Director pipeline.", store)
-        self.assertIn("carries no saved settings", store)
+        # The store asks our own module why the reroll cannot run...
+        self.assertIn("const rerollBlocked = studioRerollBlockedReason(get().selectedOutputMeta)", store)
+        self.assertIn("if (rerollBlocked) throw new Error(rerollBlocked)", store)
+        # ...and the reasons themselves live with our code.
+        self.assertIn("This clip belongs to a Director pipeline.", routing)
+        self.assertIn("carries no saved settings", routing)
 
 
 if __name__ == "__main__":

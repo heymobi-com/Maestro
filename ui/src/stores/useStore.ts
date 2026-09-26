@@ -5,7 +5,7 @@ import { applyTtsVoices, ttsAudioModeForCount, ttsCharacterEnhancePrompt, ttsSpe
 import { vigglePreparationKey, viggleTimeline } from '../lib/viggle'
 import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, StudioVideoWorkflow, StudioVideoCreateRoute, StudioVideoEffectiveCreateRoute, StudioImageWorkflow, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineClipState, PipelineRepairState, SavedPipelineState, DirectorQueueState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping, H3WindowPlan, MiniMaxH3Reference, AppMode } from '../types'
 import * as api from '../api/client'
-import { parseDirectorScript } from '../lib/directorScript'
+import { clearDirectorPass, directorDeleteDefaults, directorDeleteGuardActions, directorPipelineType, directorPlannerSkill, directorScriptDefaults, directorScriptPlanFields, directorScriptPipelineFields, directorScriptSourcePatch, directorScriptTextPatch, directorScriptTimeline, directorViralPlanOptions, isShotInUseRefusal, normalizeDirectorSpeakerId, speakersFromAnalysis, studioRerollBlockedReason } from './directorSlice'
 import { applyThemePrefs, getStoredPrefs, type FamilyId, type ThemeMode, type ThemePrefs } from '../lib/theme'
 import {
   effectiveH3OmniSequenceFrames,
@@ -78,20 +78,6 @@ function _saveStudioVideoRoutePreferences(preferences: StudioVideoRoutePreferenc
   try {
     localStorage.setItem(STUDIO_VIDEO_CREATE_ROUTE_KEY, JSON.stringify(preferences))
   } catch { /* private browsing or blocked storage */ }
-}
-
-function _normalizeDirectorSpeakerId(value: string | null | undefined): string {
-  const text = (value ?? '').toString().trim()
-  if (!text) return '(S1)'
-  const upper = text.toUpperCase()
-  if (upper.startsWith('(S') && upper.endsWith(')')) return text
-  if (upper.startsWith('SPEAKER_') || upper.startsWith('SPEAKER')) {
-    const match = /\d+/.exec(text)
-    const speakerIndex = match ? Number(match[0]) + 1 : 1
-    return `(S${speakerIndex})`
-  }
-  if (/^S\d+$/i.test(text)) return `(${text})`
-  return text
 }
 
 const _initialStudioVideoRoutePreferences = _loadStudioVideoRoutePreferences()
@@ -9857,10 +9843,8 @@ export const useStore = create<AppState>((set, get) => ({
   directorSkill: null,
   directorMusicSource: null,
   directorMusicModel: DEFAULT_MUSIC_MODEL,
-  directorScriptSource: null,
-  directorScriptText: '',
-  directorScriptClips: [],
-  directorScriptTranscript: [],
+  // Ours: the written-script source and its derived timeline.
+  ...directorScriptDefaults,
   directorSongDescription: '',
   directorSongInstrumental: false,
   directorSongStyle: '',
@@ -9924,22 +9908,10 @@ export const useStore = create<AppState>((set, get) => ({
     if (last && last.stage === stage && last.text === t) return {}
     return { directorLlmLog: [...s.directorLlmLog, { stage, text: t }] }
   }),
-  // A written script needs no audio pass, so choosing it lands on the step that
-  // already collects the scene description. The story path does the same.
-  setDirectorScriptSource: (source) => set(state => ({
-    directorScriptSource: source,
-    ...(source === 'script' && state.directorStep === 'upload' ? { directorStep: 'style' as const } : {}),
-  })),
-  // The timeline and the transcript are derived here rather than at send time, so
-  // the review steps show the clips the render will actually use.
-  setDirectorScriptText: (text) => {
-    const parsed = parseDirectorScript(text)
-    set({
-      directorScriptText: text,
-      directorScriptClips: parsed.clips as unknown as PlannedClip[],
-      directorScriptTranscript: parsed.transcript,
-    })
-  },
+  // Ours, one line each: the state and the patches live in
+  // stores/directorScriptSlice.ts.
+  setDirectorScriptSource: (source) => set(state => directorScriptSourcePatch(state, source)),
+  setDirectorScriptText: (text) => set(directorScriptTextPatch(text)),
   setDirectorSkill: (skill) => {
     set({ directorSkill: skill })
     const state = get()
@@ -10132,7 +10104,7 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   directorSetSpeakerMapping: (speakerId, name, role) => {
-    const normalizedSpeakerId = _normalizeDirectorSpeakerId(speakerId)
+    const normalizedSpeakerId = normalizeDirectorSpeakerId(speakerId)
     set(s => ({
       directorSpeakerMappings: s.directorSpeakerMappings.map(m =>
         m.speakerId === speakerId || m.speakerId === normalizedSpeakerId ? { ...m, speakerId: normalizedSpeakerId, name, role } : m
@@ -10141,7 +10113,7 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   directorInsertSpeakerMention: (speakerId) => {
-    const normalizedSpeakerId = _normalizeDirectorSpeakerId(speakerId)
+    const normalizedSpeakerId = normalizeDirectorSpeakerId(speakerId)
     set(s => ({
       directorSceneDescription: s.directorSceneDescription
         ? `${s.directorSceneDescription} @${normalizedSpeakerId}`
@@ -10251,26 +10223,8 @@ export const useStore = create<AppState>((set, get) => ({
 
       set({ directorAnalysis: analysis })
 
-      // Extract unique speakers from diarized lyrics and normalize to stable
-      // Maestro/H3 labels so the UI never shows the raw pyannote IDs.
-      const speakers: string[] = []
-      if (analysis.lyrics) {
-        const seen = new Set<string>()
-        for (const seg of analysis.lyrics) {
-          const speakerId = _normalizeDirectorSpeakerId(seg.speaker)
-          if (!seen.has(speakerId)) {
-            seen.add(speakerId)
-            speakers.push(speakerId)
-          }
-        }
-      }
-      const speakerMappings: SpeakerMapping[] = speakers.map(s => ({
-        speakerId: s,
-        // Pre-fill from the pitch this same analysis measured, so the user
-        // never has to run diarization again just to name the voices.
-        name: analysis.voice_profiles?.[s]?.gender || '',
-        role: '' as const,
-      }))
+      // Ours: the stable labels and the cast they imply, in one call.
+      const { speakers, speakerMappings } = speakersFromAnalysis(analysis)
       set({ directorSpeakers: speakers, directorSpeakerMappings: speakerMappings })
 
       // Plan beat-aligned clip structure
@@ -10578,10 +10532,9 @@ export const useStore = create<AppState>((set, get) => ({
 
   directorPlanPrompts: async () => {
     const { directorSceneDescription, directorAnalysis } = get()
-    // A written script replaces the analysed timeline: the clips and their lines are
-    // the authored ones, so the planner reads exactly what the user wrote.
-    const scriptMode = get().directorScriptSource === 'script' && get().directorScriptClips.length > 0
-    const directorPlannedClips = scriptMode ? get().directorScriptClips : get().directorPlannedClips
+    // Ours: a written script replaces the analysed timeline, so the planner reads
+    // exactly what the user wrote. See stores/directorScriptSlice.ts.
+    const directorPlannedClips = directorScriptTimeline(get(), get().directorPlannedClips)
     if (!directorPlannedClips.length || !directorSceneDescription.trim()) return
     set({ directorLoading: true, directorError: null, directorStep: 'plan' })
     try {
@@ -10608,13 +10561,10 @@ export const useStore = create<AppState>((set, get) => ({
       // (legacy v1 path); only fall back to true when servicesConfig
       // hasn't loaded yet or the field is undefined.
       const useV2 = get().servicesConfig?.use_director_v2 ?? true
-      // The planner is chosen by the Director skill, not by the field this action
-      // used to hardcode: a podcast planned as a music video loses the conversation
-      // structure the podcast planner exists to build.
+      // Ours: the planner follows the Director skill instead of the field this
+      // action used to hardcode. See stores/directorPlanRouting.ts.
       const directorSkill = get().directorSkill
-      const skillType = directorSkill === 'podcast' || directorSkill === 'viral_video'
-        ? directorSkill
-        : 'music_video'
+      const skillType = directorPlannerSkill(directorSkill)
       const timelineOptions = await _directorTimelineOptions(get())
       let plans: ClipPlan[]
       let timeline = directorPlannedClips
@@ -10623,32 +10573,21 @@ export const useStore = create<AppState>((set, get) => ({
         // Director v2: structured planning → rendering → validation
         const result = await api.directorV2Plan({
           skill_type: skillType,
-          ...(skillType === 'viral_video' ? {
-            // The viral planner is concept-driven and clamps its length to the
-            // platform's norm; both are defaults the user can tune afterwards.
-            concept: directorSceneDescription,
-            platform: 'general',
-            style: 'cinematic',
-          } : {}),
+          // Ours: the viral planner is concept-driven, and a script's authored rows
+          // replace the analysed lyrics and travel as the source document too.
+          ...directorViralPlanOptions(skillType, directorSceneDescription),
           ...timelineOptions,
           clips: directorPlannedClips,
           scene_description: directorSceneDescription,
-          lyrics: scriptMode ? get().directorScriptTranscript : (directorAnalysis?.lyrics ?? undefined),
-          // The authored rows reach the planner as the source document too, so the
-          // H3 ledger locks the written lines instead of accepting a paraphrase.
-          ...(scriptMode ? { story_description: get().directorScriptText } : {}),
+          ...directorScriptPlanFields(get(), directorAnalysis?.lyrics),
           bpm: directorAnalysis?.bpm ?? 120,
           reference_image_path: refImagePath ?? undefined,
           ...extraRefs,
           speaker_mappings: Object.keys(speakerMappings).length > 0 ? speakerMappings : undefined,
           prompt_type: promptType,
         })
-        if (result.cancelled) {
-          // Stop pressed on the planning card is a state, not a failure: bail out
-          // before this pass's empty result replaces the plans under review.
-          set({ directorLoading: false, directorError: null })
-          return
-        }
+        // Ours: a stopped pass answers with an empty plan.
+        if (result.cancelled) return clearDirectorPass(set)
         plans = result.clip_plans
         timeline = result.planned_clips || timeline
       } else {
@@ -11051,10 +10990,7 @@ export const useStore = create<AppState>((set, get) => ({
       directorLlmLog: [],
       directorSkill: null,
       directorMusicSource: null,
-      directorScriptSource: null,
-      directorScriptText: '',
-      directorScriptClips: [],
-      directorScriptTranscript: [],
+      ...directorScriptDefaults,
       directorSongDescription: '',
       directorSongInstrumental: false,
       directorSongStyle: '',
@@ -11124,25 +11060,8 @@ export const useStore = create<AppState>((set, get) => ({
 
       set({ directorAnalysis: analysis })
 
-      // Extract unique speakers from diarized lyrics and normalize to the
-      // stable Maestro/H3 labels used throughout the app. This prevents the
-      // raw pyannote speaker_00 / speaker_01 values from surfacing in the UI.
-      const speakers: string[] = []
-      if (analysis.lyrics) {
-        const seen = new Set<string>()
-        for (const seg of analysis.lyrics) {
-          const speakerId = _normalizeDirectorSpeakerId(seg.speaker)
-          if (!seen.has(speakerId)) {
-            seen.add(speakerId)
-            speakers.push(speakerId)
-          }
-        }
-      }
-      const speakerMappings: SpeakerMapping[] = speakers.map(s => ({
-        speakerId: s,
-        name: '',
-        role: 'speaking' as const,
-      }))
+      // Ours: a short film's cast speaks, and it is the user who names it.
+      const { speakers, speakerMappings } = speakersFromAnalysis(analysis, { role: 'speaking', prefillNames: false })
       set({ directorSpeakers: speakers, directorSpeakerMappings: speakerMappings })
 
       // Plan dialogue-paced clip structure (not beat-aligned)
@@ -11231,12 +11150,8 @@ export const useStore = create<AppState>((set, get) => ({
           characters: shortFilmCharacters.length > 0 ? shortFilmCharacters : undefined,
           prompt_type: promptType,
         })
-        if (result.cancelled) {
-          // Stop pressed on the planning card is a state, not a failure: bail out
-          // before this pass's empty result replaces the plans under review.
-          set({ directorLoading: false, directorError: null })
-          return
-        }
+        // Ours: a stopped pass answers with an empty plan.
+        if (result.cancelled) return clearDirectorPass(set)
         plans = result.clip_plans.map(p => ({
           video_prompt: p.video_prompt || '',
           image_prompt: p.image_prompt || '',
@@ -11363,12 +11278,8 @@ export const useStore = create<AppState>((set, get) => ({
           frames_minimum: get().modelOptions?.frames_minimum ?? 5,
           prompt_type: promptType,
         })
-        if (result.cancelled) {
-          // Stop pressed on the planning card is a state, not a failure: bail out
-          // before this pass's empty result replaces the plans under review.
-          set({ directorLoading: false, directorError: null })
-          return
-        }
+        // Ours: a stopped pass answers with an empty plan.
+        if (result.cancelled) return clearDirectorPass(set)
         plans = result.clip_plans.map(p => ({
           video_prompt: p.video_prompt || '',
           image_prompt: p.image_prompt || '',
@@ -11669,7 +11580,7 @@ export const useStore = create<AppState>((set, get) => ({
   selectedOutputMeta: null,
   metadataLoading: false,
   // Set while the server's delete guard has refused and the app is asking.
-  blockedDelete: null,
+  ...directorDeleteDefaults,
 
   loadOutputMetadata: async (name, workspace) => {
     const revision = ++_galleryMetadataRevision
@@ -13250,22 +13161,10 @@ export const useStore = create<AppState>((set, get) => ({
     // Await the (now async, self-healing) settings load before generating, so a
     // slow on-demand metadata fetch can't let the reroll fire with stale params.
     await get().loadSettingsFromOutput()
-    // That load aborts without a word when the sidecar carries no params, and
-    // for a Director clip it opens the Director project instead of applying
-    // Studio settings. Firing a Studio generation anyway is what made this
-    // action look like it did nothing, so say why instead of staying silent.
-    const meta = get().selectedOutputMeta
-    if (meta?.director_pipeline_id) {
-      throw new Error(
-        'This clip belongs to a Director pipeline. Regenerate it from the clip '
-        + 'actions or the Director Dashboard so it keeps its place in the film.',
-      )
-    }
-    if (!meta?.params) {
-      throw new Error(
-        'This file carries no saved settings, so there is nothing to regenerate.',
-      )
-    }
+    // Ours: a sidecar with no params, or a Director clip, cannot be rerolled as a
+    // Studio generation. Say why instead of staying silent.
+    const rerollBlocked = studioRerollBlockedReason(get().selectedOutputMeta)
+    if (rerollBlocked) throw new Error(rerollBlocked)
     // Small delay to let state settle, then generate
     setTimeout(() => get().startGeneration(), 100)
   },
@@ -13291,16 +13190,12 @@ export const useStore = create<AppState>((set, get) => ({
       await api.deleteOutput(output.name, output.workspace)
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
-      if (!/is using for shot/.test(message)) {
+      // The refusal names the holding shot, and the question it implies belongs to
+      // the app: see stores/directorDeleteGuard.ts.
+      if (!isShotInUseRefusal(message)) {
         console.error('Failed to delete output:', e)
         return { ok: false, error: message }
       }
-      // The server refuses to remove the take a Director shot is using, and the
-      // question belongs to the app. A native confirm() can answer itself -- a
-      // service-worker PWA and several webviews dismiss it as true -- so pressing
-      // cancel still deleted the take with force and left the shot pointing at a
-      // file that no longer existed. That is the exact failure this guard exists
-      // to prevent, so the file is left alone until the user answers here.
       if (get().blockedDelete) return { ok: false, error: message }
       set({ blockedDelete: { output, message } })
       return { ok: false, error: message }
@@ -13309,38 +13204,8 @@ export const useStore = create<AppState>((set, get) => ({
     return { ok: true }
   },
 
-  cancelBlockedDelete: () => {
-    // Cancelling only ever means "keep the clip": nothing on this path touches
-    // the file or the gallery, so closing the question cannot delete anything.
-    set({ blockedDelete: null })
-  },
-
-  confirmBlockedDelete: async () => {
-    const blocked = get().blockedDelete
-    if (!blocked) return
-    // Close the question first so a second click cannot queue a second delete.
-    set({ blockedDelete: null })
-    try {
-      await api.deleteOutput(blocked.output.name, blocked.output.workspace, true)
-      get()._forgetDeletedOutput(blocked.output)
-    } catch (e) {
-      console.error('Failed to delete output:', e)
-    }
-  },
-
-  _forgetDeletedOutput: (output) => {
-    // Drop the item from the gallery only once the server confirmed it is gone.
-    const allOutputs = get().outputs.filter(o => outputIdentity(o) !== outputIdentity(output))
-    const newIdx = Math.min(get().selectedOutput, Math.max(0, allOutputs.length - 1))
-    set({ outputs: allOutputs, outputsTotal: Math.max(0, get().outputsTotal - 1), selectedOutput: newIdx })
-    // Load metadata for new selection
-    const newFiltered = get().filteredOutputs()
-    if (newFiltered[newIdx]) {
-      get().loadOutputMetadata(newFiltered[newIdx].name, newFiltered[newIdx].workspace)
-    } else {
-      set({ selectedOutputMeta: null })
-    }
-  },
+  // The question and its two answers, from our own module.
+  ...directorDeleteGuardActions(set, get),
 
   // ── Director Pipeline (server-side) ──────────────────────────────
   startDirectorPipeline: async (mode = 'now') => {
@@ -13624,14 +13489,14 @@ export const useStore = create<AppState>((set, get) => ({
       }
     }
 
-    // Determine pipeline type. Podcast and viral video are first-class skills the
-    // planner layer has always supported, so they select their own planner here
-    // instead of silently falling back to the music-video pipeline.
-    let pipelineType = 'music_video'
-    if (state.directorSkill === 'podcast') pipelineType = 'podcast'
-    else if (state.directorSkill === 'viral_video') pipelineType = 'viral_video'
-    else if (shortFilmPath === 'story') pipelineType = 'short_film_story'
-    else if (shortFilmPath === 'audio') pipelineType = 'short_film_audio'
+    // Ours: the skill picks the pipeline, instead of every pass falling back to
+    // the music-video one. See stores/directorPlanRouting.ts.
+    const pipelineType = directorPipelineType(state.directorSkill, shortFilmPath)
+    // A written script has no soundtrack (H3 generates the voices for its lines),
+    // and its authored rows replace the analysed timeline and lyrics.
+    const scriptFields = directorScriptPipelineFields(
+      state, effectiveDirectorAudioPath, directorPlannedClips, directorAnalysis?.lyrics,
+    )
 
     const pipelineParams: Record<string, unknown> = {
       pipeline_type: pipelineType,
@@ -13644,9 +13509,7 @@ export const useStore = create<AppState>((set, get) => ({
       _director_project_id: state.directorProjectId || undefined,
       _director_parent_pipeline_id: state.directorSourcePipelineId || undefined,
       scene_description: directorSceneDescription,
-      // A written script has no soundtrack: H3 generates the voices for its lines.
-      audio_path: state.directorScriptSource === 'script' && state.directorScriptClips.length > 0
-        ? undefined : effectiveDirectorAudioPath,
+      audio_path: scriptFields.audio_path,
       // Audio analysis already produced this reusable stem for transcription.
       // LTX-2.5 can condition mouth motion on it while Director keeps the
       // untouched song as the final joined soundtrack.
@@ -13662,8 +13525,7 @@ export const useStore = create<AppState>((set, get) => ({
       character_ref_labels: state.directorCharacterRefLabels.length > 0 ? state.directorCharacterRefLabels : undefined,
       location_ref_paths: locPaths.length > 0 ? locPaths : undefined,
       location_ref_labels: state.directorLocationRefLabels.length > 0 ? state.directorLocationRefLabels : undefined,
-      planned_clips: state.directorScriptSource === 'script' && state.directorScriptClips.length > 0
-        ? state.directorScriptClips : directorPlannedClips,
+      planned_clips: scriptFields.planned_clips,
       prepared_clip_plans: state.directorClipPlans.length > 0
         ? state.directorClipPlans : undefined,
       prepared_planned_clips: state.directorClipPlans.length > 0
@@ -13687,8 +13549,7 @@ export const useStore = create<AppState>((set, get) => ({
       llm_model_id: state.servicesConfig?.llm_model_id || state.llmStatus?.model_id,
       llm_device: state.servicesConfig?.llm_device || state.llmStatus?.device,
       llm_provider: state.servicesConfig?.llm_provider || 'local',
-      lyrics: state.directorScriptSource === 'script' && state.directorScriptTranscript.length > 0
-        ? state.directorScriptTranscript : (directorAnalysis?.lyrics || ''),
+      lyrics: scriptFields.lyrics,
       bpm: directorAnalysis?.bpm,
       speaker_mappings: directorSpeakerMappings,
       characters: shortFilmCharacters,
