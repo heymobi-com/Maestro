@@ -4,6 +4,45 @@ Nota de trabajo. Diagnóstico medido sobre los logs reales del proyecto y sobre 
 del planner. No describe comportamiento ya implementado: son las opciones pendientes de
 elegir.
 
+## Causa real, encontrada el 26-09 en el skill Viral Video (y corregida)
+
+El reporte fue: mismo proyecto, varios modelos, **los primeros 6 clips creativos y del 7
+en adelante personajes caminando, fondo blanco o artefactos**. La medición del estado
+guardado lo explicó sin ambigüedad:
+
+| clip | `subjects_on_screen` | etiquetas `<Subject N>` | `_director_audio_plan` | `_director_duration_sec` |
+|---|---|---|---|---|
+| 1-6 | 1-2 | 7-8 | `generated_audio…` | 5 |
+| 7-16 | **0** | **0** | **None** | **None** |
+
+Los clips 7-16 **no estaban planificados**: son relleno determinista. La razón está en
+`app/services/director/planners/viral_video.py`:
+
+- El planner **ignoraba `clips`** (la línea de tiempo del audio) y deducía el número de
+  escenas solo de la duración: `target_scenes = max(3, min(12, target_duration // 5))`.
+  Con el `target_duration` de 30 s por defecto → **6 escenas**, y le pedía al modelo
+  exactamente 6 (`Output exactly {target_scenes} shot plans`).
+- La línea de tiempo tenía 16 clips, así que 10 quedaban sin plan y el pipeline los
+  rellenaba de forma genérica → sin sujetos → sin anclaje de identidad → el sintetizador
+  produce gente anónima, fondo blanco o artefactos.
+- **Por eso era igual con todos los modelos**: a todos se les daba la misma instrucción de
+  6 escenas.
+- Y por eso la descripción del usuario no se cumplía "en todo el video": el modelo nunca
+  fue consultado sobre los clips 7-16.
+
+Corregido en el mismo planner: la línea de tiempo manda sobre el número de escenas, un
+proyecto largo se planifica **por lotes** (con `long_form_batch_size()`) viendo el arco
+completo, y —segundo hallazgo— cuando hay banda sonora subida el `audio_plan` se fuerza a
+`audio_driven` con `timing_anchor="audio"`, porque el esquema del modelo ejemplificaba
+`generated_audio` y un modelo que lo copiara pedía **inventar** su propio audio en vez de
+usar la pista del usuario (de ahí que cantaran o movieran la boca con la música).
+
+Pruebas: `tests/test_viral_timeline_planning.py`.
+
+## El síntoma que sigue en pie para líneas largas (music video / cortometraje)
+
+Ahí sí se planifica clip por clip, y lo descrito abajo aplica.
+
 ## El síntoma
 
 Con el modelo chico y rápido (Gemma 4B, el default: `Abhiray/gemma-4-E4B-it-heretic-GGUF`),
