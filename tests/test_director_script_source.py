@@ -123,5 +123,36 @@ class RequestRoutingTests(unittest.TestCase):
         self.assertIn("written = analysed if isinstance(analysed, list) else None", pipeline)
 
 
+class ScriptReferenceTests(unittest.TestCase):
+    """A written script supplies the words, not the faces.
+
+    Hiding the upload step for a script also hid the reference inputs that lived inside
+    it, so a script project had no way to add its characters. The same inputs the audio
+    flow shows are now rendered on the style step, exactly as the story path does.
+    """
+
+    def setUp(self):
+        self.chat = _read(CHAT)
+
+    def test_a_script_project_can_still_add_its_references(self):
+        self.assertIn("const scriptMode = scriptCapable && scriptSource === 'script'", self.chat)
+        start = self.chat.index("{scriptMode && atStep('style') && (")
+        block = self.chat[start:start + 1500]
+        # DirectorReferenceInputs resolves the ordered H3 Omni references, or the
+        # reference photo plus the character and location rows.
+        self.assertIn("<DirectorReferenceInputs", block)
+        self.assertIn("referenceImage={referenceImage}", block)
+        self.assertIn("<CharacterNaming", block)
+
+    def test_the_references_are_summarised_once_the_style_step_passes(self):
+        self.assertIn("{scriptMode && pastStep('style') && (referenceImage || directorUsesOmniManifest) && (", self.chat)
+
+    def test_the_audio_zone_stays_out_of_a_script_project(self):
+        self.assertIn(
+            "{skill && (!isShortFilm || shortFilmPath === 'audio') && scriptSource !== 'script'",
+            self.chat,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

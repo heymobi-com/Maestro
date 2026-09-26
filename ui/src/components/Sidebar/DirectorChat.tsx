@@ -543,6 +543,9 @@ export function DirectorChat() {
   const setScriptText = useStore(s => s.setDirectorScriptText)
   // Only the two skills whose planners read a written transcript offer the script source.
   const scriptCapable = skill === 'podcast' || skill === 'viral_video'
+  // A script supplies the words, not the faces: the references below are still what
+  // anchors identity in every shot.
+  const scriptMode = scriptCapable && scriptSource === 'script'
   const scriptSummary = useMemo(() => {
     const parsed = parseDirectorScript(scriptText)
     const spoken = parsed.transcript.length
@@ -1130,6 +1133,44 @@ export function DirectorChat() {
         {/* Style step */}
         {(atStep('style') || pastStep('style')) && (
           <>
+            {/* Script path: a written project still needs its references. The words
+                come from the script, so the upload zone is not shown, but the identity
+                the renderer anchors on comes from here -- this used to be hidden along
+                with the audio step and left a script project with no way to add faces. */}
+            {scriptMode && atStep('style') && (
+              <SystemBubble>
+                <p className="text-xs text-text-secondary mb-2">
+                  {directorUsesOmniManifest
+                    ? 'Add ordered H3 Omni references for your characters, locations, voices or style. They anchor identity in every shot; the script supplies the words.'
+                    : 'Add your reference photo, characters and locations. They anchor identity in every shot; the script supplies the words.'}
+                </p>
+                <div className="space-y-3">
+                  <DirectorReferenceInputs
+                    referenceImage={referenceImage}
+                    refImagePreview={refImagePreview}
+                    setReferenceImage={setReferenceImage}
+                  />
+                  {referenceImage && (
+                    <CharacterNaming
+                      characters={shortFilmCharacters}
+                      setCharacters={shortFilmSetCharacters}
+                    />
+                  )}
+                </div>
+              </SystemBubble>
+            )}
+            {scriptMode && pastStep('style') && (referenceImage || directorUsesOmniManifest) && (
+              <UserBubble>
+                <div className="flex items-center gap-2 text-xs text-text-primary">
+                  {referenceImage && refImagePreview && (
+                    <img src={refImagePreview} alt="Ref" className="w-8 h-8 object-cover rounded border border-border" />
+                  )}
+                  <span>{shortFilmCharacters.length > 0
+                    ? `${shortFilmCharacters.length} character${shortFilmCharacters.length > 1 ? 's' : ''} referenced`
+                    : 'References set'}</span>
+                </div>
+              </UserBubble>
+            )}
             {/* Story path: show reference image + characters + duration here (since no upload step) */}
             {isStoryPath && atStep('style') && (
               <SystemBubble>
