@@ -44,6 +44,8 @@ export interface ScriptTranscriptRow {
   end: number
   speaker: string
   text: string
+  /** The tone the row declares, as `NAME (tone): line`. Empty when it declares none. */
+  delivery: string
 }
 
 export interface ParsedScript {
@@ -137,7 +139,7 @@ export function parseDirectorScript(script: string): ParsedScript {
       beat_count: 0,
     })
     if (turn.speaker) {
-      transcript.push({ start, end, speaker: turn.speaker, text: turn.text })
+      transcript.push({ start, end, speaker: turn.speaker, text: turn.text, delivery: turn.delivery })
       wordCount += _countWords(turn.text)
     }
     cursor = end + PAUSE_SECONDS

@@ -2073,7 +2073,7 @@ interface AppState {
   directorScriptSource: 'audio' | 'script' | null
   directorScriptText: string
   directorScriptClips: PlannedClip[]
-  directorScriptTranscript: Array<{ start: number; end: number; speaker: string; text: string }>
+  directorScriptTranscript: Array<{ start: number; end: number; speaker: string; text: string; delivery: string }>
   setDirectorScriptSource: (source: 'audio' | 'script') => void
   setDirectorScriptText: (text: string) => void
   setDirectorResolution: (preset: ResolutionPreset) => void

@@ -145,6 +145,19 @@ class RowPlacementTests(unittest.TestCase):
         self.assertNotIn("language", beat_from_row(row))
         self.assertIsNone(DialogueBeat.from_dict(beat_from_row(row)).language)
 
+    def test_the_authored_tone_travels_with_the_line(self):
+        # `VALERIA (pensativa): ...` declares a tone. The compiled prompt renders a
+        # beat's delivery beside its line, so losing it here makes every line flat.
+        row = {
+            "start": 0.0, "end": 3.0, "speaker": "Valeria",
+            "delivery": "pensativa", "text": "La dignidad no se negocia.",
+        }
+        beat = beat_from_row(row)
+        self.assertEqual(beat["delivery"], "pensativa")
+        self.assertEqual(DialogueBeat.from_dict(beat).delivery, "pensativa")
+        # A row that declares no tone stays silent about delivery rather than guessing.
+        self.assertNotIn("delivery", beat_from_row({"text": "Sin tono."}))
+
     def test_blank_and_no_speech_rows_are_not_lines(self):
         clips = [{"start": 0.0, "end": 10.0}]
         rows = [

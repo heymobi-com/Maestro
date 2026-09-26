@@ -51,6 +51,11 @@ class ScriptParserTests(unittest.TestCase):
         self.assertIn("end: number", parser)
         self.assertIn("speaker: string", parser)
         self.assertIn("text: string", parser)
+        # The authored tone travels with the row too. Without it the compiled prompt
+        # carries no delivery per line, and a real render came back flat and forced,
+        # every line read back to back as one continuous sentence.
+        self.assertIn("delivery: string", parser)
+        self.assertIn("delivery: turn.delivery", parser)
 
     def test_no_language_is_invented_for_an_untagged_row(self):
         parser = _read(PARSER)
