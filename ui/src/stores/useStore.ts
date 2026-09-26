@@ -13509,7 +13509,8 @@ export const useStore = create<AppState>((set, get) => ({
       _director_project_id: state.directorProjectId || undefined,
       _director_parent_pipeline_id: state.directorSourcePipelineId || undefined,
       scene_description: directorSceneDescription,
-      audio_path: scriptFields.audio_path,
+      // All four script fields at once; the marker is what exempts H3 from a soundtrack.
+      ...scriptFields,
       // Audio analysis already produced this reusable stem for transcription.
       // LTX-2.5 can condition mouth motion on it while Director keeps the
       // untouched song as the final joined soundtrack.
@@ -13525,7 +13526,6 @@ export const useStore = create<AppState>((set, get) => ({
       character_ref_labels: state.directorCharacterRefLabels.length > 0 ? state.directorCharacterRefLabels : undefined,
       location_ref_paths: locPaths.length > 0 ? locPaths : undefined,
       location_ref_labels: state.directorLocationRefLabels.length > 0 ? state.directorLocationRefLabels : undefined,
-      planned_clips: scriptFields.planned_clips,
       prepared_clip_plans: state.directorClipPlans.length > 0
         ? state.directorClipPlans : undefined,
       prepared_planned_clips: state.directorClipPlans.length > 0
@@ -13549,7 +13549,6 @@ export const useStore = create<AppState>((set, get) => ({
       llm_model_id: state.servicesConfig?.llm_model_id || state.llmStatus?.model_id,
       llm_device: state.servicesConfig?.llm_device || state.llmStatus?.device,
       llm_provider: state.servicesConfig?.llm_provider || 'local',
-      lyrics: scriptFields.lyrics,
       bpm: directorAnalysis?.bpm,
       speaker_mappings: directorSpeakerMappings,
       characters: shortFilmCharacters,

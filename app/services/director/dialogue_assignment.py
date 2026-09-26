@@ -212,6 +212,8 @@ def shot_speakers_note(
     if not lines:
         return ""
     return (
-        "\n\nSPEAKERS IN THESE SHOTS (name each of them in subjects_on_screen with "
-        "speaker_name exactly as written here):\n" + "\n".join(lines)
+        "\n\nSPEAKERS IN THESE SHOTS (for each one, add \"speaker_name\" with the name "
+        "exactly as written here to a subjects_on_screen row that still carries its "
+        "full visual_description; never write a row that is only a name):\n"
+        + "\n".join(lines)
     )

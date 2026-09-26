@@ -121,8 +121,9 @@ class RequestRoutingTests(unittest.TestCase):
         slice_source = _read(SLICE)
 
         self.assertIn("const scriptFields = directorScriptPipelineFields(", store)
-        self.assertIn("audio_path: scriptFields.audio_path,", store)
-        self.assertIn("planned_clips: scriptFields.planned_clips,", store)
+        # The script owns the soundtrack, the timeline and the words, so all of its
+        # fields travel as one spread instead of being re-listed by hand.
+        self.assertIn("...scriptFields,", store)
         self.assertIn("audio_path: undefined,", slice_source)
         self.assertIn("planned_clips: state.directorScriptClips,", slice_source)
 
@@ -141,6 +142,12 @@ class RequestRoutingTests(unittest.TestCase):
         # The UI marks the request...
         self.assertIn("_director_script_source: true,", slice_source)
         self.assertIn("const scriptFields = directorScriptPipelineFields(", store)
+        # ...and the fields must actually travel: the request used to list
+        # audio_path/planned_clips/lyrics one by one and silently leave the marker
+        # behind, so a real run died asking for a soundtrack that never existed.
+        # A test that pins both ends but not the wire between them pins nothing.
+        self.assertIn("...scriptFields,", store)
+        self.assertNotIn("audio_path: scriptFields.audio_path,", store)
         # ...and the pipeline honours exactly that marker.
         self.assertIn('params.get("_director_script_source")', pipeline)
         self.assertIn('needs_uploaded_audio = (', pipeline)

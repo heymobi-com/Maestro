@@ -9,6 +9,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional, Any
 
+from .dialogue_markup import normalize_spoken_text
+from .subject_rows import subject_ref_fields
+
 
 # ── Asset & Reference Types ──────────────────────────────────────────
 
@@ -153,14 +156,7 @@ class SubjectRef:
 
     @staticmethod
     def from_dict(d: dict) -> "SubjectRef":
-        return SubjectRef(
-            visual_description=d["visual_description"],
-            character_id=d.get("character_id"),
-            position_or_relation=d.get("position_or_relation"),
-            wardrobe=d.get("wardrobe"),
-            speaker_name=d.get("speaker_name"),
-            performance_role=d.get("performance_role"),
-        )
+        return SubjectRef(**subject_ref_fields(d))
 
 
 @dataclass
@@ -192,17 +188,8 @@ class DialogueBeat:
         # contract truthful so downstream prompt formatters and validators do
         # not discover a None value hours later during final plan assembly.
         d = d if isinstance(d, dict) else {}
-        spoken = str(d.get("spoken_text") or "").strip()
-        if spoken:
-            # Normalize at the boundary that every planner beat crosses, so the
-            # H3 wrapper and any repeated speaker never reach the saved plan or
-            # the review UI. Imported lazily to keep schema free of a hard
-            # dependency on the prompt compiler.
-            from services.director.h3_dialogue import strip_dialogue_markup
-
-            spoken = strip_dialogue_markup(spoken)
         return DialogueBeat(
-            spoken_text=spoken,
+            spoken_text=normalize_spoken_text(d.get("spoken_text")),
             speaker_id=d.get("speaker_id"),
             delivery=d.get("delivery"),
             physical_cue=d.get("physical_cue"),

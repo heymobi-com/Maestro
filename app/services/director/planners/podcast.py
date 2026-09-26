@@ -16,6 +16,8 @@ from ..schema import (
     SpeakerMapEntry,
 )
 from ..policies import build_character_rules_block, build_camera_style_block
+from ..dialogue_assignment import assign_rows_to_clips, beats_for_shot
+from ..podcast_cast import resolve_cast
 from .base import BasePlanner
 
 
@@ -165,41 +167,11 @@ class PodcastPlanner(BasePlanner):
         **kwargs,
     ) -> list[ShotPlan]:
         """Plan shots from pre-segmented clips (similar to audio-driven short film)."""
-        speaker_names = {sid: info.get("name", sid) for sid, info in (speaker_mappings or {}).items()}
+        cast_section, speaker_display = resolve_cast(transcript, speaker_mappings)
 
-        # The transcript carries raw pyannote ids (SPEAKER_00) while the user's
-        # mapping is keyed by stable labels ((S1)). Looking the raw id up in the
-        # mapping always missed, so the model only ever saw opaque tokens and
-        # invented its own speaker numbering. Resolve them up front and inject
-        # the closed cast vocabulary.
-        from ..speaker_binding import (
-            SPEAKER_LABEL_RULES,
-            cast_vocabulary,
-            format_speaker,
-            speaker_cast_block,
-            speaker_label_order,
-        )
-        from ..voice_gender import declared_gender_for_labels
-
-        raw_to_label = speaker_label_order(transcript)
-        vocabulary = cast_vocabulary(speaker_mappings, transcript)
-        cast_genders = declared_gender_for_labels(
-            "",
-            [{"speakerId": label, "name": name} for label, name in vocabulary.items()],
-            sorted(vocabulary),
-        )
-        cast_block = speaker_cast_block(vocabulary, cast_genders)
-        cast_section = (
-            "CANONICAL SPEAKER CAST — the complete and closed set of speakers "
-            f"for this project:\n{cast_block}\n\n{SPEAKER_LABEL_RULES}\n\n"
-            if cast_block else ""
-        )
-
-        def speaker_display(raw_speaker) -> str:
-            label = raw_to_label.get(str(raw_speaker or "").strip().upper(), "")
-            if label:
-                return format_speaker(label, vocabulary.get(label))
-            return str(speaker_names.get(raw_speaker) or raw_speaker or "")
+        # The rows are the words; the model plans the staging. See
+        # dialogue_assignment for the measurement behind this.
+        authored_beats = assign_rows_to_clips(clips, transcript)
 
         clip_contexts = []
         for i, clip in enumerate(clips):
@@ -377,7 +349,10 @@ Write exactly {len(batch_clips)} structured shot plans. Go:"""
                 lip_sync_critical=audio_raw.get("lip_sync_critical", True),
             )
 
-            dialogue_beats = [DialogueBeat.from_dict(db) for db in raw.get("dialogue_beats", [])] if raw.get("dialogue_beats") else None
+            dialogue_beats = [
+                DialogueBeat.from_dict(beat)
+                for beat in beats_for_shot(authored_beats, i, raw)
+            ] or None
 
             shot = ShotPlan(
                 shot_id=self._make_shot_id(i, "pod"),
