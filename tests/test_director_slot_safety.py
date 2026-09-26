@@ -29,6 +29,9 @@ from services.director_pipeline import (  # noqa: E402
 )
 
 _LAUNCH = Path(_APP_DIR) / "launch.py"
+# The slot lookup and its refusal wording are ours, so they live in a module of
+# ours rather than inside launch.py, which upstream edits every release.
+_SLOT_GUARD = Path(_APP_DIR) / "services" / "director_slot_guard.py"
 _CLIENT = Path(_HERE).parent / "ui" / "src" / "api" / "client.ts"
 # The client's deleteOutput is a one-line delegate; the decision itself lives in
 # a module of ours so an upstream edit to client.ts stays a seam we can see.
@@ -210,18 +213,20 @@ class DeleteGuardTests(unittest.TestCase):
     def test_an_in_use_file_is_refused_with_the_shot_named(self):
         start = self.launch.index("def delete_output(")
         body = self.launch[start:start + 1800]
+        guard = _SLOT_GUARD.read_text(encoding="utf-8")
 
-        self.assertIn("in_use = _director_slot_using(out_dir, name)", body)
+        # The endpoint keeps the refusal; the lookup and its words are ours.
+        self.assertIn("in_use = director_slot_using(out_dir, name)", body)
         self.assertIn("if in_use and not force:", body)
         self.assertIn("status_code=409", body)
-        self.assertIn("for shot {index + 1}", body)
+        self.assertIn("detail=director_slot_in_use_message(in_use)", body)
+        self.assertIn("for shot {index + 1}", guard)
 
     def test_the_usage_lookup_covers_clips_and_start_images(self):
-        start = self.launch.index("def _director_slot_using(")
-        body = self.launch[start:start + 1600]
+        guard = _SLOT_GUARD.read_text(encoding="utf-8")
 
-        self.assertIn('clip.get("video_filename") == name', body)
-        self.assertIn('clip.get("start_image_filename") == name', body)
+        self.assertIn('clip.get("video_filename") == name', guard)
+        self.assertIn('clip.get("start_image_filename") == name', guard)
 
     def test_the_client_passes_force_and_surfaces_the_reason(self):
         client = _CLIENT.read_text(encoding="utf-8")

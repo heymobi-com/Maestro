@@ -53,12 +53,20 @@ def _discover_plan() -> str:
         # used to become the fixture: measured 2026-09-25 the newest plan on disk was
         # a one-speaker project and the two-speaker assertions failed for a reason
         # that had nothing to do with the code under test.
+        #
+        # Measured again 2026-09-26: a written-script project (viral_video, speakers
+        # already named "Valeria"/"Ricardo", no speaker_mappings) is newer still, and
+        # it is not diarized audio at all -- the vocabulary these tests build comes
+        # from pyannote ids plus their mappings, so nothing can bind and every beat
+        # resolved to None. The fixture has to be a diarized project, which is what
+        # the labels under test are derived from.
         params = data.get("_params_snapshot") or {}
         speakers = {
             str(row.get("speaker")) for row in (params.get("lyrics") or [])
             if isinstance(row, dict) and row.get("speaker")
         }
-        if len(speakers) >= 2:
+        diarized = {speaker for speaker in speakers if speaker.upper().startswith("SPEAKER")}
+        if len(diarized) >= 2:
             return candidate
     return ""
 

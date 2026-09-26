@@ -29107,40 +29107,6 @@ async def move_output(name: str, request: Request, workspace: str = ""):
     return {"moved": name, "to": target_ws}
 
 
-def _director_slot_using(out_dir: str, name: str):
-    """The Director shot that currently uses ``name``, if any.
-
-    Returns ``(pipeline_id, clip_index, kind)``. Deleting the take a slot is
-    using leaves a stale filename behind, and the rejoin then refuses that shot
-    with "Regenerate missing or invalid video clip(s) N before rejoining" --
-    which reads as "re-render it" for what was only a deleted file. Warning here
-    is cheaper than discovering it at rejoin time.
-    """
-    try:
-        entries = os.listdir(out_dir)
-    except OSError:
-        return None
-    for entry in entries:
-        if not (entry.startswith("_director_pipeline_") and entry.endswith(".json")):
-            continue
-        try:
-            with open(os.path.join(out_dir, entry), encoding="utf-8") as handle:
-                state = json.load(handle)
-        except (OSError, ValueError):
-            continue
-        if not isinstance(state, dict):
-            continue
-        pid = str(state.get("pipeline_id") or entry)
-        for index, clip in enumerate(state.get("clips") or []):
-            if not isinstance(clip, dict):
-                continue
-            if clip.get("video_filename") == name:
-                return pid, index, "clip"
-            if clip.get("start_image_filename") == name:
-                return pid, index, "start image"
-    return None
-
-
 @api.delete("/api/v1/outputs/{name}")
 def delete_output(name: str, workspace: str = "", force: bool = False):
     """Delete an output file and its sidecar metadata.
@@ -29167,18 +29133,10 @@ def delete_output(name: str, workspace: str = "", force: bool = False):
     # Warn before removing the take a Director shot is using. The caller can
     # still go through with force=true; the rejoin re-points the shot at a
     # surviving take of the same shot when it can.
-    in_use = _director_slot_using(out_dir, name)
+    from services.director_slot_guard import director_slot_in_use_message, director_slot_using
+    in_use = director_slot_using(out_dir, name)
     if in_use and not force:
-        pid, index, kind = in_use
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"This file is the {kind} that Director project {pid} is using "
-                f"for shot {index + 1}. If you delete it, the rejoin will use an "
-                "earlier take of that shot when one exists, and will otherwise "
-                "ask you to regenerate that shot. Delete it anyway?"
-            ),
-        )
+        raise HTTPException(status_code=409, detail=director_slot_in_use_message(in_use))
 
     # Hint the GC to drop any lingering references (e.g. PIL image
     # objects from a recent metadata read) BEFORE we try to delete.

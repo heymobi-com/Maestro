@@ -142,8 +142,11 @@ def load_budget() -> dict:
 def write_baseline(notes: dict[str, str] | None = None) -> None:
     payload = load_budget() if BUDGET_PATH.exists() else {}
     payload["files"] = dict(sorted(measure().items()))
-    if notes is not None:
-        payload["notes"] = {k: v for k, v in notes.items() if k in payload["files"]}
+    # Notes belong to files that are still shared: a file we no longer edit (or one
+    # upstream removed) must not leave an orphan reason behind, because the check
+    # insists every note describes a budget line that exists.
+    merged = {**(payload.get("notes") or {}), **(notes or {})}
+    payload["notes"] = {k: v for k, v in merged.items() if k in payload["files"]}
     payload.setdefault("upstream", UPSTREAM)
     BUDGET_PATH.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"wrote {BUDGET_PATH.relative_to(REPO)} with {len(payload['files'])} shared files")
