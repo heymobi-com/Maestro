@@ -12,7 +12,7 @@
     "app/services/director/planners/viral_video.py": 130,
     "app/services/director/schema.py": 10,
     "app/services/director_model_compat.py": 11,
-    "app/services/director_pipeline.py": 1798,
+    "app/services/director_pipeline.py": 1808,
     "app/services/gallery_library.py": 55,
     "app/services/llm_guides/director/minimax_h3_shot_breakdown.md": 8,
     "app/services/llm_service.py": 25,
