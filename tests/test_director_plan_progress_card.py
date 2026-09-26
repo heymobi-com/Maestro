@@ -34,6 +34,8 @@ class PlanProgressCardTests(unittest.TestCase):
         self.card = _read(_UI_DIR, "components", "MainContent", "PlanProgressCard.tsx")
         self.main = _read(_UI_DIR, "components", "MainContent", "MainContent.tsx")
         self.client = _read(_UI_DIR, "api", "client.ts")
+        # The call itself lives in a module of ours; the client re-exports it.
+        self.plan_operation = _read(_UI_DIR, "api", "directorPlanOperation.ts")
         self.store = _read(_UI_DIR, "stores", "useStore.ts")
 
     def test_the_card_shows_the_planners_own_counters(self):
@@ -84,9 +86,11 @@ class PlanProgressCardTests(unittest.TestCase):
         self.assertIn('aria-live="polite"', self.card)
 
     def test_the_client_can_read_and_stop_the_pass(self):
-        self.assertIn("export async function fetchDirectorPlanOperation()", self.client)
-        self.assertIn("export async function cancelDirectorPlanOperation(", self.client)
-        self.assertIn("/api/v1/director/plan-operation", self.client)
+        self.assertIn("export async function fetchDirectorPlanOperation()", self.plan_operation)
+        self.assertIn("export async function cancelDirectorPlanOperation(", self.plan_operation)
+        self.assertIn("/api/v1/director/plan-operation", self.plan_operation)
+        # `../api/client` has to keep working: it is where the card imports from.
+        self.assertIn("export * from './directorPlanOperation'", self.client)
 
     def test_a_stopped_pass_does_not_replace_the_plans_under_review(self):
         # The endpoint answers a Stop with an empty plan, so the store has to

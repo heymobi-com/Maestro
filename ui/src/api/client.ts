@@ -1,6 +1,13 @@
 import type { DirectorModelCompatibility, H3WindowPlan, LTXWindowPlan, MiniMaxH3Reference, ProductionPlan, SavedOmniCharacter, ScailResolutionProfile } from '../types'
+import { deleteOutputFile } from './outputDelete'
 
 const BASE = ''  // same origin in production; Vite proxy handles /api in dev
+
+// ── Our Director additions, re-exported ─────────────────────────────────
+// They live in their own modules so upstream's edits to this file stay a seam
+// we can see. Re-exported here because this is where the app imports them.
+export * from './directorRevision'
+export * from './directorPlanOperation'
 
 export interface ApiModel {
   model_type: string
@@ -780,27 +787,10 @@ export async function fetchOutputMetadata(name: string, workspace?: string): Pro
 }
 
 export async function deleteOutput(name: string, workspace?: string, force = false): Promise<void> {
-  // Uploads and outputs are removed by different endpoints: 2.4.1 added the upload
-  // one. The force flag and the server's own reason are what the blocked-take
-  // question needs (a take a Director shot is using is refused), so both live here.
-  const isUpload = workspace === '__uploads__'
-  const params = new URLSearchParams()
-  if (force) params.set('force', 'true')
-  const target = isUpload
-    ? `${BASE}/api/v1/uploads/${encodeURIComponent(name)}`
-    : `${BASE}/api/v1/outputs/${encodeURIComponent(name)}${workspaceQuery(workspace)}`
-  const query = params.toString()
-  const endpoint = query ? `${target}${target.includes('?') ? '&' : '?'}${query}` : target
-  const res = await fetch(endpoint, { method: 'DELETE' })
-  if (!res.ok) {
-    // The server refuses when this file is the take a Director shot is using, and
-    // says which shot. Surface that instead of a generic failure.
-    const error = await res.json().catch(() => null) as { detail?: unknown; error?: unknown } | null
-    const detail = typeof error?.detail === 'string'
-      ? error.detail
-      : typeof error?.error === 'string' ? error.error : null
-    throw new Error(detail || `Failed to delete ${isUpload ? 'upload' : 'output'}`)
-  }
+  // One line on purpose: the upload/output split, the forced delete and the
+  // reason the server gives all live in our own module (see outputDelete.ts), so
+  // upstream's edits to this function stay a seam we can see.
+  return deleteOutputFile(BASE, name, workspace, force)
 }
 
 export async function rejoinClips(groupId: string, audioFile?: string, workspace?: string): Promise<{ filename: string; clip_count: number }> {
@@ -1125,72 +1115,6 @@ export async function updateClipPrompt(pid: string, clipIndex: number, update: {
   }
 }
 
-/**
- * One turn of the correction conversation for a shot.
- *
- * The assistant reports what in the prompt causes the problem, asks when the note
- * is missing an intent, and returns a rewrite only when it keeps every spoken
- * line, carries exactly one shot and passes the prompt contract. Nothing is saved
- * here: the rewrite lands in the prompt editor for review.
- */
-export interface RevisionTurn {
-  role: 'director' | 'assistant'
-  text: string
-}
-
-export interface ShotDiagnosis {
-  shots: number[]
-  duration_seconds: number
-  dialogue_blocks: number
-  subject_positions: Array<{ subject: string; position: string }>
-  behind_speaker: string[]
-  errors: string[]
-  findings: string[]
-}
-
-export interface RevisionAnswer {
-  clip_index: number
-  analysis: string
-  question: string
-  /** One-line choices: a prompt edit, or the change that has to happen outside it. */
-  options: string[]
-  /** What to say when there is no proposal and no question: never a bare refusal. */
-  note: string
-  /** Words in the proposal that look damaged while re-typing, not corrected. */
-  warnings: string[]
-  /** This shot's own text: the part that varies, and the only part an answer may change. */
-  clip_prompt: string
-  /** The same part of the proposal: what the comparison shows. */
-  clip_proposed: string
-  diagnosis: ShotDiagnosis
-  rewritten: boolean
-  errors: string[]
-  video_prompt: string
-}
-
-export async function reviseClipPrompt(
-  pid: string,
-  clipIndex: number,
-  instruction: string,
-  prompt?: string,
-  history: RevisionTurn[] = [],
-): Promise<RevisionAnswer> {
-  const res = await fetch(`${BASE}/api/v1/director/pipelines/${encodeURIComponent(pid)}/clips/${clipIndex}/revise-prompt`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      instruction,
-      prompt: prompt || undefined,
-      history: history.length ? history : undefined,
-    }),
-  })
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Could not revise the prompt' }))
-    throw new Error(err.error || err.detail || 'Could not revise the prompt')
-  }
-  return res.json()
-}
-
 export async function startPipelineRepair(pid: string): Promise<{
   pipeline_id: string
   repair: import('../types').PipelineRepairState
@@ -1333,47 +1257,6 @@ export interface DirectorV2PlanResponse {
   skill_type: string
   /** True when the user stopped the pass with the main-screen Stop button. */
   cancelled?: boolean
-}
-
-export interface DirectorPlanOperation {
-  id: string
-  kind: string
-  label: string
-  stage: string
-  message: string
-  current: number
-  total: number
-  cancelling: boolean
-  elapsed_seconds: number
-  updated_at: number
-}
-
-/**
- * Read the interactive planning pass that is running right now.
- *
- * A long timeline is planned in batches that can take ten minutes. Before this
- * existed the only sign of progress was the planner's raw text output, so a
- * reloaded window could not tell that anything was happening at all, let alone
- * offer a way to stop it.
- */
-export async function fetchDirectorPlanOperation(): Promise<DirectorPlanOperation | null> {
-  const res = await fetch(`${BASE}/api/v1/director/plan-operation`, { cache: 'no-store' })
-  if (!res.ok) throw new Error('Could not read the Director planning status')
-  const data = await res.json().catch(() => null)
-  return data && data.id ? (data as DirectorPlanOperation) : null
-}
-
-/** Ask the running planning pass to stop after the batch it is planning now. */
-export async function cancelDirectorPlanOperation(operationId: string): Promise<void> {
-  const res = await fetch(`${BASE}/api/v1/director/plan-operation/cancel`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ operation_id: operationId }),
-  })
-  if (!res.ok) {
-    const detail = await res.json().catch(() => ({ detail: 'Could not stop the planning pass' }))
-    throw new Error(detail.detail || 'Could not stop the planning pass')
-  }
 }
 
 export async function directorV2Plan(params: DirectorV2PlanRequest): Promise<DirectorV2PlanResponse> {
@@ -2368,8 +2251,6 @@ export async function analyzeAudio(params: {
   }
   return res.json()
 }
-
-export type DirectorVoiceProfile = import('../types').VoiceProfile
 
 /** Read live progress of the in-flight audio analyze call. Backed by
  *  audio_analysis._PROGRESS — updated at each phase boundary in the

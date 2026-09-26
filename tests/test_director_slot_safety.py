@@ -30,6 +30,9 @@ from services.director_pipeline import (  # noqa: E402
 
 _LAUNCH = Path(_APP_DIR) / "launch.py"
 _CLIENT = Path(_HERE).parent / "ui" / "src" / "api" / "client.ts"
+# The client's deleteOutput is a one-line delegate; the decision itself lives in
+# a module of ours so an upstream edit to client.ts stays a seam we can see.
+_DELETE_CLIENT = Path(_HERE).parent / "ui" / "src" / "api" / "outputDelete.ts"
 _STORE = Path(_HERE).parent / "ui" / "src" / "stores" / "useStore.ts"
 _MAIN_CONTENT = (
     Path(_HERE).parent / "ui" / "src" / "components" / "MainContent" / "MainContent.tsx"
@@ -220,9 +223,15 @@ class DeleteGuardTests(unittest.TestCase):
 
     def test_the_client_passes_force_and_surfaces_the_reason(self):
         client = _CLIENT.read_text(encoding="utf-8")
+        module = _DELETE_CLIENT.read_text(encoding="utf-8")
 
         self.assertIn("export async function deleteOutput(name: string, workspace?: string, force = false)", client)
-        self.assertIn("params.set('force', 'true')", client)
+        # The signature stays on the client, the decision lives in our module.
+        self.assertIn("return deleteOutputFile(BASE, name, workspace, force)", client)
+        self.assertIn("params.set('force', 'true')", module)
+        # Forcing is what the user's answer sends, so the flag has to reach the
+        # request rather than only being accepted by the signature.
+        self.assertIn("deleteOutput(blocked.output.name, blocked.output.workspace, true)", _STORE.read_text(encoding="utf-8"))
 
     def test_the_refused_delete_is_held_for_the_users_answer(self):
         store = _STORE.read_text(encoding="utf-8")

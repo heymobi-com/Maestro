@@ -198,9 +198,13 @@ class PromptRevisionWiringTests(unittest.TestCase):
 
     def test_the_client_calls_that_endpoint(self):
         client = _read("api", "client.ts")
+        revision = _read("api", "directorRevision.ts")
 
-        self.assertIn("export async function reviseClipPrompt(", client)
-        self.assertIn("/revise-prompt`", client)
+        self.assertIn("export async function reviseClipPrompt(", revision)
+        self.assertIn("/revise-prompt`", revision)
+        # The dashboard imports it from `../api/client`, so that path must keep
+        # resolving after the extraction.
+        self.assertIn("export * from './directorRevision'", client)
 
     def test_the_panel_has_the_correction_box_and_the_button(self):
         dashboard = _read(
