@@ -9,7 +9,7 @@
     "app/services/director/planners/music_video.py": 17,
     "app/services/director/planners/podcast.py": 39,
     "app/services/director/planners/short_film.py": 66,
-    "app/services/director/planners/viral_video.py": 130,
+    "app/services/director/planners/viral_video.py": 110,
     "app/services/director/schema.py": 10,
     "app/services/director_model_compat.py": 11,
     "app/services/director_pipeline.py": 1808,

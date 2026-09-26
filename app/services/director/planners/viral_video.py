@@ -15,6 +15,14 @@ from ..schema import (
     AssetRef, SubjectRef, DialogueBeat, CameraPlan, AudioPlan,
 )
 from ..policies import build_character_rules_block, build_camera_style_block
+from ..dialogue_assignment import assign_rows_to_clips, beats_for_shot, shot_speakers_note
+from ..timeline_planning import (
+    batch_note,
+    batch_seconds,
+    fallback_shot,
+    soundtrack_note,
+    timeline_overview,
+)
 from .base import BasePlanner
 
 
@@ -105,18 +113,9 @@ class ViralVideoPlanner(BasePlanner):
         style_desc = _VIRAL_STYLES.get(style, _VIRAL_STYLES["cinematic"])
 
         # An uploaded soundtrack drives the timing and is not something the characters
-        # perform. The plan used to say generated_audio for every shot, which asks the
-        # model to invent its own audio instead of following the track the user supplied:
-        # that is what made characters sing or lip-sync to the music they were supposed
-        # to be working over. The short-film planner already says audio_driven.
+        # perform; the mode the model echoes from the schema example must not win over it.
         has_soundtrack = bool(audio_path)
-        soundtrack_note = (
-            "The uploaded soundtrack drives the timing and it is finished audio: the "
-            "characters do not perform it. Do not write singing, do not move mouths to "
-            "the music, and keep lip movement to a tagged spoken line only. Its "
-            "transcription is context for the story beats, not words to re-enact."
-            if has_soundtrack else ""
-        )
+        soundtrack_text = soundtrack_note(has_soundtrack)
 
         char_rules = build_character_rules_block(has_reference, char_profiles if char_profiles else None)
         camera_block = build_camera_style_block()
@@ -137,7 +136,7 @@ VIRAL VIDEO RULES:
 - For direct-address: tight framing, eye contact, punchy delivery.
 - For meme: exaggerated reactions, setup/punchline structure.
 - For UGC: authentic feel, handheld energy, relatable moments.
-{soundtrack_note}
+{soundtrack_text}
 {note}
 {char_rules}
 
@@ -184,15 +183,22 @@ Create {count} short, punchy shots. Hook first! Go:"""
                 bounded=bool(note),
             )
 
+        # The authored rows are placed on the timeline before the model is asked
+        # anything: the words are the script's own, not the model's retelling of them.
+        authored_beats = assign_rows_to_clips(timeline, kwargs.get("transcript"))
+        authored_total = sum(len(beats) for beats in authored_beats)
+        if authored_total:
+            print(
+                f"[ViralVideoPlanner] Placed {authored_total} authored line(s) on "
+                f"{sum(1 for beats in authored_beats if beats)} of "
+                f"{len(authored_beats)} shot(s)."
+            )
+
         batch_size = self.long_form_batch_size()
         if len(timeline) > batch_size:
             # The whole timeline, so a batch can see what is still ahead instead of
             # continuing whatever the previous one ended with.
-            timeline_overview = "\n".join(
-                f"Clip {index + 1}: {float(clip.get('start', 0) or 0):.1f}-"
-                f"{float(clip.get('end', 0) or 0):.1f}s"
-                for index, clip in enumerate(timeline)
-            )
+            overview = timeline_overview(timeline)
 
             def call_batch(
                 batch_number: int,
@@ -202,26 +208,11 @@ Create {count} short, punchy shots. Hook first! Go:"""
             ) -> list[dict]:
                 end = start + len(batch_clips)
                 previous_ending = str((previous or {}).get("ending_beat") or "").strip()
-                batch_seconds = max(
-                    (float(clip.get("end", 0) or 0) for clip in batch_clips), default=0.0,
-                ) - min((float(clip.get("start", 0) or 0) for clip in batch_clips), default=0.0)
-                if batch_seconds <= 0:
-                    # A saved timeline can arrive with its timings unwritten; the shot
-                    # count still comes from the clips, which is what matters here.
-                    batch_seconds = len(batch_clips) * 5.0
-                note = (
-                    "LONG-FORM TIMELINE CONTRACT:\n"
-                    f"This is planning batch {batch_number}, covering global shots "
-                    f"{start + 1}-{end} of {len(timeline)}. Continue the same video; do "
-                    "not restart its premise or repeat completed shot ideas. The "
-                    "soundtrack is already fixed and its transcription is immutable.\n"
-                    f"Previous planned ending: "
-                    f"{previous_ending or 'No prior shot; establish the opening.'}\n\n"
-                    "THE WHOLE TIMELINE (context only: see where this batch sits and "
-                    f"what is still ahead; plan ONLY shots {start + 1}-{end}):\n"
-                    f"{timeline_overview}"
+                note = batch_note(
+                    batch_number, start, end, len(timeline), previous_ending, overview,
+                    shot_speakers_note(authored_beats, start, end),
                 )
-                return plan_scenes(len(batch_clips), batch_seconds, note)
+                return plan_scenes(len(batch_clips), batch_seconds(batch_clips), note)
 
             shot_dicts = self._run_checkpointed_json_batches(
                 items=timeline,
@@ -230,24 +221,7 @@ Create {count} short, punchy shots. Hook first! Go:"""
                 stage="viral_video_batch",
                 progress_label="viral",
                 call_batch=call_batch,
-                fallback_factory=lambda index, clip: {
-                    "scene_goal": f"Continue the video at global shot {index + 1}",
-                    "scene_type": "escalation",
-                    "duration_sec": max(
-                        1.0,
-                        float(clip.get("end", 0) or 0) - float(clip.get("start", 0) or 0),
-                    ),
-                    "subjects_on_screen": [],
-                    "environment": "",
-                    "visual_style": "",
-                    "lighting": "",
-                    "mood": "",
-                    "action_beats": [],
-                    "dialogue_beats": [],
-                    "camera_plan": {},
-                    "audio_plan": {"mode": "generated_audio"},
-                    "ending_beat": "",
-                },
+                fallback_factory=fallback_shot,
             )
         else:
             shot_dicts = plan_scenes(target_scenes, target_duration)
@@ -283,7 +257,12 @@ Create {count} short, punchy shots. Hook first! Go:"""
                 timing_anchor="audio" if has_soundtrack else "video",
             )
 
-            dialogue_beats = [DialogueBeat.from_dict(db) for db in raw.get("dialogue_beats", [])] if raw.get("dialogue_beats") else None
+            # The authored row's speaker and words win; the planner only fills in a
+            # shot the timeline gave no line to.
+            dialogue_beats = [
+                DialogueBeat.from_dict(beat)
+                for beat in beats_for_shot(authored_beats, i, raw)
+            ] or None
 
             shot = ShotPlan(
                 shot_id=self._make_shot_id(i, "vv"),
