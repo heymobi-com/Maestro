@@ -1,4 +1,4 @@
-import { galleryOutput, outputIdentity } from '../lib/galleryIdentity'
+import { galleryOutput, galleryOutputIsOlder, outputIdentity } from '../lib/galleryIdentity'
 import { create } from 'zustand'
 import type { SavedOmniCharacter, TtsVoice } from '../types'
 import { applyTtsVoices, ttsAudioModeForCount, ttsCharacterEnhancePrompt, ttsSpeakingVoiceCount, ttsVoiceLimit, ttsVoicePaths } from '../lib/ttsVoices'
@@ -1961,7 +1961,7 @@ interface AppState {
   loadOutputMetadata: (name: string, workspace?: string) => Promise<void>
   loadSettingsFromOutput: () => Promise<void>
   rerollGeneration: () => Promise<void>
-  deleteSelectedOutput: (target?: OutputFile) => Promise<void>
+  deleteSelectedOutput: (target?: OutputFile) => Promise<{ ok: boolean; error?: string }>
   // The take a Director shot is using, waiting for the user's own answer.
   blockedDelete: { output: OutputFile; message: string } | null
   confirmBlockedDelete: () => Promise<void>
@@ -2593,7 +2593,7 @@ const BLANK_VIDEO_INPUT_PARAMS: Partial<GenerateParams> = {
   input_video_strength: undefined,
 }
 
-const resolutionMap: Record<ResolutionPreset, Record<AspectRatio, string>> = {
+const resolutionMap: Partial<Record<ResolutionPreset, Record<AspectRatio, string>>> = {
   'auto': {
     'auto': 'auto',
     '21:9': 'auto',
@@ -2692,6 +2692,8 @@ function findResolutionSelection(
 let _galleryRevision = 0
 let _galleryMetadataRevision = 0
 let _galleryMorePending = false
+let _galleryRefreshRequest = 0
+let _galleryRefreshApplied = 0
 
 function galleryQuery(state: AppState) {
   return {
@@ -7518,6 +7520,9 @@ export const useStore = create<AppState>((set, get) => ({
           ? state.imageWorkflowMaskPath
           : undefined
         params.video_prompt_type = state.modelOptions?.inpaint_video_prompt_type || 'VAG'
+        if (state.modelOptions?.image_ref_inpaint && state.imageRefs.length > 0) {
+          params.video_prompt_type += 'I'
+        }
         params.video_guide_outpainting = workflow === 'outpaint'
           ? [
               state.imageOutpaintPadding.top,
@@ -7526,16 +7531,17 @@ export const useStore = create<AppState>((set, get) => ({
               state.imageOutpaintPadding.right,
             ].join(' ')
           : ''
-        delete params.image_refs
+        if (!state.modelOptions?.image_ref_inpaint) delete params.image_refs
         params.remove_background_images_ref = 0
       } else {
-        delete params.image_guide
+        if (!String(params.video_prompt_type || '').includes('V')) delete params.image_guide
         delete params.image_mask
         delete params.video_guide_outpainting
         if (workflow === 'generate' && state.imageRefs.length === 0) {
           delete params.image_refs
           params.remove_background_images_ref = 0
-          params.video_prompt_type = ''
+          // Control-image transfer can be used without reference images.
+          params.video_prompt_type = String(params.video_prompt_type || '').replace(/[KI]/g, '')
         }
       }
     }
@@ -7824,7 +7830,7 @@ export const useStore = create<AppState>((set, get) => ({
     ) && (
       state.generationMode !== 'image'
       || state.studioImageWorkflow === 'generate'
-      || !!state.modelOptions?.image_ref_choices
+      || !!state.modelOptions?.image_ref_inpaint
     )
     const imageReferenceChoices = state.modelOptions?.image_ref_choices?.choices ?? []
     const effectiveImageRefType = state.imageRefType || (
@@ -8897,6 +8903,10 @@ export const useStore = create<AppState>((set, get) => ({
       let nextResolutionPreset = activeState.resolutionPreset
       let nextAspectRatio = activeState.aspectRatio
       const modelPresetOrder = options.resolution_preset_order || []
+      if (nextResolutionPreset === '2k' && !modelPresetOrder.includes('2k')) {
+        nextResolutionPreset = '720p'
+        paramUpdates.resolution = resolveResolution(options, nextResolutionPreset, nextAspectRatio)
+      }
       if (modelPresetOrder.length > 0) {
         if (!modelPresetOrder.includes(nextResolutionPreset)) {
           // A model-specific list can contain an expensive experimental tier
@@ -9459,7 +9469,11 @@ export const useStore = create<AppState>((set, get) => ({
           referenceContext = state.studioImageWorkflow === 'inpaint'
             ? 'Picture 1 is the source image. Preserve everything outside the supplied edit mask; describe the finished image, not mask instructions.'
             : 'Picture 1 is the protected source image. Extend its scene naturally beyond the existing canvas; describe the complete finished image.'
-        } else if (state.studioImageWorkflow === 'generate') {
+        } else if (state.studioImageWorkflow === 'generate' && params.image_guide && String(params.video_prompt_type || '').includes('V')) {
+          imagePaths.push(String(params.image_guide))
+          referenceContext = 'Picture 1 is the source/control image. Preserve the requested structure and change only what the user asks to edit.'
+        }
+        if (state.studioImageWorkflow === 'generate' || state.modelOptions?.image_ref_inpaint) {
           for (const ref of imageRefs) {
             try {
               const uploaded = await api.uploadImage(ref)
@@ -11597,24 +11611,42 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   refreshOutputs: async () => {
+    const request = ++_galleryRefreshRequest
     const revision = _galleryRevision
     const options = galleryQuery(get())
     try {
       const result = await api.fetchOutputs(100, 0, options)
       if (revision !== _galleryRevision || JSON.stringify(options) !== JSON.stringify(galleryQuery(get()))) return
+      if (request < _galleryRefreshApplied) return
+      _galleryRefreshApplied = request
       const fresh = result.outputs.map(galleryOutput)
-      const current = get().outputs
-      const selected = get().filteredOutputs()[get().selectedOutput]
-      const refreshed = new Map(fresh.map(output => [outputIdentity(output), output]))
-      const oldIds = new Set(current.map(outputIdentity))
-      const newItems = fresh.filter(output => !oldIds.has(outputIdentity(output)))
-      const merged = [...newItems, ...current.map(output => refreshed.get(outputIdentity(output)) || output)]
-      if (selected) {
-        const selectedIndex = merged.findIndex(output => outputIdentity(output) === outputIdentity(selected))
-        set({ selectedOutput: Math.max(0, selectedIndex) })
-      }
-      set({ outputs: merged, outputsTotal: result.total,
-            ...(current.length === 0 ? { outputsCursor: result.next_cursor || null } : {}) })
+      const state = get()
+      const current = state.outputs
+      const selected = state.filteredOutputs()[state.selectedOutput]
+      // The API page is the authoritative head; an item missing from current
+      // may be an older record just surfaced by a running-job refresh.
+      const freshIds = new Set(fresh.map(outputIdentity))
+      const boundary = fresh[fresh.length - 1]
+      const retainedTail = result.next_cursor && boundary
+        ? current.filter(output => !freshIds.has(outputIdentity(output)) && galleryOutputIsOlder(output, boundary))
+        : []
+      const merged = [...fresh, ...retainedTail]
+      const filteredMerged = computeFilteredOutputs(merged, state.mediaFilter)
+      const selectedIndex = selected
+        ? filteredMerged.findIndex(output => outputIdentity(output) === outputIdentity(selected))
+        : -1
+      const selectedRemoved = selectedIndex < 0
+      const nextCursor = retainedTail.length > 0
+        ? state.outputsCursor
+        : result.next_cursor || null
+      if (selectedRemoved) ++_galleryMetadataRevision
+      set({
+        outputs: merged,
+        outputsTotal: result.total,
+        outputsCursor: nextCursor,
+        selectedOutput: selectedRemoved ? 0 : selectedIndex,
+        ...(selectedRemoved ? { selectedOutputMeta: null, metadataLoading: false } : {}),
+      })
     } catch {
       // A transient disconnect must not clear the current library.
     }
@@ -13253,7 +13285,7 @@ export const useStore = create<AppState>((set, get) => ({
     const outputs = get().filteredOutputs()
     const idx = get().selectedOutput
     const output = target || outputs[idx]
-    if (!output) return
+    if (!output) return { ok: false, error: 'No media is selected.' }
 
     try {
       await api.deleteOutput(output.name, output.workspace)
@@ -13261,7 +13293,7 @@ export const useStore = create<AppState>((set, get) => ({
       const message = e instanceof Error ? e.message : String(e)
       if (!/is using for shot/.test(message)) {
         console.error('Failed to delete output:', e)
-        return
+        return { ok: false, error: message }
       }
       // The server refuses to remove the take a Director shot is using, and the
       // question belongs to the app. A native confirm() can answer itself -- a
@@ -13269,11 +13301,12 @@ export const useStore = create<AppState>((set, get) => ({
       // cancel still deleted the take with force and left the shot pointing at a
       // file that no longer existed. That is the exact failure this guard exists
       // to prevent, so the file is left alone until the user answers here.
-      if (get().blockedDelete) return
+      if (get().blockedDelete) return { ok: false, error: message }
       set({ blockedDelete: { output, message } })
-      return
+      return { ok: false, error: message }
     }
     get()._forgetDeletedOutput(output)
+    return { ok: true }
   },
 
   cancelBlockedDelete: () => {

@@ -780,16 +780,26 @@ export async function fetchOutputMetadata(name: string, workspace?: string): Pro
 }
 
 export async function deleteOutput(name: string, workspace?: string, force = false): Promise<void> {
+  // Uploads and outputs are removed by different endpoints: 2.4.1 added the upload
+  // one. The force flag and the server's own reason are what the blocked-take
+  // question needs (a take a Director shot is using is refused), so both live here.
+  const isUpload = workspace === '__uploads__'
   const params = new URLSearchParams()
-  if (workspace) params.set('workspace', workspace)
   if (force) params.set('force', 'true')
-  const query = params.toString() ? `?${params}` : ''
-  const res = await fetch(`${BASE}/api/v1/outputs/${encodeURIComponent(name)}${query}`, { method: 'DELETE' })
+  const target = isUpload
+    ? `${BASE}/api/v1/uploads/${encodeURIComponent(name)}`
+    : `${BASE}/api/v1/outputs/${encodeURIComponent(name)}${workspaceQuery(workspace)}`
+  const query = params.toString()
+  const endpoint = query ? `${target}${target.includes('?') ? '&' : '?'}${query}` : target
+  const res = await fetch(endpoint, { method: 'DELETE' })
   if (!res.ok) {
-    // The server refuses when this file is the take a Director shot is using,
-    // and says which shot. Surface that instead of a generic failure.
-    const err = await res.json().catch(() => ({ detail: 'Failed to delete output' }))
-    throw new Error(err.detail || err.error || 'Failed to delete output')
+    // The server refuses when this file is the take a Director shot is using, and
+    // says which shot. Surface that instead of a generic failure.
+    const error = await res.json().catch(() => null) as { detail?: unknown; error?: unknown } | null
+    const detail = typeof error?.detail === 'string'
+      ? error.detail
+      : typeof error?.error === 'string' ? error.error : null
+    throw new Error(detail || `Failed to delete ${isUpload ? 'upload' : 'output'}`)
   }
 }
 
