@@ -19,25 +19,32 @@ def _read(*parts: str) -> str:
 class GalleryClipRegenerateTests(unittest.TestCase):
     def test_a_director_clip_regenerates_through_its_pipeline(self):
         feed_item = _read("ui", "src", "components", "MainContent", "MediaFeedItem.tsx")
+        reroll = _read("ui", "src", "lib", "directorReroll.ts")
 
-        self.assertIn("const directorPid = meta?.director_pipeline_id", feed_item)
-        self.assertIn("const directorClipIndex = meta?.director_clip_index", feed_item)
+        # The card hands the decision to our own hook...
+        self.assertIn("useDirectorAwareReroll({", feed_item)
+        # ...and the decision itself lives in our module.
+        self.assertIn("const directorPid = meta?.director_pipeline_id", reroll)
+        self.assertIn("const directorClipIndex = meta?.director_clip_index", reroll)
         self.assertIn(
-            "await rerunClipVideo(directorPid, directorClipIndex)", feed_item,
+            "await rerunClipVideo(directorPid, directorClipIndex)", reroll,
         )
         # The Studio reroll is only the fallback for a plain Studio output.
-        self.assertIn("} else {\n        await rerollGeneration()", feed_item)
+        self.assertIn("} else {\n        await rerollGeneration()", reroll)
 
     def test_the_action_shows_progress_and_a_failure_on_the_card(self):
         feed_item = _read("ui", "src", "components", "MainContent", "MediaFeedItem.tsx")
+        badges = _read("ui", "src", "components", "MainContent", "DirectorTakeBadges.tsx")
+        reroll = _read("ui", "src", "lib", "directorReroll.ts")
 
-        self.assertIn("const [rerolling, setRerolling] = useState(false)", feed_item)
-        self.assertIn("const [rerollError, setRerollError] = useState<string | null>(null)", feed_item)
-        self.assertIn("{rerolling && (", feed_item)
-        self.assertIn("{rerollError && (", feed_item)
+        self.assertIn("const [rerolling, setRerolling] = useState(false)", reroll)
+        self.assertIn("const [rerollError, setRerollError] = useState<string | null>(null)", reroll)
+        self.assertIn("<RerollStatus rerolling={rerolling} error={rerollError} />", feed_item)
+        self.assertIn("{rerolling && (", badges)
+        self.assertIn("{error && (", badges)
         # The menu closes on click, so the message has to be visible on the card.
-        self.assertIn("title={rerollError}", feed_item)
-        self.assertIn("{rerollError}", feed_item)
+        self.assertIn("title={error}", badges)
+        self.assertIn("{error}", badges)
         self.assertIn(
             "rerolling ? 'Regenerating\\u2026' : 'Regenerate with same settings'",
             feed_item,

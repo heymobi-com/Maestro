@@ -12,7 +12,9 @@ import { modelDisplayName } from '../../lib/modelDisplay'
 import { sendToGalleryInput, useGalleryInputs, type GalleryInputTarget } from '../../lib/galleryInputs'
 import { getVideoPosterUrl } from '../../lib/thumbnailCache'
 import { getMediaTimestamp } from '../../lib/mediaTimestamp'
+import { useDirectorAwareReroll } from '../../lib/directorReroll'
 import { MediaMetadataDetails } from './MediaMetadataDetails'
+import { DirectorTakeBadges, RerollStatus } from './DirectorTakeBadges'
 
 interface Props {
   file: OutputFile
@@ -121,8 +123,6 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const [copied, setCopied] = useState(false)
   const [copiedOriginalPrompt, setCopiedOriginalPrompt] = useState(false)
   const [rejoining, setRejoining] = useState(false)
-  const [rerolling, setRerolling] = useState(false)
-  const [rerollError, setRerollError] = useState<string | null>(null)
   const [sentToInput, setSentToInput] = useState('')
   const sentToInputTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const [sendingToInput, setSendingToInput] = useState('')
@@ -394,30 +394,11 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     setTimeout(() => loadSettingsFromOutput(), 50)
   }, [index, setSelectedOutput, loadSettingsFromOutput])
 
-  const handleReroll = useCallback(async () => {
-    setSelectedOutput(index)
-    setRerollError(null)
-    // A Director clip belongs to a pipeline, so regenerate it through the
-    // pipeline's per-clip rerun and it is replaced in its own position. The
-    // Studio reroll only restores Studio settings: for a Director output it
-    // loaded the Director project and then fired a Studio generation with
-    // whatever params the sidebar happened to hold, which is why the action
-    // looked like it did nothing.
-    const directorPid = meta?.director_pipeline_id
-    const directorClipIndex = meta?.director_clip_index
-    setRerolling(true)
-    try {
-      if (directorPid && typeof directorClipIndex === 'number') {
-        await rerunClipVideo(directorPid, directorClipIndex)
-      } else {
-        await rerollGeneration()
-      }
-    } catch (e) {
-      setRerollError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setRerolling(false)
-    }
-  }, [index, meta, setSelectedOutput, rerunClipVideo, rerollGeneration])
+  // Ours: the Director-aware decision and its progress state live in
+  // lib/directorReroll.ts.
+  const { rerolling, rerollError, handleReroll } = useDirectorAwareReroll({
+    meta, index, setSelectedOutput, rerunClipVideo, rerollGeneration,
+  })
 
   const copyPromptText = (
     text: string,
@@ -810,16 +791,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
                 {clipIndex != null && clipTotal != null && (
                   <span className="text-accent-blue"> &middot; clip {clipIndex + 1}/{clipTotal}</span>
                 )}
-                {typeof meta?.director_clip_index === 'number' && (
-                  <span className="text-text-muted"> &middot; shot {meta.director_clip_index + 1}</span>
-                )}
-                {/* A regenerated take sits directly above the one it replaces, so
-                    say which is which: both carry the same shot number. */}
-                {meta?.director_supersedes && (
-                  <span className="text-accent-blue" title={`Replaces ${meta.director_supersedes}`}>
-                    {' '}&middot; new take
-                  </span>
-                )}
+                <DirectorTakeBadges meta={meta} />
               </div>
               {cardPrompt && (
                 <div className="text-[11px] text-text-muted truncate mt-0.5" title={cardPrompt}>
@@ -855,20 +827,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
         {/* Regeneration feedback. The action menu closes on click, so progress
             and failures have to live on the card, or the action looks like it
             did nothing at all. */}
-        {rerolling && (
-          <span className="flex shrink-0 items-center gap-1 rounded bg-accent-blue/15 px-1.5 py-0.5 text-[10px] text-accent-blue">
-            <Loader2 size={10} className="animate-spin" />
-            Regenerating
-          </span>
-        )}
-        {rerollError && (
-          <span
-            className="max-w-[220px] shrink-0 truncate rounded bg-red-500/15 px-1.5 py-0.5 text-[10px] text-chip-red"
-            title={rerollError}
-          >
-            {rerollError}
-          </span>
-        )}
+        <RerollStatus rerolling={rerolling} error={rerollError} />
 
         {/* Four persistent controls; secondary actions are labeled in More. */}
         <div ref={actionMenuRef} className="relative flex shrink-0 items-center gap-0.5" onClick={e => e.stopPropagation()}>
