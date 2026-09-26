@@ -9431,7 +9431,16 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                 "MiniMax H3 Omni Director needs a valid generated composition "
                 "image for every shot. Repair the missing start images first."
             )
-        if pipeline_type != "short_film_story" and not has_exact_target_audio:
+        # A written script has no uploaded audio by design: H3 generates the voices
+        # for the authored lines, which is the same reason short_film_story is
+        # exempt here. Without this the render died before it started, asking for a
+        # soundtrack the user never had -- measured on viral-2, whose 20 script rows
+        # reached the pipeline as a transcript and no audio_path.
+        needs_uploaded_audio = (
+            pipeline_type != "short_film_story"
+            and not params.get("_director_script_source")
+        )
+        if needs_uploaded_audio and not has_exact_target_audio:
             raise RuntimeError(
                 "MiniMax H3 Omni Director needs the uploaded soundtrack or "
                 "dialogue audio for this workflow."

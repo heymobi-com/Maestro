@@ -126,6 +126,26 @@ class RequestRoutingTests(unittest.TestCase):
         self.assertIn("audio_path: undefined,", slice_source)
         self.assertIn("planned_clips: state.directorScriptClips,", slice_source)
 
+    def test_the_render_is_told_that_the_dialogue_was_written(self):
+        """A script project has no soundtrack, and the H3 Omni path refuses one.
+
+        Measured on viral-2: the authored rows reached the pipeline as a transcript
+        with no audio_path, and the render died before it started asking for "the
+        uploaded soundtrack or dialogue audio". The exemption already existed for
+        short_film_story, so a written dialogue travels with an explicit marker.
+        """
+        slice_source = _read(SLICE)
+        store = _read(STORE)
+        pipeline = _read(PIPELINE)
+
+        # The UI marks the request...
+        self.assertIn("_director_script_source: true,", slice_source)
+        self.assertIn("const scriptFields = directorScriptPipelineFields(", store)
+        # ...and the pipeline honours exactly that marker.
+        self.assertIn('params.get("_director_script_source")', pipeline)
+        self.assertIn('needs_uploaded_audio = (', pipeline)
+        self.assertIn('pipeline_type != "short_film_story"', pipeline)
+
     def test_the_pipeline_never_hands_the_planner_a_string_transcript(self):
         pipeline = _read(PIPELINE)
         # Iterating a string transcript yields single characters, and the planner

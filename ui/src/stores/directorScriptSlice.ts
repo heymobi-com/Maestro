@@ -93,14 +93,19 @@ export function directorScriptPipelineFields(
   audio_path: string | null | undefined
   planned_clips: PlannedClip[]
   lyrics: LyricSegment[] | ScriptTranscriptRow[] | '' | undefined
+  _director_script_source?: boolean
 } {
   if (!directorScriptIsActive(state)) {
     return { audio_path: soundtrack, planned_clips: analysedClips, lyrics: analysedLyrics || '' }
   }
-  // A written script has no soundtrack: H3 generates the voices for its lines.
+  // A written script has no soundtrack: H3 generates the voices for its lines, so
+  // the render must not ask for an uploaded track. The marker says so explicitly
+  // instead of leaving the backend to infer it from a missing audio_path, which is
+  // also what a half-finished upload looks like.
   return {
     audio_path: undefined,
     planned_clips: state.directorScriptClips,
     lyrics: state.directorScriptTranscript,
+    _director_script_source: true,
   }
 }
