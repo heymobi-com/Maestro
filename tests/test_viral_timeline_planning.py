@@ -202,5 +202,44 @@ class SoundtrackTests(unittest.TestCase):
             self.assertEqual(shot.audio_plan.mode, "ambient_only")
 
 
+class ShotDurationTests(unittest.TestCase):
+    """The timeline is the authority on length too, not the model's duration_sec.
+
+    Measured on a real script project: the renderer built each clip from its planned
+    window (8.71s), the planner kept the model's 4.0s, and the compiled prompt told
+    the voice to fit two lines into 4.00 seconds -- 4.25 words per second instead of
+    the intended 2.8, which is what made the speech sound rushed and left the rest of
+    the shot silent.
+    """
+
+    def test_a_model_duration_cannot_shorten_a_planned_window(self):
+        class ShortDurations(_Recorder):
+            def __call__(self, **kwargs):
+                rows = json.loads(super().__call__(**kwargs))
+                for row in rows:
+                    row["duration_sec"] = 4
+                return json.dumps(rows)
+
+        plan = _plan(ShortDurations(), clips=_timeline(4, seconds_each=8.7083))
+        for shot in plan.shots:
+            self.assertAlmostEqual(shot.duration_sec, 8.7083, places=3)
+
+    def test_without_a_timeline_the_model_still_chooses_the_length(self):
+        plan = _plan(_Recorder(), clips=None)
+        self.assertEqual([shot.duration_sec for shot in plan.shots], [8] * 6)
+
+    def test_a_timeline_without_timings_falls_back_to_the_model(self):
+        plan = _plan(_Recorder(), clips=[{"label": "verse"} for _ in range(3)])
+        self.assertEqual([shot.duration_sec for shot in plan.shots], [8, 8, 8])
+
+    def test_the_measured_case_restores_the_intended_speech_pace(self):
+        from services.dialogue_timing import h3_dialogue_schedule
+
+        rushed = h3_dialogue_schedule(17, 4.0)
+        paced = h3_dialogue_schedule(17, 8.7083)
+        self.assertGreater(17 / (rushed[2] - rushed[1]), 4.0)
+        self.assertLessEqual(17 / (paced[2] - paced[1]), 2.9)
+
+
 if __name__ == "__main__":
     unittest.main()

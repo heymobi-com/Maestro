@@ -2828,8 +2828,8 @@ def _source_prompt_parts(
         # film's closing fade -- inside every clip: the reported "sudden camera
         # changes of seconds and constant fade-outs".
         body = (
-            f"{scope}Project context (the whole film; do not perform its "
-            f"progression or its closing fade inside this shot): {context}. {body}"
+            f"{scope}Project context (the whole film; reference only, never spoken aloud "
+            f"and not part of the dialogue; do not perform its progression or its closing fade inside this shot): {context}. {body}"
         ).strip()
     elif scope:
         body = f"{scope}{body}".strip()

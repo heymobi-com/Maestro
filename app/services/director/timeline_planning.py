@@ -88,6 +88,33 @@ def batch_note(
     )
 
 
+def shot_duration(
+    clips: Sequence[Mapping[str, Any]],
+    index: int,
+    raw: Mapping[str, Any],
+) -> float:
+    """A shot's duration, taking the timeline's window over the model's opinion.
+
+    The timeline was already the authority on how many shots there are, but the
+    duration still came from the model's ``duration_sec``. The renderer builds each
+    clip's frame count from the planned window, so the two disagreed and the compiled
+    prompt told the voice a shorter window than the clip: measured on a real script
+    project, two lines were told to run "from about 0.00 to 4.00 seconds" inside an
+    8.71-second clip, which is what made the speech sound rushed and left the rest of
+    the shot silent.
+    """
+
+    if 0 <= index < len(clips):
+        clip = clips[index]
+        seconds = float(clip.get("end", 0) or 0) - float(clip.get("start", 0) or 0)
+        if seconds > 0:
+            return seconds
+    try:
+        return float(raw.get("duration_sec", raw.get("duration", 5)) or 5)
+    except (TypeError, ValueError):
+        return 5.0
+
+
 def fallback_shot(index: int, clip: Mapping[str, Any]) -> dict:
     """A batch that did not come back still yields one shot per clip, said out loud."""
 

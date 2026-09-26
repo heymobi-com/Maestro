@@ -20,6 +20,7 @@ from ..timeline_planning import (
     batch_note,
     batch_seconds,
     fallback_shot,
+    shot_duration,
     soundtrack_note,
     timeline_overview,
 )
@@ -186,12 +187,10 @@ Create {count} short, punchy shots. Hook first! Go:"""
         # The authored rows are placed on the timeline before the model is asked
         # anything: the words are the script's own, not the model's retelling of them.
         authored_beats = assign_rows_to_clips(timeline, kwargs.get("transcript"))
-        authored_total = sum(len(beats) for beats in authored_beats)
-        if authored_total:
+        if any(authored_beats):
             print(
-                f"[ViralVideoPlanner] Placed {authored_total} authored line(s) on "
-                f"{sum(1 for beats in authored_beats if beats)} of "
-                f"{len(authored_beats)} shot(s)."
+                f"[ViralVideoPlanner] Placed {sum(len(b) for b in authored_beats)} authored line(s) "
+                f"on {sum(1 for b in authored_beats if b)} of {len(authored_beats)} shot(s)."
             )
 
         batch_size = self.long_form_batch_size()
@@ -228,7 +227,7 @@ Create {count} short, punchy shots. Hook first! Go:"""
 
         shots = []
         for i, raw in enumerate(shot_dicts):
-            duration = raw.get("duration_sec", raw.get("duration", 5))
+            duration = shot_duration(timeline, i, raw)
 
             subjects = [SubjectRef.from_dict(s) if isinstance(s, dict) else SubjectRef(visual_description=str(s))
                         for s in raw.get("subjects_on_screen", [])]
