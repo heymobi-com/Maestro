@@ -158,6 +158,29 @@ def window_for(span: tuple[float, float], spans: Sequence[tuple[float, float]]) 
     )
 
 
+def speaker_labels(rows: Optional[Sequence[Any]]) -> dict[str, str]:
+    """The stable label each authored speaker gets, in first-speaking order.
+
+    A beat that names its speaker by name alone is a *new* key to the speaker
+    registry, which numbers keys in first-speaking order and never merges a name
+    with the label the reference pictures already use. Measured on a real script
+    project, that compiled a two-person cast into four subjects -- ``Valeria (S5)``
+    and ``Ricardo (S6)`` beside ``S1``/``S2`` from the pictures -- while the spoken
+    lines were attributed to ``(S1)``/``(S2)``. The prompt contradicted itself about
+    who was even in the shot.
+
+    The labels are the ones the whole app uses: first speaker is (S1), exactly as the
+    audio analysis and the UI's own speaker-id module number a cast.
+    """
+
+    labels: dict[str, str] = {}
+    for row in _usable_rows(rows):
+        name = speaker_name(row)
+        if name and name not in labels:
+            labels[name] = f"(S{len(labels) + 1})"
+    return labels
+
+
 def assign_rows_to_clips(
     clips: Sequence[Mapping[str, Any]],
     rows: Optional[Sequence[Any]],
@@ -169,9 +192,19 @@ def assign_rows_to_clips(
     if not spans or not timeline_has_timing(spans):
         return buckets
 
+    labels = speaker_labels(rows)
     for row in _usable_rows(rows):
         index = window_for(row_span(row), spans)
-        buckets[index].append(beat_from_row(row))
+        beat = beat_from_row(row)
+        speaker = speaker_name(row)
+        # A name is not an identity to the registry, so it travels with the label and
+        # the name is kept for the prompt to state beside it. A machine id is left
+        # exactly as the analysis wrote it; binding canonicalizes those against the
+        # audio, which knows better than this module does.
+        if speaker and not _MACHINE_SPEAKER_RE.match(speaker):
+            beat["speaker_id"] = labels.get(speaker, speaker)
+            beat["speaker_name"] = speaker
+        buckets[index].append(beat)
     return buckets
 
 
@@ -204,7 +237,7 @@ def shot_speakers_note(
     for index in range(start, min(end, len(authored))):
         names: list[str] = []
         for beat in authored[index]:
-            name = str(beat.get("speaker_id") or "").strip()
+            name = str(beat.get("speaker_name") or beat.get("speaker_id") or "").strip()
             if name and not _MACHINE_SPEAKER_RE.match(name) and name not in names:
                 names.append(name)
         if names:

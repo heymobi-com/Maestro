@@ -248,7 +248,29 @@ class PlannerCarriesTheAuthoredLinesTests(unittest.TestCase):
         plan = self._plan(_QuietModel())
         beats = [beat for shot in plan.shots for beat in (shot.dialogue_beats or [])]
         self.assertTrue(all(beat.speaker_id for beat in beats))
-        self.assertEqual({beat.speaker_id for beat in beats}, {"Valeria", "Ricardo"})
+        # The project's own labels, first-speaking order -- not the names, which the
+        # registry reads as brand-new keys and numbers separately from the reference
+        # pictures. That is what compiled two people into four subjects.
+        self.assertEqual({beat.speaker_id for beat in beats}, {"(S1)", "(S2)"})
+
+    def test_a_name_becomes_the_projects_own_label(self):
+        authored = assign_rows_to_clips(_clips(), _rows())
+        beats = [beat for beats in authored for beat in beats]
+        self.assertEqual(beats[0]["speaker_id"], "(S1)")
+        self.assertEqual(beats[0]["speaker_name"], "Valeria")
+        self.assertEqual(beats[1]["speaker_id"], "(S2)")
+        self.assertEqual(beats[1]["speaker_name"], "Ricardo")
+        # Valeria speaks again later and keeps her label instead of taking a new one.
+        self.assertEqual({beat["speaker_id"] for beat in beats}, {"(S1)", "(S2)"})
+
+    def test_a_machine_id_is_left_for_the_audio_binding(self):
+        # An analysed project's rows carry raw ids; binding canonicalizes those
+        # against the audio, which knows better than this module does.
+        clips = [{"start": 0.0, "end": 5.0}]
+        rows = [{"start": 0.0, "end": 2.0, "speaker": "SPEAKER_00", "text": "hola"}]
+        authored = assign_rows_to_clips(clips, rows)
+        self.assertEqual(authored[0][0]["speaker_id"], "SPEAKER_00")
+        self.assertNotIn("speaker_name", authored[0][0])
 
     def test_the_words_are_the_script_s_own(self):
         # The model contributed no dialogue at all, so every line in the plan came
