@@ -208,15 +208,73 @@ def assign_rows_to_clips(
     return buckets
 
 
+def _borrowable_delivery(value: Any) -> str:
+    """A line direction worth borrowing, or ``""``.
+
+    The planner's own fields are untrusted at this boundary, and one real batch leaked
+    its reasoning into them ("Wait, there should be 12 total entries in the JSON
+    array."). A direction that reads as reasoning is dropped rather than spoken as a
+    tone.
+    """
+
+    delivery = str(value or "").strip()
+    if not delivery:
+        return ""
+    from .h3_dialogue import looks_like_planner_reasoning
+    return "" if looks_like_planner_reasoning(delivery) else delivery
+
+
+# H3 has no channel for emotion beside the ``<d>`` tag: the dialect guide requires
+# "speaker identity, voice, action, and delivery outside the tag". A pause is line
+# direction too, so it is stated in the same place and in the same breath.
+_PAUSE_CUE = "spoken after a natural pause"
+
+
+def _directed(beat: dict, model_beat: Any, *, first: bool) -> dict:
+    """One authored beat, with the direction the script did not write.
+
+    The words stay the script's -- the planner's own words are discarded, which is the
+    whole point of placing the rows. Only its line direction is borrowed, and only
+    where the script states none.
+    """
+
+    delivery = str(beat.get("delivery") or "").strip()
+    if not delivery and isinstance(model_beat, Mapping):
+        delivery = _borrowable_delivery(model_beat.get("delivery"))
+    if not first:
+        delivery = f"{_PAUSE_CUE}, {delivery}" if delivery else _PAUSE_CUE
+    if delivery == str(beat.get("delivery") or "").strip():
+        return beat
+    directed = dict(beat)
+    directed["delivery"] = delivery
+    return directed
+
+
 def beats_for_shot(
     authored: Sequence[Sequence[dict]],
     index: int,
     raw: Mapping[str, Any],
 ) -> list[dict]:
-    """The authored rows for this shot, or the planner's own beats when it has none."""
+    """The authored rows for this shot, or the planner's own beats when it has none.
+
+    A row the script wrote carries its words and, when the script declares one, its
+    tone. A row it did not write a tone for is answered by the planner's beat for the
+    same line, so a line is delivered rather than read out flat.
+    """
 
     if index < len(authored) and authored[index]:
-        return list(authored[index])
+        planned = [
+            beat for beat in ((raw or {}).get("dialogue_beats") or [])
+            if isinstance(beat, Mapping)
+        ]
+        return [
+            _directed(
+                beat,
+                planned[position] if position < len(planned) else None,
+                first=position == 0,
+            )
+            for position, beat in enumerate(authored[index])
+        ]
     fallback = (raw or {}).get("dialogue_beats") or []
     return [beat for beat in fallback if isinstance(beat, Mapping)]
 

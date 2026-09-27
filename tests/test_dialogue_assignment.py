@@ -178,6 +178,63 @@ class RowPlacementTests(unittest.TestCase):
         self.assertEqual(beats_for_shot(authored, 9, own)[0]["spoken_text"], "the model's line")
 
 
+class LineDirectionTests(unittest.TestCase):
+    """The script supplies the words; the direction is filled in beside them.
+
+    H3 has no channel for emotion beside the ``<d>`` tag -- the dialect guide requires
+    "speaker identity, voice, action, and delivery outside the tag" -- so a line with
+    no direction is read out flat, which is what a real render sounded like.
+    """
+
+    def test_the_planner_supplies_the_tone_the_script_does_not_write(self):
+        authored = assign_rows_to_clips(_clips(), _rows())
+        raw = {"dialogue_beats": [
+            {"spoken_text": "invented one", "delivery": "shocked"},
+            {"spoken_text": "invented two", "delivery": "pensativa"},
+        ]}
+        beats = beats_for_shot(authored, 0, raw)
+
+        # The words stay the script's; only the direction is borrowed.
+        self.assertIn("Line 1 spoken by hand", beats[0]["spoken_text"])
+        self.assertNotIn("invented", beats[0]["spoken_text"])
+        self.assertTrue(beats[0]["delivery"].endswith("shocked"))
+        self.assertTrue(beats[1]["delivery"].endswith("pensativa"))
+
+    def test_an_authored_tone_is_never_overwritten(self):
+        rows = _rows()
+        rows[0]["delivery"] = "contenida"
+        authored = assign_rows_to_clips(_clips(), rows)
+
+        beats = beats_for_shot(
+            authored, 0, {"dialogue_beats": [{"delivery": "shocked"}]},
+        )
+        self.assertEqual(beats[0]["delivery"], "contenida")
+
+    def test_a_later_line_is_asked_for_a_pause(self):
+        authored = assign_rows_to_clips(_clips(), _rows())
+
+        beats = beats_for_shot(authored, 0, {})
+        self.assertNotIn("delivery", beats[0])
+        self.assertEqual(beats[1]["delivery"], "spoken after a natural pause")
+
+    def test_a_single_line_shot_asks_for_no_pause(self):
+        clips = [{"start": 0.0, "end": 5.0}]
+        rows = [{"start": 0.0, "end": 2.0, "speaker": "Valeria", "text": "sola"}]
+        authored = assign_rows_to_clips(clips, rows)
+
+        beats = beats_for_shot(authored, 0, {})
+        self.assertNotIn("delivery", beats[0])
+
+    def test_a_leaked_reasoning_field_is_not_borrowed_as_a_tone(self):
+        authored = assign_rows_to_clips(_clips(), _rows())
+        raw = {"dialogue_beats": [
+            {"delivery": "Wait, there should be 12 total entries in the JSON array."},
+        ]}
+
+        beats = beats_for_shot(authored, 0, raw)
+        self.assertNotIn("delivery", beats[0])
+
+
 class SpeakerHintTests(unittest.TestCase):
     def test_the_hint_names_the_people_who_speak_in_each_shot(self):
         authored = assign_rows_to_clips(_clips(), _rows())
