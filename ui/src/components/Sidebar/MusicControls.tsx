@@ -4,6 +4,7 @@ import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 import type { GenerateParams } from '../../types'
 import { Yue2Controls } from './Yue2Controls'
+import { CoverControls } from './CoverControls'
 
 const TEXTAREA_BASE =
   'w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary ' +
@@ -159,6 +160,7 @@ export function MusicControls() {
         </label>
       </div>
 
+      <CoverControls />
       {/* Describe → let the LLM write it (optional — fields below are editable) */}
       <div className="space-y-2">
         <div>

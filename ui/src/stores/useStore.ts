@@ -7,6 +7,7 @@ import { vigglePreparationKey, viggleTimeline } from '../lib/viggle'
 import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, StudioVideoWorkflow, StudioVideoCreateRoute, StudioVideoEffectiveCreateRoute, StudioImageWorkflow, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineClipState, PipelineRepairState, SavedPipelineState, DirectorQueueState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping, H3WindowPlan, MiniMaxH3Reference, AppMode } from '../types'
 import * as api from '../api/client'
 import { clearDirectorPass, directorDeleteDefaults, directorDeleteGuardActions, directorPipelineType, directorPlannerSkill, directorScriptDefaults, directorScriptPlanFields, directorScriptPipelineFields, directorScriptSourcePatch, directorScriptTextPatch, directorScriptTimeline, directorViralPlanOptions, isShotInUseRefusal, normalizeDirectorSpeakerId, speakersFromAnalysis, studioRerollBlockedReason } from './directorSlice'
+import { ensureMusicSong } from './musicSong'
 import { applyThemePrefs, getStoredPrefs, type FamilyId, type ThemeMode, type ThemePrefs } from '../lib/theme'
 import {
   effectiveH3OmniSequenceFrames,
@@ -6246,6 +6247,8 @@ export const useStore = create<AppState>((set, get) => ({
   isGenerating: false,
 
   startGeneration: async (submissionMode = 'now') => {
+    // Lyrics are optional in Music mode; ours, one call: stores/musicSong.ts.
+    if (!(await ensureMusicSong(get, set))) return
     let state = get()
     const primaryStudioCreate = (
       state.generationMode === 'video'
@@ -9970,8 +9973,7 @@ export const useStore = create<AppState>((set, get) => ({
     if (last && last.stage === stage && last.text === t) return {}
     return { directorLlmLog: [...s.directorLlmLog, { stage, text: t }] }
   }),
-  // Ours, one line each: the state and the patches live in
-  // stores/directorScriptSlice.ts.
+  // Ours, one line each: the state and the patches live in stores/directorScriptSlice.ts.
   setDirectorScriptSource: (source) => set(state => directorScriptSourcePatch(state, source)),
   setDirectorScriptText: (text) => set(directorScriptTextPatch(text)),
   setDirectorSkill: (skill) => {
@@ -10623,8 +10625,7 @@ export const useStore = create<AppState>((set, get) => ({
       // (legacy v1 path); only fall back to true when servicesConfig
       // hasn't loaded yet or the field is undefined.
       const useV2 = get().servicesConfig?.use_director_v2 ?? true
-      // Ours: the planner follows the Director skill instead of the field this
-      // action used to hardcode. See stores/directorPlanRouting.ts.
+      // Ours: the planner follows the Director skill, not a hardcoded field. See stores/directorPlanRouting.ts.
       const directorSkill = get().directorSkill
       const skillType = directorPlannerSkill(directorSkill)
       const timelineOptions = await _directorTimelineOptions(get())
@@ -13231,8 +13232,7 @@ export const useStore = create<AppState>((set, get) => ({
     // Await the (now async, self-healing) settings load before generating, so a
     // slow on-demand metadata fetch can't let the reroll fire with stale params.
     await get().loadSettingsFromOutput()
-    // Ours: a sidecar with no params, or a Director clip, cannot be rerolled as a
-    // Studio generation. Say why instead of staying silent.
+    // Ours: a sidecar with no params, or a Director clip, cannot be rerolled as a Studio generation; say why.
     const rerollBlocked = studioRerollBlockedReason(get().selectedOutputMeta)
     if (rerollBlocked) throw new Error(rerollBlocked)
     // Small delay to let state settle, then generate

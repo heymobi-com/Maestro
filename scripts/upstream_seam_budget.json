@@ -30,12 +30,14 @@
     "ui/src/components/SettingsDrawer/ServicesSettingsPanel.tsx": 27,
     "ui/src/components/Sidebar/DirectorChat.tsx": 215,
     "ui/src/components/Sidebar/DirectorPanel.tsx": 0,
+    "ui/src/components/Sidebar/MusicControls.tsx": 2,
     "ui/src/stores/useStore.ts": 79,
     "ui/src/types/index.ts": 17
   },
   "notes": {
     "app/services/director/h3_dialogue.py": "Deferred: upstream churn in this file was 0 for 2.4.1, so it costs nothing today. Extraction is its own project; the budget keeps it from growing meanwhile.",
     "app/services/director_pipeline.py": "Deferred for the same reason: upstream did not touch it in 2.4.1.",
+    "ui/src/components/Sidebar/MusicControls.tsx": "New seam, and as small as a seam gets: the import of CoverControls and the one line that renders it. The panel itself is upstream's; the cover section, its reading call and its rules live in our own module, which owns no source of its own (the recording is audio_guide, the same parameter YuE2's picker writes).",
     "ui/src/components/DirectorDashboard/DirectorDashboard.tsx": "Deferred: upstream did not touch it in 2.4.1.",
     "ui/src/components/Sidebar/DirectorChat.tsx": "Deferred: upstream did not touch it in 2.4.1.",
     "ui/src/stores/useStore.ts": "Priority: upstream edits this file every release (12 hunks in 2.4.1) and it is where the last two merges conflicted.",

@@ -25801,8 +25801,7 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                         "cumulative_offset": True,
                         "audio_start_sec": multi_clip_audio_start_sec,
                         "concat_audio_path": multi_clip_concat_audio,
-                        # The tail task is last in the group, so it is the one
-                        # that would trigger the join.
+                        # The tail task is last in the group, so it is the one that would trigger the join.
                         "defer_concat": multi_clip_defer_concat,
                     }
                     tail_params["multi_prompts_gen_type"] = 0
@@ -26093,12 +26092,10 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 dpid = job["params"].get("_director_pipeline_id")
                 if dpid:
                     sidecar["director_pipeline_id"] = dpid
-                # A single-clip rerun publishes one output and no
-                # clip_output_files map, so it states its own position.
+                # A single-clip rerun publishes one output and no clip_output_files map, so it states its own position.
                 detached_clip_index = job["params"].get("_director_clip_index")
-                # The clip this rerun replaces. The gallery stacks the new take
-                # directly above it so the two can be compared, and the older
-                # one can be deleted once the new take is accepted.
+                # The clip this rerun replaces: the gallery stacks the new take
+                # directly above it for comparison, and the older take can be deleted once the new one is accepted.
                 supersedes = job["params"].get("_director_supersedes")
                 # A resumed Director run submits only the shots that were still
                 # missing, so the batch numbers them from zero again. The film
@@ -29909,6 +29906,9 @@ if os.environ.get("MAESTRO_PROMPT_BENCH") == "1" or os.path.isfile(
         get_model=wgp.get_model_def, enhance=_llm_enhance_prompt_payload,
         prepare=_prepare_generation_submission, app_root=_app_dir,
     )
+
+from services.song_cover import register_routes as _register_song_cover
+_register_song_cover(api, ensure_llm=_ensure_llm_loaded)
 
 _ui_dist = os.path.normpath(os.path.join(_app_dir, "..", "ui", "dist"))
 if os.path.isdir(_ui_dist):

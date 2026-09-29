@@ -24,10 +24,52 @@ from services.director.voice_gender import (  # noqa: E402
 )
 
 _REAL_PLAN = ""
+_REAL_VOCALS = ""
+_REAL_LYRICS: list = []
+
+# The real-project assertions below name (S1) female and (S2) male, because that is
+# the project that motivated this check. So the fixture has to be a project that
+# MEASURES that, not merely one that mentions two speakers in its transcript:
+# measured 2026-09-27 the newest two-voice plan on this machine was a podcast whose
+# vocals are an ACE-Step song stem, and its (S2) measured 146.8 Hz -- inside the
+# 140-175 Hz band estimate_gender_from_pitch refuses to call male -- so all three
+# real-project assertions failed for a reason that had nothing to do with the code
+# under test.
+_MEASURED_LABELS = ("(S1)", "(S2)")
+_MOTIVATING_GENDERS = ("female", "male")
 
 
-def _discover_plan() -> str:
-    """Newest saved pipeline plan that still has its diarized transcript."""
+def _vocals_for(params: dict) -> str:
+    for key in ("audio_vocals_path", "audio_path"):
+        candidate = str(params.get(key) or "")
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
+def _measures(vocals: str, rows: list) -> tuple:
+    """The pair these regressions assert, measured on the rows' own turn boundaries."""
+
+    if not vocals:
+        return ()
+    try:
+        profiles = _voice_profiles(vocals, rows)
+    except Exception:  # noqa: BLE001 - an unreadable stem is simply not the fixture
+        return ()
+    return tuple(
+        estimate_gender_from_pitch((profiles.get(label) or {}).get("median_f0"))
+        for label in _MEASURED_LABELS
+    )
+
+
+def _discover_plan() -> tuple:
+    """Newest saved plan that still carries the two-voice recording these tests measure.
+
+    Two voices in the transcript is not enough. The playlist in app/outputs keeps
+    growing, and a newer single-speaker project used to become the fixture: measured
+    2026-09-25 the newest plan on disk was a one-speaker project and every two-voice
+    assertion failed for a reason that had nothing to do with the code under test.
+    """
 
     base = os.path.abspath(os.path.join(_HERE, "..", "app", "outputs"))
     candidates = sorted(
@@ -42,30 +84,17 @@ def _discover_plan() -> str:
         except (OSError, ValueError):
             continue
         params = data.get("_params_snapshot") or {}
-        speakers = {
-            str(row.get("speaker")) for row in (params.get("lyrics") or [])
+        rows = [
+            row for row in (params.get("lyrics") or [])
             if isinstance(row, dict) and row.get("speaker")
-        }
-        # Two voices, because that is what these regressions measure. The playlist in
-        # app/outputs keeps growing, and a newer single-speaker project used to become
-        # the fixture: measured 2026-09-25 the newest plan on disk was a one-speaker
-        # project and every two-voice assertion failed for a reason that had nothing to
-        # do with the code under test.
-        if params.get("lyrics") and len(speakers) >= 2:
-            return candidate
-    return ""
+        ]
+        if len({str(row["speaker"]) for row in rows}) < 2:
+            continue
+        vocals = _vocals_for(params)
+        if _measures(vocals, rows) == _MOTIVATING_GENDERS:
+            return candidate, vocals, rows
+    return "", "", []
 
-
-_REAL_PLAN = _discover_plan()
-_REAL_VOCALS = ""
-if _REAL_PLAN:
-    with open(_REAL_PLAN, "r", encoding="utf-8") as _handle:
-        _params = json.load(_handle).get("_params_snapshot") or {}
-    for _key in ("audio_vocals_path", "audio_path"):
-        _candidate = str(_params.get(_key) or "")
-        if _candidate and os.path.isfile(_candidate):
-            _REAL_VOCALS = _candidate
-            break
 
 # The measurement has to use the turn boundaries that belong to THIS audio.
 # The fixture used to hard-code podcast-5's timings and apply them to whichever
@@ -73,10 +102,7 @@ if _REAL_PLAN:
 # changed what was measured: on the new project's own boundaries its voices
 # measure 187.8 Hz (female) and 115.8 Hz (male), but sampling that same file at
 # podcast-5's timings reported both as female (~191/~195 Hz).
-_REAL_LYRICS = [
-    row for row in (_params.get("lyrics") or [])
-    if isinstance(row, dict) and row.get("speaker")
-] if _REAL_PLAN else []
+_REAL_PLAN, _REAL_VOCALS, _REAL_LYRICS = _discover_plan()
 
 
 class TestEstimateGenderFromPitch(unittest.TestCase):
