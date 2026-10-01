@@ -442,19 +442,32 @@ class CorrectionConversationWiringTests(unittest.TestCase):
         self.assertIn('"revision_llm_model_id"', block)
 
     def test_the_setting_is_visible_where_the_other_llms_are_chosen(self):
+        # The correction settings moved into their own component, so the assertion
+        # follows the string to the module that owns it -- and keeps checking the
+        # panel mounts it above the Experimental toggle, because that is the part
+        # that decides whether a director can reach it at all.
         panel_path = os.path.join(
             _ROOT, "ui", "src", "components", "SettingsDrawer", "ServicesSettingsPanel.tsx",
         )
         with open(panel_path, encoding="utf-8") as handle:
             panel = handle.read()
-        self.assertIn("revision_llm_model_id", panel)
-        # Behind the Experimental toggle the option might as well not exist.
+        self.assertIn("<CorrectionLlmSettings", panel)
         self.assertLess(
-            panel.index("revision_llm_model_id"),
+            panel.index("<CorrectionLlmSettings"),
             panel.index("show_experimental"),
         )
+
+        block_path = os.path.join(
+            _ROOT, "ui", "src", "components", "SettingsDrawer", "CorrectionLlmSettings.tsx",
+        )
+        with open(block_path, encoding="utf-8") as handle:
+            block = handle.read()
+        self.assertIn("revision_llm_model_id", block)
+        self.assertIn("revision_llm_provider", block)
         with open(os.path.join(_ROOT, "ui", "src", "types", "index.ts"), encoding="utf-8") as handle:
-            self.assertIn("revision_llm_model_id: string", handle.read())
+            types = handle.read()
+        self.assertIn("revision_llm_model_id: string", types)
+        self.assertIn("revision_llm_provider?", types)
 
     def test_an_option_chip_runs_the_correction_it_carries(self):
         # The chip only called setFixNote: it filled a box and waited for a second

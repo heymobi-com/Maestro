@@ -53,6 +53,7 @@ from services.director_video_strategy import (
     video_strategy,
 )
 from services.h3_window_planner import compute_h3_window_boundaries
+from services import revision_llm
 from services.text_integrity import repair_payload
 from models.minimax_h3.reference_manifest import (
     split_exact_drive_audio_reference,
@@ -3704,32 +3705,31 @@ def revise_clip_prompt(
     revision_model = str(
         services.get("revision_llm_model_id") or ""
     ).strip()
-    if revision_model:
-        print(
-            f"[Pipeline {pid}] Shot {clip_index + 1}: correcting with "
-            f"{revision_model}"
-        )
+    # The editing stage may answer from its own endpoint, and then the pipeline's
+    # model is never touched: no unload, no wait for a render, no reload after.
+    editing = revision_llm.prepare(
+        services, revision_model, f"Shot {clip_index + 1}", pid, _ensure_llm_loaded
+    )
     llm_service.set_idle_timeout(services.get("llm_idle_timeout_seconds"))
-    # Every other Director pass loads the LLM before calling it; this one
-    # called enhance_prompt straight away and died with "LLM not loaded. Call
-    # load_model() first." whenever nothing had been planned in that session.
-    _ensure_llm_loaded({"llm_model_id": revision_model} if revision_model else {})
 
     nsfw = bool(services.get("nsfw_mode"))
 
     def _ask(extra: str = "") -> dict:
         """One completion, same budget, parsed into its three parts."""
 
-        answer = llm_service.enhance_prompt(
-            prompt="\n".join([*task, *(["", extra] if extra else [])]),
-            mode="video",
-            # A compiled H3 Context-IR prompt is several thousand characters, and
-            # the default 200-token budget truncated the answer mid-field.
-            max_new_tokens=4096,
-            temperature=0.3,
-            nsfw=nsfw,
-            model_type=video_model,
-            system_override=_REVISE_PROMPT_SYSTEM,
+        answer = revision_llm.ask(
+            _REVISE_PROMPT_SYSTEM, task, extra=extra, endpoint=editing, nsfw=nsfw,
+            pipeline=lambda text: llm_service.enhance_prompt(
+                prompt=text,
+                mode="video",
+                # A compiled H3 Context-IR prompt is several thousand characters, and
+                # the default 200-token budget truncated the answer mid-field.
+                max_new_tokens=4096,
+                temperature=0.3,
+                nsfw=nsfw,
+                model_type=video_model,
+                system_override=_REVISE_PROMPT_SYSTEM,
+            ),
         )
         answer = str(answer or "").strip()
         if not answer:

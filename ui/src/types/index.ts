@@ -1251,7 +1251,7 @@ export interface ServicesConfig {
   llm_remote_api_key_set: boolean
   enhance_llm_model_id: string
   enhance_llm_device: string
-  revision_llm_model_id: string  // separate, smaller LLM for shot corrections; empty = the one above
+  revision_llm_model_id: string; revision_llm_provider?: string  // shot corrections; empty model/provider = the LLM above
   enhance_fidelity_retries?: number
   enhance_fidelity_auto_continue?: boolean
   google_api_key: string

@@ -7280,6 +7280,7 @@ def get_services_config():
         "enhance_llm_model_id": services.get("enhance_llm_model_id", ""),
         "enhance_llm_device": services.get("enhance_llm_device", "cuda"),
         "revision_llm_model_id": services.get("revision_llm_model_id", ""),
+        "revision_llm_provider": services.get("revision_llm_provider", ""),
         "enhance_fidelity_retries": services.get("enhance_fidelity_retries", 1),
         "enhance_fidelity_auto_continue": services.get("enhance_fidelity_auto_continue", False),
         "google_api_key": _mask_key(services.get("google_api_key", "")),
@@ -7368,7 +7369,7 @@ async def update_services_config(request: Request):
 
     ALLOWED_KEYS = {
         "llm_model_id", "llm_device", "llm_provider", "llm_remote_url",
-        "enhance_llm_model_id", "enhance_llm_device", "revision_llm_model_id",
+        "enhance_llm_model_id", "enhance_llm_device", "revision_llm_model_id", "revision_llm_provider",
         "enhance_fidelity_retries", "enhance_fidelity_auto_continue",
         "google_api_key", "llm_remote_api_key", "openai_api_key", "anthropic_api_key",
         "use_director_v2", "nsfw_mode", "nsfw_accepted_at", "director_prompt_polish",
@@ -10305,8 +10306,7 @@ async def director_v2_plan(request: Request):
     skill_type = skill_map.get(skill_type, skill_type)
 
     # A long timeline is planned in batches that can take ten minutes, and this endpoint
-    # never passed the planner's batch counters, so the pass had no progress and no way
-    # to stop it short of restarting the backend, which threw the plan away.
+    # never passed the planner's batch counters: no progress, and no way to stop it.
     from services.director import plan_operation
     operation = plan_operation.begin(
         "plan",

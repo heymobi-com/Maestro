@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { RefreshCw, ShieldAlert, ShieldCheck, Lock } from 'lucide-react'
+import { CorrectionLlmSettings } from './CorrectionLlmSettings'
 import { useStore } from '../../stores/useStore'
 import { ApiKeyField } from '../shared/ApiKeyField'
 
@@ -368,22 +369,11 @@ export function ServicesSettingsPanel() {
           )}
         </div>
 
-        <div>
-          <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">
-            Correction LLM Model (shot edits)
-          </label>
-          <select
-            value={servicesConfig.revision_llm_model_id || ''}
-            onChange={e => updateConfig({ revision_llm_model_id: e.target.value })}
-            className="w-full bg-bg-tertiary border border-border rounded-lg px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
-          >
-            <option value="">Same as the LLM above</option>
-            {llmModels.map(m => <option key={m.id} value={m.id}>{m.label} ({m.size_hint})</option>)}
-          </select>
-          <p className="text-[10px] text-text-muted mt-1">
-            {servicesConfig.revision_llm_model_id ? 'Separate, smaller LLM for \u201cCorrect this shot\u201d \u2014 faster, and it never re-types the project text.' : 'Using the LLM above for shot corrections (slower, and it has the project text to protect).'}
-          </p>
-        </div>
+        <CorrectionLlmSettings
+          servicesConfig={servicesConfig}
+          updateConfig={updateConfig}
+          llmModels={llmModels}
+        />
 
         {/* Device selector (local only) */}
         {isLocal && (
