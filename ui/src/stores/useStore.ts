@@ -4291,7 +4291,7 @@ export const useStore = create<AppState>((set, get) => ({
     _dashboardPipelineLoadToken += 1
     _dashboardPipelineListLoadToken += 1
     set(s => ({
-      dashboardSelectedPipeline: null,
+      dashboardSelectedPipeline: null, dashboardLoading: false,  // an abandoned load cannot lower it
       dashboardPipelineList: s.dashboardPipelineList.filter(p => p.id !== pid),
     }))
     await api.deletePipeline(pid)
@@ -13366,8 +13366,7 @@ export const useStore = create<AppState>((set, get) => ({
     return { ok: true }
   },
 
-  // The question and its two answers, from our own module.
-  ...directorDeleteGuardActions(set, get),
+  ...directorDeleteGuardActions(set, get),  // the question and its two answers (our module)
 
   // ── Director Pipeline (server-side) ──────────────────────────────
   startDirectorPipeline: async (mode = 'now') => {
