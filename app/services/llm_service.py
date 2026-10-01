@@ -27,6 +27,7 @@ from services.h3_performance_audio import (
     enforce_h3_performance_audio,
     has_h3_performance_audio,
 )
+from services.llm_endpoint import models_url, remote_base
 
 logger = logging.getLogger(__name__)
 
@@ -63,11 +64,7 @@ _api_key: str = ""           # API key for OpenAI/Anthropic
 
 # Auto-unload idle timer
 _idle_timer: Optional[threading.Timer] = None
-# Seconds the loaded LLM stays resident while idle. The generation paths release it
-# explicitly before loading a model that needs the VRAM, so this timer is only a safety
-# net -- and at 60 seconds it was not a net but a price: it unloaded a 26B model (16.8 GB
-# to read back from disk) between two questions of the same correction, which is what
-# made "each answer takes so long" for no reason.
+# A safety net, not a policy: the generation paths release the LLM themselves.
 _IDLE_TIMEOUT_DEFAULT: float = 600.0
 _idle_timeout: float = _IDLE_TIMEOUT_DEFAULT
 _idle_generation: int = 0
@@ -76,7 +73,6 @@ _active_uses: int = 0
 
 def set_idle_timeout(seconds) -> float:
     """Override the idle timer (from the service settings, or the environment)."""
-
     global _idle_timeout
     try:
         value = float(seconds)
@@ -659,12 +655,12 @@ def get_available_models(provider: str = "local", remote_url: str = "", api_key:
 
     # Query remote OpenAI-compatible server (LM Studio, etc.)
     if provider in ("remote", "openai") and remote_url:
+        url = models_url(remote_url)
         try:
             headers = {}
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
-            url = remote_url.rstrip("/")
-            resp = requests.get(f"{url}/v1/models", headers=headers, timeout=10)
+            resp = requests.get(url, headers=headers, timeout=10)
             if resp.ok:
                 data = resp.json()
                 for m in data.get("data", []):
@@ -677,7 +673,7 @@ def get_available_models(provider: str = "local", remote_url: str = "", api_key:
                             "provider": provider,
                         })
         except Exception as e:
-            print(f"[LLM] Failed to query remote models at {remote_url}: {e}")
+            print(f"[LLM] Failed to query remote models at {url}: {e}")
 
     # Anthropic models (curated list — no /models endpoint)
     if provider == "anthropic" and api_key:
@@ -771,7 +767,7 @@ def _finalize_payload(payload: dict) -> dict:
 
 def _server_url() -> str:
     if _provider in ("remote", "openai") and _remote_url:
-        return _remote_url.rstrip("/")
+        return remote_base(_remote_url)
     return f"http://127.0.0.1:{_server_port}"
 
 
