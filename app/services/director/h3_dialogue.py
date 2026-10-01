@@ -18,6 +18,7 @@ from services.dialogue_timing import (
     DIALOGUE_MAX_WORDS_PER_SECOND,
     h3_dialogue_schedule,
 )
+from services.director import performance_expression as _expression
 from services.h3_prompt_budget import (
     H3_ENHANCED_TEXT_TOKEN_TARGET as _H3_DIRECTOR_TEXT_TOKEN_BUDGET,
     fit_h3_base_prompt,
@@ -2268,12 +2269,10 @@ def diagnose_h3_clip_prompt(
             "the gesture to a beat where that person is silent."
         )
 
-    # Lips turn is decided by the plan, not by the prompt: the orchestrator picks
-    # the audio-to-video path only for an audio/dialogue-driven shot marked
-    # lip-sync critical. Three notes on clip 13 of a real project -- "the woman
-    # must faithfully lip-sync S1" -- changed 2, 55 and 1 characters and could
-    # never work, because the clip's plan said "ambient_only". Without this
-    # finding the assistant blamed pronouns and gestures instead.
+    # Lips turn is decided by the plan, not by the prompt: the orchestrator picks the
+    # audio-to-video path only for a shot marked lip-sync critical. Three notes on clip
+    # 13 of a real project -- "the woman must faithfully lip-sync S1" -- changed 2, 55
+    # and 1 characters and could never work, because the plan said "ambient_only".
     plan_mode = str(_field(audio_plan or {}, "mode", "") or "")
     lip_critical = bool(_field(audio_plan or {}, "lip_sync_critical", False))
     if blocks and not (
@@ -2667,12 +2666,11 @@ def review_h3_revision(
     # one shot is a few hundred characters, so nothing a director needs is in there.
     problems.extend(h3_frozen_problems(original, text, frozen or []))
 
-    # A rewrite is judged on what it changed, not on what it inherited. A reviewed
-    # prompt is rendered verbatim, so the compiler never inserted the canonical
-    # anchors into it: requiring a rewrite to invent them refused every answer for
-    # such a shot, which is what "the assistant answers with an error and nothing
-    # changes" was. An anchor the original carried and the rewrite dropped is still
-    # refused, because that one is a change.
+    # A rewrite is judged on what it changed, not on what it inherited: a reviewed
+    # prompt is rendered verbatim, so the compiler never inserted the canonical anchors
+    # and requiring a rewrite to invent them refused every answer for such a shot. An
+    # anchor the original carried and the rewrite dropped is still refused: that is a
+    # change.
     inherited = validate_h3_prompt_contract(
         str(original or ""),
         [],
@@ -3929,9 +3927,8 @@ def _compile_official_dialogue(
             ) or body,
         )
     # Both: an audio-driven shot takes its speech from the mapped soundtrack so its beats
-    # are not compiled into the prompt (upstream), while the project language is still
-    # detected from them, which is what kept a Spanish project's lines from coming back
-    # as [English] (ours).
+    # are not compiled into the prompt (upstream), while the language is still detected
+    # from them, which kept a Spanish project's lines from coming back as [English] (ours).
     for beat in ([] if has_driving_audio else (dialogue_beats or [])):
         spoken = normalize_h3_text(_field(beat, "spoken_text", ""))
         # A no-speech marker is a valid planning outcome, not a broken line.
@@ -4120,6 +4117,10 @@ def _compile_official_dialogue(
             if not re.search(r"\bno (?:one|character) speaks\b", body, re.IGNORECASE):
                 body = _insert_h3_vocal_detail(body, silence)
             contract = silence
+
+    # What the rest of the face does, which H3 has no separate emotion channel for.
+    if _expression.needs_expression(body, driving=has_driving_audio, subjects=subjects):
+        body = _insert_h3_vocal_detail(body, _expression.PERFORMANCE_EXPRESSION_DIRECTION)
 
     body = _normalized_space(body)
     return body, contract
@@ -4992,8 +4993,7 @@ def validate_h3_prompt_contract(
             rf"(?mi)^\s*{re.escape(field)}\s*:", text,
         ))
         if len(matches) != 1:
-            # Where the duplicates are, so the refusal is actionable: the correction
-            # assistant gets these strings back and a bare count told it nothing.
+            # Where they are, so the refusal is actionable to the correction assistant.
             where = ""
             if len(matches) > 1:
                 lines = ", ".join(
@@ -5013,6 +5013,7 @@ def validate_h3_prompt_contract(
     extracted_fields = _extract_h3_fields(text)
     visual_field = "detailed_description" if mode == "ref2va" else "integrated_multimodal_description"
     visual = extracted_fields.get(visual_field, "")
+    errors.extend(_expression.performance_expression_problems(text, visual, references, subjects))
     if mode == "ref2va":
         shot = re.search(r"\[Shot\s+1\]", visual, flags=re.IGNORECASE)
         if not shot:
@@ -5423,9 +5424,8 @@ def compile_h3_clip_plans(
         )
         plan["video_prompt"] = prompt
         plan["_director_h3_compiled_prompt"] = prompt
-        # A clip is one continuous shot, so a body that also declares a later one
-        # is a defect the user cannot see in the rendered clip until a character
-        # comes out duplicated. Say it where the log is read, not silently.
+        # A body declaring a later shot duplicates whoever is placed in it, which the
+        # user only sees in the rendered clip. Say it where the log is read.
         declared_shots = _declared_shot_numbers(prompt)
         if any(number > 1 for number in declared_shots):
             print(
