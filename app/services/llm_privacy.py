@@ -74,16 +74,23 @@ def mature_mode_enabled(services) -> bool:
 
 
 def mature_endpoint_is_public(services) -> bool:
-    """True when mature mode is on and the endpoint is not on this machine.
+    """True when mature mode is on and an endpoint that answers is not on this machine.
 
-    What the settings screen warns about. Note that this is the *only* thing that
-    happens: nothing downgrades the provider, so the user has to be told rather
-    than protected from the provider they chose.
+    Two stages answer prompts: the pipeline's LLM, and the editing stage's when it was given
+    an endpoint of its own. Both have to be asked. The second one is the case this missed:
+    with the pipeline on a local model and corrections on a hosted API, mature prompts travel
+    to that service while the pipeline's own provider looks entirely innocuous -- which is
+    exactly the configuration where nobody expects the warning to be missing.
+
+    What the settings screen warns about. Note that this is the *only* thing that happens:
+    nothing downgrades the provider, so the user has to be told rather than protected from
+    the provider they chose.
     """
 
     if not mature_mode_enabled(services):
         return False
-    return routes_off_machine(
-        services.get("llm_provider", "local"),
-        services.get("llm_remote_url", ""),
+    remote_url = services.get("llm_remote_url", "")
+    stages = (services.get("llm_provider", "local"), services.get("revision_llm_provider", ""))
+    return any(
+        routes_off_machine(stage, remote_url) for stage in stages if str(stage or "").strip()
     )

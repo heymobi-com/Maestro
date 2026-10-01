@@ -154,6 +154,47 @@ class TheRequestItSends(unittest.TestCase):
         self.assertIn("400", message)
         self.assertIn(DEEPSEEK, message)
 
+    def _empty(self, body):
+        captured, poster = self._capture(body=body)
+        with poster:
+            with self.assertRaises(RuntimeError) as caught:
+                revision_llm.complete(
+                    "SYSTEM", "USER", endpoint=revision_llm.editing_endpoint(HOSTED),
+                )
+        return str(caught.exception)
+
+    def test_an_empty_answer_says_the_budget_ran_out(self):
+        """A reasoning model that thinks past max_tokens sends content back empty."""
+        message = self._empty({
+            "choices": [{
+                "message": {"role": "assistant", "content": "", "reasoning_content": "thinking..."},
+                "finish_reason": "length",
+            }],
+            "usage": {"completion_tokens": 4096, "completion_tokens_details": {"reasoning_tokens": 4096}},
+        })
+        self.assertIn("empty answer", message)
+        self.assertIn("deepseek-flash", message)
+        self.assertIn("finish_reason=length", message)
+        self.assertIn("reasoning_tokens=4096", message)
+        self.assertIn("raise max_tokens", message)
+
+    def test_an_empty_answer_after_reasoning_reads_as_a_decline(self):
+        """The shape a provider refusing the content leaves: reasoning, no answer, stop."""
+        message = self._empty({
+            "choices": [{
+                "message": {"role": "assistant", "content": "", "reasoning_content": "I can't help"},
+                "finish_reason": "stop",
+            }],
+            "usage": {"completion_tokens": 25},
+        })
+        self.assertIn("finish_reason=stop", message)
+        self.assertIn("declining the content", message)
+        self.assertNotIn("raise max_tokens", message)
+
+    def test_an_empty_answer_with_nothing_reported_still_says_so(self):
+        message = self._empty({"choices": [{"message": {"content": ""}}]})
+        self.assertIn("no finish_reason or usage reported", message)
+
     def test_an_endpoint_without_a_url_says_so(self):
         with self.assertRaises(ValueError) as caught:
             revision_llm.complete(

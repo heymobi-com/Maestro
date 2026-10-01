@@ -111,6 +111,34 @@ class TheWarningCondition(unittest.TestCase):
             with self.subTest(settings=settings):
                 self.assertFalse(mature_endpoint_is_public(settings))
 
+    def test_the_editing_stage_counts_too(self):
+        """Pipeline local, corrections hosted: mature prompts still leave the machine.
+
+        This is the configuration the warning used to miss, because it only asked the
+        pipeline's provider -- which looks entirely innocuous there.
+        """
+        self.assertTrue(mature_endpoint_is_public({
+            "nsfw_mode": True,
+            "llm_provider": "local",
+            "revision_llm_provider": "remote",
+            "llm_remote_url": DEEPSEEK,
+        }))
+        self.assertTrue(mature_endpoint_is_public({
+            "nsfw_mode": True, "llm_provider": "local", "revision_llm_provider": "openai",
+        }))
+
+    def test_two_local_stages_do_not_warn(self):
+        self.assertFalse(mature_endpoint_is_public({
+            "nsfw_mode": True, "llm_provider": "local", "revision_llm_provider": "local",
+        }))
+        # A hosted provider reachable on the LAN is still not a service someone else runs.
+        self.assertFalse(mature_endpoint_is_public({
+            "nsfw_mode": True,
+            "llm_provider": "local",
+            "revision_llm_provider": "remote",
+            "llm_remote_url": "http://192.168.1.50:8080",
+        }))
+
     def test_an_api_without_mature_mode_does_not_warn(self):
         self.assertFalse(mature_endpoint_is_public({
             "nsfw_mode": False, "llm_provider": "remote", "llm_remote_url": DEEPSEEK,
@@ -157,9 +185,12 @@ class TheSettingsEndpointReportsIt(unittest.TestCase):
         source = (REPO / "app" / "launch.py").read_text(encoding="utf-8")
         self.assertIn('"nsfw_public_endpoint": nsfw_public_endpoint', source)
         self.assertTrue(
-            re.search(r"nsfw_public_endpoint = nsfw and routes_off_machine\(", source),
+            re.search(
+                r"nsfw_public_endpoint = nsfw and mature_endpoint_is_public\(services\)", source
+            ),
             "the warning flag must come from the shared classification",
         )
+        self.assertIn("from services.llm_privacy import mature_endpoint_is_public", source)
 
 
 class TheScreenUsesIt(unittest.TestCase):

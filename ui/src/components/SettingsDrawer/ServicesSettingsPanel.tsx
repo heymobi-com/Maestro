@@ -225,6 +225,9 @@ export function ServicesSettingsPanel() {
   const isRemote = provider === 'remote'
   const isOpenAI = provider === 'openai'
   const isLocal = provider === 'local'
+  // The mature-mode warning has to name both stages: with the pipeline on a local model and
+  // corrections on a hosted API, the editing LLM is the one that is off this machine.
+  const correctionProvider = servicesConfig.revision_llm_provider || 'the LLM above'
 
   const handleRefreshModels = async () => {
     setRefreshing(true)
@@ -291,7 +294,7 @@ export function ServicesSettingsPanel() {
         </div>
 
         {servicesConfig.nsfw_public_endpoint && (
-          <p role="alert" className="rounded-lg border border-amber-500/30 bg-amber-500/8 px-3 py-2 text-[10px] leading-relaxed text-text-muted"><span className="font-medium text-indicator-warning">Mature mode is sending this to a public service.</span> The LLM provider is <span className="font-medium">{provider}</span>, which is not on this machine, so NSFW prompts travel over the internet and are subject to that service's terms: it may keep them, refuse the answer, or act on your account. Choose Local, or a server on this machine or on your LAN, to keep this content at home.</p>
+          <p role="alert" className="rounded-lg border border-amber-500/30 bg-amber-500/8 px-3 py-2 text-[10px] leading-relaxed text-text-muted"><span className="font-medium text-indicator-warning">Mature mode is sending this to a public service.</span> A stage that answers prompts is not on this machine — the LLM above is <span className="font-medium">{provider}</span> and the Correction LLM is <span className="font-medium">{correctionProvider}</span> — so NSFW prompts travel over the internet and are subject to that service's terms: it may keep them, refuse the answer, or act on your account. Choose Local, or a server on this machine or on your LAN, to keep this content at home.</p>
         )}
 
         {/* Remote URL (for remote/openai providers) */}

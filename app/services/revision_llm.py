@@ -108,6 +108,42 @@ def ask(system: str, task, *, extra: str = "", endpoint, nsfw: bool, pipeline) -
     return pipeline(text)
 
 
+def empty_answer_problem(base: str, endpoint: Mapping, choice: Mapping, message: Mapping, data: Mapping) -> str:
+    """Why an answer came back empty, in the provider's own numbers.
+
+    A reasoning model that spends its whole budget before writing anything, a provider that
+declines the content, and a response shape this code does not read all look identical from
+the outside -- "empty answer" -- and each of them needs a different response from whoever
+reads the error. The finish_reason and the token split are what tell them apart, so they
+belong in the message rather than in a support round trip.
+    """
+
+    reason = str(choice.get("finish_reason") or "")
+    usage = data.get("usage") or choice.get("usage") or {}
+    details = usage.get("completion_tokens_details") or {}
+    reasoning = len(str(message.get("reasoning_content") or ""))
+    facts = []
+    if reason:
+        facts.append(f"finish_reason={reason}")
+    if usage.get("completion_tokens") is not None:
+        facts.append(f"completion_tokens={usage.get('completion_tokens')}")
+    if details.get("reasoning_tokens") is not None:
+        facts.append(f"reasoning_tokens={details.get('reasoning_tokens')}")
+    if reasoning:
+        facts.append(f"reasoning_content={reasoning} chars")
+    if reason == "length":
+        facts.append("the budget ran out before it wrote the answer; raise max_tokens")
+    elif reasoning:
+        facts.append(
+            "it reasoned and then wrote nothing, which is what a provider declining the "
+            "content looks like"
+        )
+    return (
+        f"The editing LLM ({endpoint.get('model')} at {base}) returned an empty answer "
+        f"[{'; '.join(facts) or 'no finish_reason or usage reported'}]."
+    )
+
+
 def complete(
     system: str,
     user: str,
@@ -165,5 +201,5 @@ def complete(
     message = choices[0].get("message") or {}
     content = str(message.get("content") or "")
     if not content.strip():
-        raise RuntimeError("The editing LLM returned an empty answer.")
+        raise RuntimeError(empty_answer_problem(base, endpoint, choices[0], message, data))
     return content

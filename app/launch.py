@@ -7262,13 +7262,13 @@ def _enhancement_settings_snapshot() -> dict:
 @api.get("/api/v1/services-config")
 def get_services_config():
     """Return services settings with API keys masked."""
-    from services.llm_privacy import routes_off_machine
+    from services.llm_privacy import mature_endpoint_is_public
     services = wgp.server_config.get("services", {})
     provider = services.get("llm_provider", "local")
     # Enforce: NSFW must be off when using a public provider
     nsfw = services.get("nsfw_mode", False) and provider not in _PUBLIC_LLM_PROVIDERS
     # Mature mode off this machine: the settings screen says so, and nothing is switched.
-    nsfw_public_endpoint = nsfw and routes_off_machine(provider, services.get("llm_remote_url", ""))
+    nsfw_public_endpoint = nsfw and mature_endpoint_is_public(services)
     return {
         "llm_model_id": services.get("llm_model_id", _DEFAULT_LLM_REPO),
         "llm_device": services.get("llm_device", _llm_default_device()),
@@ -26132,12 +26132,10 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 detached_clip_index = job["params"].get("_director_clip_index")
                 # The clip this rerun replaces: the gallery stacks the new take above it, and the older take can be deleted once accepted.
                 supersedes = job["params"].get("_director_supersedes")
-                # A resumed Director run submits only the shots that were still
-                # missing, so the batch numbers them from zero again. The film
-                # position is the batch index plus this offset; without it every
-                # shot of a resumed run was filed 26 places early, which put its
-                # sidecar in the wrong slot and made a later "regenerate this
-                # clip" rewrite a different shot.
+                # A resumed Director run submits only the shots that were still missing, so the
+                # batch numbers them from zero again. The film position is the batch index plus
+                # this offset; without it every shot of a resumed run was filed 26 places early,
+                # which put its sidecar in the wrong slot and rewrote a different shot later.
                 try:
                     clip_index_offset = int(
                         job["params"].get("_director_clip_offset") or 0
