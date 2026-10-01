@@ -178,6 +178,23 @@ class TheScreenUsesIt(unittest.TestCase):
         ):
             self.assertIn(phrase, panel)
 
+    def test_the_disclaimer_matches_what_actually_happens(self):
+        """The modal is where the user accepts, so a false sentence there is worse.
+
+        It used to say NSFW "is only available with local or self-hosted models"
+        and name only OpenAI and Anthropic, while a hosted `remote` endpoint kept
+        the mode on and sent the prompts out.
+        """
+
+        panel = (
+            REPO / "ui" / "src" / "components" / "SettingsDrawer"
+            / "ServicesSettingsPanel.tsx"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "NSFW mode is disabled automatically with OpenAI or Anthropic", panel
+        )
+        self.assertNotIn("only available with local or self-hosted models", panel)
+
 
 if __name__ == "__main__":
     unittest.main()
