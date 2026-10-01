@@ -3697,12 +3697,14 @@ def revise_clip_prompt(
     # Two settings exist for this pass alone: a correction is a small edit, so it may use
     # a smaller model, and the idle timer is configurable because a 60-second unload
     # between two questions of the same correction is what "each answer takes so long" was.
-    revision_params = dict(snapshot or {})
+    # A correction also runs where the user is *now*. The snapshot records where the
+    # project was planned -- every plan in a real install says "local" -- and it outvotes
+    # the settings inside _ensure_llm_loaded, so an editor pointed at a hosted API kept
+    # loading the local GGUF, which cannot even come up while the video model holds the GPU.
     revision_model = str(
         services.get("revision_llm_model_id") or ""
     ).strip()
     if revision_model:
-        revision_params["llm_model_id"] = revision_model
         print(
             f"[Pipeline {pid}] Shot {clip_index + 1}: correcting with "
             f"{revision_model}"
@@ -3711,7 +3713,7 @@ def revise_clip_prompt(
     # Every other Director pass loads the LLM before calling it; this one
     # called enhance_prompt straight away and died with "LLM not loaded. Call
     # load_model() first." whenever nothing had been planned in that session.
-    _ensure_llm_loaded(revision_params)
+    _ensure_llm_loaded({"llm_model_id": revision_model} if revision_model else {})
 
     nsfw = bool(services.get("nsfw_mode"))
 
