@@ -7267,8 +7267,7 @@ def get_services_config():
     provider = services.get("llm_provider", "local")
     # Enforce: NSFW must be off when using a public provider
     nsfw = services.get("nsfw_mode", False) and provider not in _PUBLIC_LLM_PROVIDERS
-    # Mature mode with an endpoint that is not this machine: the prompts leave the
-    # building, and the settings screen says so. Nothing is switched for the user.
+    # Mature mode off this machine: the settings screen says so, and nothing is switched.
     nsfw_public_endpoint = nsfw and routes_off_machine(provider, services.get("llm_remote_url", ""))
     return {
         "llm_model_id": services.get("llm_model_id", _DEFAULT_LLM_REPO),
@@ -10427,9 +10426,7 @@ async def director_v2_plan(request: Request):
         }
 
     except InterruptedError:
-        # Stopping is a state, not a failure: the pipeline reports its own Stop
-        # as a cancelled status rather than an error, and the UI reads this
-        # answer the same way.
+        # Stopping is a state, not a failure: the pipeline reports Stop as cancelled, not as an error.
         return {
             "cancelled": True,
             "clip_plans": [],
@@ -26133,8 +26130,7 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     sidecar["director_pipeline_id"] = dpid
                 # A single-clip rerun publishes one output and no clip_output_files map, so it states its own position.
                 detached_clip_index = job["params"].get("_director_clip_index")
-                # The clip this rerun replaces: the gallery stacks the new take
-                # directly above it for comparison, and the older take can be deleted once the new one is accepted.
+                # The clip this rerun replaces: the gallery stacks the new take above it, and the older take can be deleted once accepted.
                 supersedes = job["params"].get("_director_supersedes")
                 # A resumed Director run submits only the shots that were still
                 # missing, so the batch numbers them from zero again. The film
@@ -28881,7 +28877,10 @@ def get_output_metadata(name: str, workspace: str = ""):
     from services.media_info import enrich_metadata
 
     def _with_file_details(metadata):
-        return enrich_metadata(filepath, metadata,
+        # A render with no sidecar still names its project in its own parameters; the link is
+        # attached only when that project is on disk, because it moves the Load settings button.
+        from services.director_media_link import attach_project_link
+        return enrich_metadata(filepath, attach_project_link(metadata, out_dir),
             source_roots=(out_dir, os.path.join(os.getcwd(), "uploads")))
 
     # Helper: read embedded metadata from the media file
