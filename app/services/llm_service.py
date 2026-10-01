@@ -72,7 +72,6 @@ _active_uses: int = 0
 
 
 def set_idle_timeout(seconds) -> float:
-    """Override the idle timer (from the service settings, or the environment)."""
     global _idle_timeout
     try:
         value = float(seconds)
@@ -82,9 +81,7 @@ def set_idle_timeout(seconds) -> float:
         _idle_timeout = value
     return _idle_timeout
 
-_IDLE_ENV = os.environ.get("MAESTRO_LLM_IDLE_SECONDS", "").strip()
-if _IDLE_ENV:
-    set_idle_timeout(_IDLE_ENV)
+set_idle_timeout(os.environ.get("MAESTRO_LLM_IDLE_SECONDS", "").strip() or None)
 
 
 # Streaming state — accumulates tokens during generation
@@ -1193,6 +1190,9 @@ def get_status() -> dict:
 
 def _download_gguf(repo_id: str, filename: str, cache_dir: str) -> str:
     """Download a GGUF file from HuggingFace and return the local path."""
+    # Only local loads arrive here, so a hosted model name is a contradiction.
+    from services.llm_model_choice import require_local_repo
+    require_local_repo(repo_id)
     local_path = os.path.join(cache_dir, filename)
     if os.path.isfile(local_path):
         print(f"[LLM] GGUF file already cached: {local_path}")
