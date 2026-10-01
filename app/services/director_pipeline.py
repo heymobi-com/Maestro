@@ -3694,11 +3694,9 @@ def revise_clip_prompt(
     services = current_settings(
         _wgp.server_config.get("services", {}) if _wgp else {}
     )
-    # Two settings exist for this pass alone, because a correction is a small edit and
-    # making it pay for the planning model is what made each answer slow: a smaller model
-    # may be used here, and the idle timer that unloaded the resident model between two
-    # questions of the same correction is now configurable (the generation paths release
-    # the LLM explicitly when they need the VRAM, so the timer is only a safety net).
+    # Two settings exist for this pass alone: a correction is a small edit, so it may use
+    # a smaller model, and the idle timer is configurable because a 60-second unload
+    # between two questions of the same correction is what "each answer takes so long" was.
     revision_params = dict(snapshot or {})
     revision_model = str(
         services.get("revision_llm_model_id") or ""

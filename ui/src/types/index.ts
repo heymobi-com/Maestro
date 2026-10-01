@@ -1251,8 +1251,7 @@ export interface ServicesConfig {
   llm_remote_api_key_set: boolean
   enhance_llm_model_id: string
   enhance_llm_device: string
-  /** Separate, smaller LLM for the shot-correction assistant; empty uses the main one. */
-  revision_llm_model_id: string
+  revision_llm_model_id: string  // separate, smaller LLM for shot corrections; empty = the one above
   enhance_fidelity_retries?: number
   enhance_fidelity_auto_continue?: boolean
   google_api_key: string
@@ -1263,6 +1262,7 @@ export interface ServicesConfig {
   anthropic_api_key_set: boolean
   use_director_v2: boolean
   nsfw_mode: boolean
+  nsfw_public_endpoint?: boolean  // mature mode with an endpoint off this machine
   nsfw_accepted_at: string | null
   director_prompt_polish: 'off' | 'full_guide' | 'light_guide' | 'third_pass'
   civitai_api_key: string

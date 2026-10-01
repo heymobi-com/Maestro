@@ -7262,10 +7262,14 @@ def _enhancement_settings_snapshot() -> dict:
 @api.get("/api/v1/services-config")
 def get_services_config():
     """Return services settings with API keys masked."""
+    from services.llm_privacy import routes_off_machine
     services = wgp.server_config.get("services", {})
     provider = services.get("llm_provider", "local")
     # Enforce: NSFW must be off when using a public provider
     nsfw = services.get("nsfw_mode", False) and provider not in _PUBLIC_LLM_PROVIDERS
+    # Mature mode with an endpoint that is not this machine: the prompts leave the
+    # building, and the settings screen says so. Nothing is switched for the user.
+    nsfw_public_endpoint = nsfw and routes_off_machine(provider, services.get("llm_remote_url", ""))
     return {
         "llm_model_id": services.get("llm_model_id", _DEFAULT_LLM_REPO),
         "llm_device": services.get("llm_device", _llm_default_device()),
@@ -7294,6 +7298,7 @@ def get_services_config():
         # users who never touched the toggle see the new default.
         "use_director_v2": services.get("use_director_v2", True),
         "nsfw_mode": nsfw,
+        "nsfw_public_endpoint": nsfw_public_endpoint,
         "nsfw_accepted_at": services.get("nsfw_accepted_at", None),
         # Default flipped from "off" to model-aware "third_pass". Models
         # such as LTX-2 / Flux retain dialect polishing, while native H3
@@ -10299,11 +10304,9 @@ async def director_v2_plan(request: Request):
     }
     skill_type = skill_map.get(skill_type, skill_type)
 
-    # A long timeline is planned in batches that can take ten minutes, and the
-    # planner already publishes real batch counters through this pair of
-    # callbacks. The pipeline has always passed them; this endpoint did not, so
-    # the same pass was a silent request with no progress and no way to stop it
-    # short of restarting the backend, which threw the plan away.
+    # A long timeline is planned in batches that can take ten minutes, and this endpoint
+    # never passed the planner's batch counters, so the pass had no progress and no way
+    # to stop it short of restarting the backend, which threw the plan away.
     from services.director import plan_operation
     operation = plan_operation.begin(
         "plan",
@@ -10350,9 +10353,8 @@ async def director_v2_plan(request: Request):
         provider = services.get("llm_provider", "local")
         planner_kwargs["nsfw"] = services.get("nsfw_mode", False) and provider not in _PUBLIC_LLM_PROVIDERS
 
-        # The planner checks the cancellation callback at every batch boundary
-        # and whenever it publishes progress, so these two are what turn a Stop
-        # click into an actual interruption.
+        # Checked at every batch boundary and progress publish, so these turn a
+        # Stop click into an actual interruption.
         planner_kwargs["_planning_progress_callback"] = _publish_plan_progress
         planner_kwargs["_planning_cancelled_callback"] = _plan_was_cancelled
 
@@ -10387,8 +10389,7 @@ async def director_v2_plan(request: Request):
         rendered = director.render_plan(plan, prompt_type=prompt_type, has_reference=has_reference)
         clip_plans = director.plan_to_clip_plans(rendered)
 
-        # Planning is done; the polish pass is announced so the progress card
-        # names the phase the user is actually waiting on.
+        # Planning is done; announce the next phase so the card names what it waits on.
         if clip_plans:
             plan_operation.publish(operation, {
                 "message": "Polishing the planned prompts...",
@@ -10413,9 +10414,8 @@ async def director_v2_plan(request: Request):
                 )
             )
 
-        # A Stop pressed during the polish pass would otherwise be ignored: the
-        # polish step has no cancellation hook of its own, so honour it here
-        # rather than handing back a plan the user just cancelled.
+        # A Stop during the polish pass would otherwise be ignored: it has no
+        # cancellation hook, so honour it here rather than return a cancelled plan.
         if plan_operation.is_cancelled(operation):
             raise InterruptedError("Director planning cancelled")
 

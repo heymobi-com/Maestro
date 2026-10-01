@@ -289,6 +289,10 @@ export function ServicesSettingsPanel() {
           </select>
         </div>
 
+        {servicesConfig.nsfw_public_endpoint && (
+          <p role="alert" className="rounded-lg border border-amber-500/30 bg-amber-500/8 px-3 py-2 text-[10px] leading-relaxed text-text-muted"><span className="font-medium text-indicator-warning">Mature mode is sending this to a public service.</span> The LLM provider is <span className="font-medium">{provider}</span>, which is not on this machine, so NSFW prompts travel over the internet and are subject to that service's terms: it may keep them, refuse the answer, or act on your account. Choose Local, or a server on this machine or on your LAN, to keep this content at home.</p>
+        )}
+
         {/* Remote URL (for remote/openai providers) */}
         {(isRemote || isOpenAI) && (
           <div className="space-y-3">
@@ -364,9 +368,6 @@ export function ServicesSettingsPanel() {
           )}
         </div>
 
-        {/* A correction is a small edit of one shot, so it does not need the planning
-            model: measured, re-typing a prompt cost 1,675 generated tokens per answer and
-            every case of damage came from it. */}
         <div>
           <label className="text-[11px] text-text-muted uppercase tracking-wider mb-1.5 block">
             Correction LLM Model (shot edits)
@@ -384,10 +385,7 @@ export function ServicesSettingsPanel() {
             ))}
           </select>
           <p className="text-[10px] text-text-muted mt-1">
-            {servicesConfig.revision_llm_model_id
-              ? 'Separate, smaller LLM for \u201cCorrect this shot\u201d \u2014 faster, and it never re-types the project text.'
-              : 'Using the LLM above for shot corrections (slower, and it has the project text to protect).'
-            }
+            {servicesConfig.revision_llm_model_id ? 'Separate, smaller LLM for \u201cCorrect this shot\u201d \u2014 faster, and it never re-types the project text.' : 'Using the LLM above for shot corrections (slower, and it has the project text to protect).'}
           </p>
         </div>
 
