@@ -18,6 +18,7 @@ from services.dialogue_timing import (
     DIALOGUE_MAX_WORDS_PER_SECOND,
     h3_dialogue_schedule,
 )
+from services.director import audio_driven_transcript as _transcript
 from services.director import performance_expression as _expression
 from services.h3_prompt_budget import (
     H3_ENHANCED_TEXT_TOKEN_TARGET as _H3_DIRECTOR_TEXT_TOKEN_BUDGET,
@@ -1327,15 +1328,10 @@ def _meaningful_context_present(context: str, body: str) -> bool:
     return len(words & body_words) >= required
 
 
-# The project context is injected to constrain the *audio*, so the section that
-# states which subject owns which voice is worth more than any other prose in
-# it. A 360-character budget fitted the short contexts this was first written
-# for, but a structured project context (project header, subject definitions,
-# gender lock, audio-driven rules, setting, dialogue format) is ~2.6k
-# characters, and packing it into 360 kept little more than two headings. MiniMax
-# H3 publishes no prompt-token limit and ``services.h3_prompt_budget`` says the
-# token target is cosmetic, so the budget can be generous and reserve the
-# section-selection path for genuinely oversized contexts.
+# The project context constrains the *audio*, so the section naming which subject owns which
+# voice outranks any other prose in it. A structured one (header, subject definitions, gender
+# lock, audio-driven rules, setting, dialogue format) is ~2.6k characters against 360.
+# Keep the section-selection path for oversized contexts; H3 publishes no token limit.
 _H3_CONTEXT_BUDGET = 3000
 # Two tiers: a section that names a voice's pitch or gender outranks one that
 # merely mentions speakers, so the rules that assign the voices are kept even
@@ -3926,10 +3922,7 @@ def _compile_official_dialogue(
                 for beat in (dialogue_beats or [])
             ) or body,
         )
-    # Both: an audio-driven shot takes its speech from the mapped soundtrack so its beats
-    # are not compiled into the prompt (upstream), while the language is still detected
-    # from them, which kept a Spanish project's lines from coming back as [English] (ours).
-    for beat in ([] if has_driving_audio else (dialogue_beats or [])):
+    for beat in (dialogue_beats or []):  # which plans carry beats here is decided in audio_driven_transcript
         spoken = normalize_h3_text(_field(beat, "spoken_text", ""))
         # A no-speech marker is a valid planning outcome, not a broken line.
         if is_silent_dialogue(spoken):
@@ -4826,12 +4819,9 @@ def compile_h3_official_prompt(
         closing_blocking = constrain_music_performance(
             closing_blocking, subjects, activity, project_context=project_context,
         )
-    if has_driving_audio or audio_mode in {"audio_driven", "music_driven"}:
-        # Supplied driving audio owns every audible voice. Structured beats in
-        # an audio-driven plan are transcript annotations for timing and
-        # performance only; they must not become a second generated-speech
-        # request. Story-driven plans without source audio keep their exact
-        # structured dialogue as the spoken authority.
+    # Departs from upstream only where the plan says the mouths follow the line; the
+    # policy module says why the mode alone does not answer this.
+    if not _transcript.states_the_lines(audio_mode=audio_mode, audio_plan=audio_plan, driving_audio=has_driving_audio):
         dialogue_beats = []
     if audio_mode in {"audio_driven", "music_driven"}:
         # Initial Director preflight runs before concrete Ref2VA manifests are
@@ -5283,10 +5273,7 @@ def compile_h3_clip_plans(
             .strip().casefold() == "drive"
             for reference in references or []
         )
-        transcript_only.append(
-            audio_mode in {"audio_driven", "music_driven"}
-            or has_driving_audio_reference
-        )
+        transcript_only.append(not _transcript.states_the_lines(audio_mode=audio_mode, audio_plan=plan.get("_director_audio_plan"), driving_audio_reference=has_driving_audio_reference))
 
     _repair_h3_phantom_dialogue_subjects(clip_plans)
     _canonicalize_h3_project_subject_names(clip_plans)
