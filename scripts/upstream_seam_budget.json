@@ -23,6 +23,7 @@
     "tests/test_h3_director_dialogue.py": 236,
     "ui/src/api/client.ts": 15,
     "ui/src/components/DirectorDashboard/DirectorDashboard.tsx": 592,
+    "ui/src/components/MainContent/GalleryViewer.tsx": 10,
     "ui/src/components/MainContent/MainContent.tsx": 60,
     "ui/src/components/MainContent/MediaFeedItem.tsx": 19,
     "ui/src/components/MainContent/ThumbnailGallery.tsx": 10,

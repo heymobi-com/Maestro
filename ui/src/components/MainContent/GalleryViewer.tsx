@@ -545,6 +545,16 @@ export function GalleryViewer({
     }
 
     if (event.target instanceof Element && event.target.closest(KEYBOARD_IGNORE)) return
+    if (event.key === ' ' || event.key === 'Spacebar') {
+      // Space plays and pauses, exactly as a tap on the clip does. Left to the browser it
+      // activated whichever button happened to hold focus, so on some layouts it closed the
+      // viewer instead of starting the clip the user had just enlarged.
+      if (currentItem?.type === 'video') {
+        event.preventDefault()
+        playerRef.current?.togglePlayback()
+      }
+      return
+    }
     if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
       event.preventDefault()
       navigate(-1)
