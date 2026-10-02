@@ -410,8 +410,15 @@ class TestRealProjectRegression(unittest.TestCase):
     def test_planner_vocabulary_resolves_the_real_raw_ids(self):
         order = speaker_label_order(self.lyrics)
         vocabulary = cast_vocabulary(self.mappings, self.lyrics)
+        raw_ids = {str(row.get("speaker") or "").strip().upper() for row in self.lyrics}
 
-        self.assertEqual(sorted(vocabulary), ["(S1)", "(S2)"])
+        # The cast is read from the plan, never hard-coded: this fixture is the newest project
+        # on the machine, so a fixed count fails the suite the moment a project with a
+        # different cast is rendered (the newest one here is a three-voice film, and a
+        # hard-coded pair reported the binder as broken when it had resolved all 457 beats).
+        # One label per distinct raw id is the contract that matters.
+        self.assertEqual(len(vocabulary), len(raw_ids))
+        self.assertEqual(sorted(vocabulary), sorted(set(order.values())))
         self.assertTrue(set(order.values()).issubset(set(vocabulary)))
 
         # Every transcript line must render with a canonical label, never with
@@ -419,6 +426,7 @@ class TestRealProjectRegression(unittest.TestCase):
         for row in self.lyrics:
             label = order.get(str(row.get("speaker") or "").strip().upper(), "")
             self.assertTrue(label, f"unresolved speaker {row.get('speaker')!r}")
+            self.assertRegex(label, r"^\(S\d+\)$")
             display = format_speaker(label, vocabulary.get(label))
             self.assertNotIn("SPEAKER_", display)
 
@@ -441,13 +449,17 @@ class TestRealProjectRegression(unittest.TestCase):
         self.assertEqual(stats["beats_total"], len(beats))
         self.assertEqual(stats["beats_unresolved"], 0)
 
-    def test_only_the_two_real_speakers_are_assigned(self):
+    def test_only_the_plans_own_speakers_are_assigned(self):
+        order = speaker_label_order(self.lyrics)
         bind_dialogue_speakers(self.clips, self.windows, self.lyrics)
 
         labels = {str(beat.get("speaker_id")) for beat in self._beats()}
         self.assertTrue(labels)
+        # Only a label the diarized transcript justifies: never the raw pyannote id the
+        # planner handed the model, and never a number minted from a line's position.
+        self.assertTrue(labels.issubset(set(order.values())))
         for label in labels:
-            self.assertRegex(label, r"^\(S[12]\)$")
+            self.assertRegex(label, r"^\(S\d+\)$")
 
 
 if __name__ == "__main__":
