@@ -64,6 +64,7 @@ from services.checkpoint_compatibility import (
     unsupported_checkpoint_reason,
     validate_checkpoint_file,
 )
+from services.director.h3_clip_prompt_lines import clip_prompt_lines as _clip_prompt_lines
 from services.generation_eta import AdaptiveGenerationEta, GenerationEtaHistory
 from services.remote_access import TailscaleManager
 from services.web_push import WebPushService, WebPushUnavailable
@@ -25541,13 +25542,8 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
             # Multi-clip mode: split single request into per-clip tasks
             elif raw_params.get("multi_prompts_gen_type") == 3:
                 prompt_text = raw_params.get("prompt", "")
-                # Use clip boundary separator if present (Director v2 with sliding window support),
-                # otherwise fall back to newline split (Studio mode / legacy Director)
-                CLIP_SEPARATOR = "\n---CLIP_BOUNDARY---\n"
-                if CLIP_SEPARATOR in prompt_text:
-                    prompt_lines = [p.strip() for p in prompt_text.split(CLIP_SEPARATOR) if p.strip()]
-                else:
-                    prompt_lines = [l.strip() for l in prompt_text.split("\n") if l.strip()]
+                # One prompt per clip; h3_clip_prompt_lines records the resume a newline split refused.
+                prompt_lines = _clip_prompt_lines(prompt_text, raw_params.get("per_clip_minimax_h3_references"))
                 image_starts = raw_params.get("image_start", [])
                 if not isinstance(image_starts, list):
                     image_starts = [image_starts] if image_starts else []
@@ -28875,8 +28871,7 @@ def get_output_metadata(name: str, workspace: str = ""):
     from services.media_info import enrich_metadata
 
     def _with_file_details(metadata):
-        # A render with no sidecar still names its project in its own parameters; the link is
-        # attached only when that project is on disk, because it moves the Load settings button.
+        # A sidecar-less render still names its project; the link attaches only if it is on disk.
         from services.director_media_link import attach_project_link
         return enrich_metadata(filepath, attach_project_link(metadata, out_dir),
             source_roots=(out_dir, os.path.join(os.getcwd(), "uploads")))
