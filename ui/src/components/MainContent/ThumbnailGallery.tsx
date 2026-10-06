@@ -37,7 +37,7 @@ function VideoThumbnail({ src, name }: { src: string; name: string }) {
 
 interface Props {
   activeIndex: number
-  onThumbnailClick: (index: number) => void
+  onThumbnailClick: (id: string) => void
 }
 
 function VirtualizedThumbnailList({ activeIndex, onThumbnailClick, onMobileClick }: Props & { onMobileClick?: () => void }) {
@@ -111,9 +111,10 @@ function VirtualizedThumbnailList({ activeIndex, onThumbnailClick, onMobileClick
               key={outputIdentity(file)}
               title={thumbLabel}
               aria-label={`Show ${thumbLabel}`}
+              aria-current={activeIndex === idx ? 'true' : undefined}
               data-thumb-index={idx}
               onClick={() => {
-                onThumbnailClick(idx)
+                onThumbnailClick(outputIdentity(file))
                 onMobileClick?.()
               }}
               className={`absolute left-0 right-0 rounded-lg border overflow-hidden transition-all ${

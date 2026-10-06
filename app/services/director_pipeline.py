@@ -393,9 +393,12 @@ def _create_director_video_execution_profile(
     if normalized_resolution:
         video_params["resolution"] = normalized_resolution
     if profile.get("turbo_mode"):
-        from models.minimax_h3.turbo import minimax_h3_turbo_preset
+        from models.minimax_h3.turbo import (
+            minimax_h3_adapter_workflow,
+            minimax_h3_turbo_preset,
+        )
 
-        workflow = "ref2va" if model_def.get("omni_reference") else "fl2va"
+        workflow = minimax_h3_adapter_workflow(model_def)
         turbo_preset = minimax_h3_turbo_preset(
             video_params.get("minimax_h3_turbo_preset"),
             workflow=workflow,
@@ -666,7 +669,10 @@ def _prepare_director_generation_params(params: dict) -> None:
         params["sliding_window_memory_override"] = True
 
     if params.get("minimax_h3_turbo_mode") is True:
-        from models.minimax_h3.turbo import normalize_minimax_h3_turbo_request
+        from models.minimax_h3.turbo import (
+            minimax_h3_adapter_workflow,
+            normalize_minimax_h3_turbo_request,
+        )
 
         getter = getattr(_wgp, "get_model_def", None)
         model_def = getter(model_type) if callable(getter) else {}
@@ -676,11 +682,7 @@ def _prepare_director_generation_params(params: dict) -> None:
             full_checkpoint=bool(
                 (model_def or {}).get("minimax_h3_full_checkpoint", False)
             ),
-            workflow=(
-                "ref2va"
-                if (model_def or {}).get("omni_reference")
-                else "fl2va"
-            ),
+            workflow=minimax_h3_adapter_workflow(model_def),
         )
 
 
@@ -1261,22 +1263,19 @@ def _completed_clip_video_prefix(
 ) -> list[Optional[str]]:
     """Clip videos from a stopped run that still exist on disk.
 
-    A state file can outlive the media it references, so every entry is checked
-    before it is trusted to stand in for a clip that does not need rendering.
+    This used to read ``_pipelines[pid]`` alone, which a restart empties: measured on a real
+    project, 19 finished clips and 0 detected, so the resume regenerated from clip 1. The
+    record now comes from what outlives the process; resume_prefix.py decides it.
     """
 
     if not pid or clip_count <= 0:
         return []
+    from services.director.resume_prefix import completed_clip_video_prefix
+
     with _pipeline_lock:
         pipeline = _pipelines.get(pid) or {}
         saved = list(pipeline.get("_clip_video_files") or [])
-    if not saved:
-        return []
-    slots: list[Optional[str]] = [None] * clip_count
-    for index, filename in enumerate(saved[:clip_count]):
-        if filename and os.path.isfile(os.path.join(out_dir, filename)):
-            slots[index] = filename
-    return slots
+    return completed_clip_video_prefix(pid, clip_count, out_dir, saved)
 
 
 def _merge_resumed_clip_outputs(
@@ -8954,13 +8953,11 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
         out_dir = _wgp.save_path
 
     # ── Resume: submit only the clips that never rendered ────────────
-    # A stopped or interrupted run leaves its finished clips in the state
-    # file, but the batch was re-submitted whole, so a resume regenerated hours
-    # of finished work starting from the first frame. Every per-clip array
-    # below is derived from ``planned_clips`` -- including the audio offset,
-    # see ``_audio_timeline_start`` -- so slicing the inputs resumes exactly
-    # where the run stopped. A seamless run is one continuous rolling window
-    # with no per-clip boundary to resume from, and is left alone.
+    # A stopped run leaves its finished clips in the state file, but the batch was resubmitted
+    # whole, so a resume regenerated hours of finished work from the first frame. Every
+    # per-clip array below is derived from ``planned_clips`` -- including the audio offset, see
+    # ``_audio_timeline_start`` -- so slicing the inputs resumes exactly where the run stopped.
+    # A seamless run is one continuous rolling window with no boundary to resume from.
     resume_prefix: list[Optional[str]] = []
     clip_offset = 0
     if not seamless:

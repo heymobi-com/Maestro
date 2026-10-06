@@ -55,7 +55,7 @@ class GalleryStaysWhereTheUserIsTests(unittest.TestCase):
         self.assertIn("if (Math.abs(feedEl.scrollTop - desired) > 1) feedEl.scrollTop = desired", main)
         # An explicit click still owns the scroll while it is in flight.
         self.assertIn(
-            "if (!feedEl || scrollTargetIndex.current !== null) return",
+            "if (!feedEl || scrollTargetId.current !== null) return",
             main,
         )
 

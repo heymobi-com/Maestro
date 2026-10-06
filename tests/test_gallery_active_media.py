@@ -91,8 +91,11 @@ class GalleryActiveMediaTests(unittest.TestCase):
         self.assertIn("Four persistent controls", feed_item)
         self.assertIn('aria-label="More clip actions"', feed_item)
         self.assertIn('aria-label="Clip actions"', feed_item)
-        self.assertIn("spaceBelow > spaceAbove", feed_item)
-        self.assertIn("actionMenuOpensDown ? 'top-full mt-2' : 'bottom-full mb-2'", feed_item)
+        self.assertIn("window.visualViewport", feed_item)
+        self.assertIn("below > above", feed_item)
+        self.assertIn("menu.style.maxHeight", feed_item)
+        self.assertIn("menu.style.top", feed_item)
+        self.assertIn("createPortal(", feed_item)
         for label in (
             "Save as Recipe",
             "Regenerate with same settings",
@@ -135,9 +138,18 @@ class GalleryActiveMediaTests(unittest.TestCase):
             ROOT / "ui" / "src" / "components" / "MainContent" / "MainContent.tsx"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("const [measureEpoch, setMeasureEpoch] = useState(0)", main_content)
-        self.assertIn("estimatedItemHeight, measureEpoch]", main_content)
+        # A measured height is remembered against the card's identity, so a generation
+        # that prepends a video cannot hand a stored height to a different card.
+        self.assertIn("const key = heightKey(index)", main_content)
+        self.assertIn("measuredHeights.current.set(key, height)", main_content)
+        self.assertIn("return file ? outputIdentity(file) : `index:${index}`", main_content)
+        # Measuring bumps the epoch the offsets are computed from, so the reflow is
+        # immediate instead of waiting for the next scroll or resize.
         self.assertIn("setMeasureEpoch(e => e + 1)", main_content)
+        self.assertIn("scheduleCenteredSelection()", main_content)
+        # A zero-size record from a row leaving the DOM must not be cached; caching it
+        # collapsed the row and made navigation oscillate.
+        self.assertIn("if (!Number.isFinite(height) || height <= 0) return", main_content)
 
 
 if __name__ == "__main__":

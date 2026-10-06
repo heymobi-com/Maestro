@@ -20,6 +20,7 @@
     "pinokio.js": 8,
     "tests/test_director_cancellation.py": 232,
     "tests/test_director_music_cues.py": 8,
+    "tests/test_gallery_active_media.py": 11,
     "tests/test_h3_director_dialogue.py": 236,
     "ui/src/api/client.ts": 15,
     "ui/src/components/DirectorDashboard/DirectorDashboard.tsx": 592,
@@ -45,7 +46,8 @@
     "ui/src/api/client.ts": "Priority: upstream edits this file (deleteOutput in 2.4.1), and our delete guard lives inside it.",
     "app/launch.py": "Priority: upstream edits it; our 221 lines are the Director slot guard and its endpoints.",
     "ui/src/components/MainContent/MediaFeedItem.tsx": "Priority: upstream churn here is heavy (+102/-39 in 2.4.1).",
-    "app/requirements.txt": "One line that must survive: the setuptools pin, because ctranslate2 imports pkg_resources and without it every transcription is skipped."
+    "app/requirements.txt": "One line that must survive: the setuptools pin, because ctranslate2 imports pkg_resources and without it every transcription is skipped.",
+    "tests/test_gallery_active_media.py": "New seam: one upstream test asserted the private shape of the height store (useState keyed by outputIds), which our identity-keyed useRef cannot satisfy. It is rewritten to pin the behaviour it names -- a measured height reflows the virtualized offsets at once -- so the regression is still caught without pinning either implementation."
   },
   "upstream": "origin/main"
 }
