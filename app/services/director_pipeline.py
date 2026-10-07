@@ -54,6 +54,7 @@ from services.director_video_strategy import (
 )
 from services.h3_window_planner import compute_h3_window_boundaries
 from services import revision_llm
+from services.director.reference_intents import default_untyped_reference_intents
 from services.director.sequence_continuity import sequence_continuity_flags
 from services.text_integrity import repair_payload
 from models.minimax_h3.reference_manifest import (
@@ -2604,7 +2605,8 @@ def _director_h3_reference_manifest(
     from a voice sample.
     """
 
-    submitted_references = params.get("minimax_h3_references")
+    submitted_references = default_untyped_reference_intents(
+        params.get("minimax_h3_references"))
     if isinstance(submitted_references, list) and submitted_references:
         # The Director editor uses the exact same ordered manifest contract as
         # Studio. Keep that order so <Picture N>, <Video N>, and <Audio N>
@@ -3196,10 +3198,8 @@ def _parse_revision_envelope(text: str, current: str = "") -> dict:
         from services.director.h3_dialogue import looks_like_compiled_h3_prompt
         head = _PROMPT_FIELD_HEAD_RE.search(raw)
         if head and looks_like_compiled_h3_prompt(raw[head.start():]):
-            # An answer that explains first and then writes the prompt, without any
-            # marker, used to be read as one prompt: the prose, the quoted fields and
-            # the prompt went into the candidate together and the gate refused it for
-            # having five subject_definitions fields. The prose is the analysis.
+            # An answer that explains first and then writes the prompt has no marker, so the
+            # prose, the quoted fields and the prompt were read as one and the gate refused it.
             return {
                 "analysis": raw[: head.start()].strip(),
                 "question": "",

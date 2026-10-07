@@ -33,33 +33,17 @@ STAGED PROGRESSION — A PROCESS IS TOLD ACROSS SHOTS, NOT INSIDE ONE:
   the film -- "[Shot 9] At MM:31.500" -- tells the renderer the clip holds several shots, which is
   the other way a single clip becomes a fast succession of everything.
 
-CONTINUITY IS CHOSEN SHOT BY SHOT, AND IT IS WHAT KEEPS THE WORLD FROM DRIFTING:
+CONTINUITY IS CHOSEN SHOT BY SHOT AND KEEPS THE WORLD FROM DRIFTING:
 
-- Set continuity_strategy from what this moment of the film needs, and let it change from shot to
-  shot. "continuous" is the ordinary case inside one place and one moment: the shot carries the
-  world of the one before it, and the render is given a late frame of that clip as a reference for
-  blocking, environment, light and screen direction. It does NOT freeze the framing -- the camera
-  plan below is still this shot's own -- so use it freely for as long as a passage stays in one
-  place and one moment. "independent" is a real cut: a new place, a new time, a new point of view.
-  "extend_previous" asks for the same continuation at its tightest, opening where the previous
-  shot ended; it is the stronger request, not the only one.
-- Measured on a real project: the planner marked all 30 shots "independent", so every shot was
-  built from nothing, one place was re-described from scratch in each shot, and the film had no
-  continuity anywhere. Inside one place and one moment, "continuous" is the normal answer.
-- A film that carries everywhere has no cuts and loses its rhythm; a film that cuts everywhere
-  has no world and loses its story. The plan is where the two are separated, shot by shot, so the
-  choice can be read and argued with.
-- A shot marked "independent" is still the same film: the same people, wardrobe, world and
-  visual grammar continue across the cut, because a cut is an edit and not a reset.
+- "continuous" is the ordinary case inside one place and one moment: this shot carries the world
+  of the one before it, and the render is given a late frame of that clip as a reference for
+  blocking, environment, light and screen direction. It does NOT freeze the framing. Use it
+  freely for as long as a passage stays in one place and one moment.
+- "independent" is a real cut: a new place, a new time, a new point of view. "extend_previous"
+  asks for the same continuation at its tightest. A shot marked "independent" is still the same
+  film: the same people, wardrobe, world and visual grammar continue across the cut.
 
-CAMERA: NAME THE ANGLE AND THE LENS, NOT ONLY THE MOVEMENT:
-
-- camera_plan carries framing, angle, movement, movement_intensity and lens_feel. Decide all
-  five for every shot. Measured on a real 30-shot project, angle and lens_feel came back empty
-  in every shot, in two different local models, because the output example never showed them:
-  the two choices that most change how a frame reads were never made at all.
-- angle is where the camera sits in relation to the subject (eye level, low angle looking up,
-  high angle looking down, over the shoulder, top down). lens_feel is the character of the
-  optics (wide and close, long-lens compression, shallow depth of field, anamorphic, 50mm
-  natural). Both are decisions, so make them, and let them follow the energy of the section
-  instead of staying the same all film.
+CAMERA: decide all five camera_plan fields for every shot -- framing, angle, movement,
+movement_intensity and lens_feel. angle (eye level, low angle, high angle, over the shoulder,
+top down) and lens_feel (wide and close, long-lens compression, shallow depth, anamorphic) are
+the two that most change how a frame reads.
