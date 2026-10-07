@@ -11,6 +11,7 @@ import { OmniReferenceSection } from './OmniReferenceSection'
 import { GalleryInput } from '../shared/GalleryInput'
 import { InfoTooltip } from './InfoTooltip'
 import { ProjectBriefTemplate } from './ProjectBriefTemplate'
+import { ClipContinuityToggle } from './ClipContinuityToggle'
 import { formatSeconds, recommendedWindowProfile } from './DurationSlider'
 import { DurationPresetControl } from './DurationPresetControl'
 import { LONG_FORM_MAX_SECONDS, formatDuration } from '../../lib/durationPlanning'
@@ -1633,6 +1634,7 @@ function DirectorSetupPanel({ locked }: { locked: boolean }) {
             />
             <span className="text-[10px] text-text-secondary">Seamless</span>
           </label>
+          <ClipContinuityToggle locked={locked} />
           <label
             className={`flex items-center gap-1.5 select-none ${locked ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}
             title="Skip all review steps and generate automatically"

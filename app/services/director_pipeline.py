@@ -54,6 +54,7 @@ from services.director_video_strategy import (
 )
 from services.h3_window_planner import compute_h3_window_boundaries
 from services import revision_llm
+from services.director.sequence_continuity import sequence_continuity_flags
 from services.text_integrity import repair_payload
 from models.minimax_h3.reference_manifest import (
     split_exact_drive_audio_reference,
@@ -9754,6 +9755,9 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
     gen_params["_director_clip_total"] = len(clip_plans) + clip_offset
     if clip_offset:
         gen_params["multi_clip_defer_concat"] = True
+    # Per-project option, off by default: see director/sequence_continuity.py.
+    gen_params.update(sequence_continuity_flags(params, director_strategy,
+        omni_reference=OMNI_REFERENCE, clip_plans=clip_plans))
     _apply_director_h3_optimizations(
         gen_params,
         video_params,

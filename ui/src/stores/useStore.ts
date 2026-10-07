@@ -2110,6 +2110,7 @@ interface AppState {
   directorSpeakerMappings: SpeakerMapping[]
   directorAutoMode: boolean
   directorSeamless: boolean
+  directorSequenceContinuity: boolean; setDirectorSequenceContinuity: (v: boolean) => void
   directorShotImageGuidance: DirectorShotImageGuidance
   /** Completed LLM stream outputs, kept so the thinking/output boxes stay
    *  in the chat history after each stage finishes instead of vanishing. */
@@ -10276,6 +10277,7 @@ export const useStore = create<AppState>((set, get) => ({
   // to retake/review than one rolling-window render).
   directorAutoMode: true,
   directorSeamless: false,
+  directorSequenceContinuity: false, setDirectorSequenceContinuity: (v) => set({ directorSequenceContinuity: v }),
   directorShotImageGuidance: 'auto' as DirectorShotImageGuidance,
   directorLlmLog: [],
   directorSkill: null,
@@ -10969,8 +10971,7 @@ export const useStore = create<AppState>((set, get) => ({
 
   directorPlanPrompts: async () => {
     const { directorSceneDescription, directorAnalysis } = get()
-    // Ours: a written script replaces the analysed timeline, so the planner reads
-    // exactly what the user wrote. See stores/directorScriptSlice.ts.
+    // Ours: a written script replaces the analysed timeline. See stores/directorScriptSlice.ts.
     const directorPlannedClips = directorScriptTimeline(get(), get().directorPlannedClips)
     if (!directorPlannedClips.length || !directorSceneDescription.trim()) return
     set({ directorLoading: true, directorError: null, directorStep: 'plan' })
@@ -11009,8 +11010,7 @@ export const useStore = create<AppState>((set, get) => ({
         // Director v2: structured planning → rendering → validation
         const result = await api.directorV2Plan({
           skill_type: skillType,
-          // Ours: the viral planner is concept-driven, and a script's authored rows
-          // replace the analysed lyrics and travel as the source document too.
+          // Ours: the viral planner is concept-driven, and a script's rows travel as its source too.
           ...directorViralPlanOptions(skillType, directorSceneDescription),
           ...timelineOptions,
           clips: directorPlannedClips,
@@ -13660,8 +13660,7 @@ export const useStore = create<AppState>((set, get) => ({
       await api.deleteOutput(output.name, output.workspace)
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
-      // The refusal names the holding shot, and the question it implies belongs to
-      // the app: see stores/directorDeleteGuard.ts.
+      // The refusal names the holding shot: see stores/directorDeleteGuard.ts.
       if (!isShotInUseRefusal(message)) {
         console.error('Failed to delete output:', e)
         return { ok: false, error: message }
@@ -13686,7 +13685,7 @@ export const useStore = create<AppState>((set, get) => ({
     }
     const { directorPlannedClips, directorSceneDescription,
             directorAudioPath, directorAnalysis, directorReferenceImagePath,
-            directorAutoMode, directorSeamless, directorShotImageGuidance,
+            directorAutoMode, directorSeamless, directorSequenceContinuity, directorShotImageGuidance,
             directorResolution, directorAspectRatio,
             directorVideoMaxShotFramesByModel, directorH3TurboModeByModel,
             directorH3TurboPresetByModel, directorH3SolModeByModel,
@@ -13958,8 +13957,7 @@ export const useStore = create<AppState>((set, get) => ({
       }
     }
 
-    // Ours: the skill picks the pipeline, instead of every pass falling back to
-    // the music-video one. See stores/directorPlanRouting.ts.
+    // Ours: the skill picks the pipeline. See stores/directorPlanRouting.ts.
     const pipelineType = directorPipelineType(state.directorSkill, shortFilmPath)
     // A written script has no soundtrack (H3 generates the voices for its lines),
     // and its authored rows replace the analysed timeline and lyrics.
@@ -14001,6 +13999,7 @@ export const useStore = create<AppState>((set, get) => ({
         ? directorPlannedClips : undefined,
       prepared_clip_image_paths: preparedClipImagePaths,
       seamless: directorSeamless,
+      _director_sequence_continuity: directorSequenceContinuity,
       shot_image_guidance: directorShotImageGuidance,
       director_resolution_preset: directorResolution,
       director_aspect_ratio: directorAspectRatio,

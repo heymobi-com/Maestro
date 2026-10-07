@@ -26002,14 +26002,9 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     "multi_clip_concat_audio", None,
                 )
                 multi_clip_audio_start_sec = raw_params.pop("multi_clip_audio_start_sec", 0.0)
-                # A resume submits only the missing tail, so this batch defers the
-                # join: a tail join would publish a partial film under a _multiclip name.
-                multi_clip_defer_concat = bool(
-                    raw_params.pop("multi_clip_defer_concat", False)
-                )
-                omni_sequence_continuity = bool(
-                    raw_params.pop("_omni_sequence_continuity", False)
-                )
+                # A resumed batch defers the join: a tail join would publish a partial film.
+                multi_clip_defer_concat = bool(raw_params.pop("multi_clip_defer_concat", False))
+                omni_sequence_continuity = raw_params.pop("_omni_sequence_continuity", False)
                 try:
                     omni_sequence_target_frames = max(
                         0,
@@ -26191,7 +26186,9 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                         "cumulative_offset": True,
                         "audio_start_sec": multi_clip_audio_start_sec,
                         "concat_audio_path": multi_clip_concat_audio,
-                        "omni_sequence_continuity": omni_sequence_continuity,
+                        "omni_sequence_continuity": bool(omni_sequence_continuity[i])
+                        if isinstance(omni_sequence_continuity, (list, tuple))
+                        else bool(omni_sequence_continuity),
                         "target_total_frames": omni_sequence_target_frames,
                         "defer_concat": multi_clip_defer_concat,
                     }
@@ -26571,8 +26568,7 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 detached_clip_index = job["params"].get("_director_clip_index")
                 # The clip this rerun replaces: the gallery stacks the new take above it, and the older take can be deleted once accepted.
                 supersedes = job["params"].get("_director_supersedes")
-                # A resumed run numbers its own batch from zero, so the film position is the
-                # batch index plus this offset; without it every shot was filed 26 places early.
+                # A resumed batch numbers from zero: the offset is the film position.
                 try:
                     clip_index_offset = int(
                         job["params"].get("_director_clip_offset") or 0

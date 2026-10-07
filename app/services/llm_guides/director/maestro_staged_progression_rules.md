@@ -24,3 +24,31 @@ STAGED PROGRESSION — A PROCESS IS TOLD ACROSS SHOTS, NOT INSIDE ONE:
   each shot. State them once as continuity ("rain still falling across the warehouse") and
   reserve their changes -- it starts, it stops, lightning strikes -- for the shots where
   they actually change.
+
+CONTINUITY IS CHOSEN SHOT BY SHOT, WHERE THE IDEA ASKS FOR IT:
+
+- Set each shot's continuity_strategy from what the film needs at that point, and let it
+  change from shot to shot. "continuous" when this shot must read as the same place, the
+  same moment and the same staging carrying on: a performance held on one subject, a
+  process whose stages must be seen under one light, a movement followed rather than
+  restarted. "independent" when the film needs its edit: a new location, a new time, a new
+  point of view, a section that should land as a change. "extend_previous" only when the
+  next shot must open on the literal final frame, same camera, with no cut intended.
+- This is the effect that carries the idea, so choose it by asking what the idea needs from
+  this moment, not by habit. A film that continues everywhere has no cuts and loses its
+  rhythm; a film that cuts everywhere has no world and loses its story. The plan is where
+  the two are separated, shot by shot, so the choice can be read and argued with.
+- A shot marked "independent" is still the same film: the same people, wardrobe, world and
+  visual grammar continue across the cut, because a cut is an edit and not a reset.
+
+CAMERA: NAME THE ANGLE AND THE LENS, NOT ONLY THE MOVEMENT:
+
+- camera_plan carries framing, angle, movement, movement_intensity and lens_feel. Decide all
+  five for every shot. Measured on a real 30-shot project, angle and lens_feel came back empty
+  in every shot, in two different local models, because the output example never showed them:
+  the two choices that most change how a frame reads were never made at all.
+- angle is where the camera sits in relation to the subject (eye level, low angle looking up,
+  high angle looking down, over the shoulder, top down). lens_feel is the character of the
+  optics (wide and close, long-lens compression, shallow depth of field, anamorphic, 50mm
+  natural). Both are decisions, so make them, and let them follow the energy of the section
+  instead of staying the same all film.

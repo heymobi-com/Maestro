@@ -20,6 +20,7 @@ from ..schema import (
 from ..policies import build_character_rules_block, build_camera_style_block
 from ..vocal_activity import classify_vocal_intervals
 from ..music_performance import MUSIC_PERFORMANCE_RULES, PERFORMANCE_ROLES
+from ..planner_fallback import shot_placeholder
 from .base import BasePlanner
 
 
@@ -117,6 +118,7 @@ _MUSIC_IMAGE_FIELDS = frozenset({
 _MUSIC_SHOT_PROPERTIES = {
     "scene_goal": {"type": "string"},
     "scene_type": {"type": "string"},
+    "continuity_strategy": {"type": "string"},
     "subjects_on_screen": {
         "type": "array",
         "items": {
@@ -169,6 +171,7 @@ def _music_shot_schema(count: int, *, include_image_fields: bool) -> dict:
     required = [
         "scene_goal",
         "scene_type",
+        "continuity_strategy",
         "subjects_on_screen",
         "environment",
         "visual_style",
@@ -722,10 +725,7 @@ class MusicVideoPlanner(BasePlanner):
                     "wardrobe, world, and established visual grammar unless "
                     "the song section motivates a visible change.\n"
                     f"Previous planned ending: {previous_ending}\n\n"
-                    # The batch used to see only its own clips, with the previous
-                    # ending as its sole reference, and a small model satisfied
-                    # that by staying where it was. The whole list is context: it
-                    # shows what is still ahead so this batch can differ from it.
+                    # A batch used to see only its own clips; the whole list is context.
                     "THE WHOLE TIMELINE (context only: see where this batch sits "
                     f"and what is still ahead; plan ONLY clips {start + 1}-{end}):\n"
                     + "\n".join(clip_contexts)
@@ -751,27 +751,7 @@ class MusicVideoPlanner(BasePlanner):
                 stage="music_video_batch",
                 progress_label="music-video",
                 call_batch=call_batch,
-                fallback_factory=lambda index, clip: {
-                    "scene_goal": (
-                        f"Continue the {str(clip.get('label') or 'music')} "
-                        f"section at global clip {index + 1}"
-                    ),
-                    "scene_type": (
-                        "atmospheric"
-                        if str(clip.get("label") or "").lower()
-                        == "instrumental" else "performance"
-                    ),
-                    "subjects_on_screen": [],
-                    "environment": "",
-                    "visual_style": "",
-                    "lighting": "",
-                    "mood": "",
-                    "action_beats": [],
-                    "camera_plan": {"framing": "medium shot"},
-                    "ending_beat": "The performance continues into the next clip",
-                    "video_prompt": scene_description,
-                    "window_prompts": [],
-                },
+                fallback_factory=shot_placeholder,
             )
 
         num_character_refs = len(kwargs.get("character_ref_paths", []) or [])
@@ -902,7 +882,7 @@ OUTPUT — respond with ONLY a JSON array:
     "lighting": "Lighting",
     "mood": "Tone",
     "action_beats": ["Action 1", "Action 2"],
-    "camera_plan": {{"framing": "medium shot", "movement": "slow dolly in", "movement_intensity": "subtle"}},
+    "camera_plan": {{"framing": "medium shot", "angle": "eye level", "movement": "slow dolly in", "movement_intensity": "subtle", "lens_feel": "50mm, shallow"}},
     "ending_beat": "Final image",
 {image_output_fields}    "video_prompt": "Energetic prompt describing the visible performance, action, sound, and camera.",
 {keyframe_output_field}    "window_prompts": []
@@ -965,11 +945,7 @@ Write {len(clips)} structured shot plans. Go:"""
             user_prompt=user_prompt,
             system_prompt=system_prompt,
             max_tokens=max_tokens,
-            # A bounded batch keeps its reasoning. It used to force thinking off
-            # here, and the model notes in base.py say a small Gemma misses the
-            # structured rules without it: the middle of a long project is where
-            # that showed. The base helper gives a bounded Gemma a shorter budget
-            # than a whole short-form plan, and leaves Qwen thinking off.
+            # A bounded batch keeps its reasoning: a small Gemma needs it for the rules.
             bounded=bool(kwargs.get("_bounded_music_batch")),
             image_paths=image_paths,
             json_schema=_music_shot_schema(
@@ -1083,7 +1059,8 @@ Write {len(clips)} structured shot plans. Go:"""
                 scene_type=raw.get("scene_type", "performance" if section != "instrumental" else "atmospheric"),
                 source_mode_preference="i2v" if has_reference else "t2v",
                 image_strategy=image_strategy,
-                continuity_strategy="independent",
+                continuity_strategy=str(
+                    raw.get("continuity_strategy") or "").strip().lower() or "independent",
                 subjects_on_screen=subjects,
                 spatial_setup=raw.get("spatial_setup", ""),
                 environment=raw.get("environment", ""),

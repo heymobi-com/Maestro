@@ -397,13 +397,9 @@ class BasePlanner(ABC):
           - Other / unknown: budget=0, thinking off (conservative default).
         Callers can still pass an explicit thinking_budget to override.
 
-        bounded marks one batch of a long timeline. It used to force thinking
-        off there ("spend reasoning only on the short-form path"), which removed
-        exactly the help the model notes above say a small Gemma needs, and the
-        middle of a long project is where that showed. A bounded batch now gets
-        a smaller budget instead of none: enough to hold the rules, short of the
-        full pass. Qwen keeps thinking off either way, its documented runaway
-        case, and a failed parse still retries with thinking off and grammar on.
+        bounded marks one batch of a long timeline: it gets a smaller budget
+        instead of none, enough to hold the rules and short of the full pass, which
+        is what a small Gemma needs in the middle of a long project.
         """
         gen_fn = self._generate_streaming if (streaming and self._generate_streaming) else self._generate
         if gen_fn is None:
@@ -426,7 +422,10 @@ class BasePlanner(ABC):
                     # A bounded batch of a long timeline: reasoning on, a shorter budget.
                     thinking_budget = 2048 if bounded else 4096
                 else:
-                    # Qwen and any unknown style: thinking off
+                    # Qwen, the MoE's gemma_prefix and any unknown style: thinking off,
+                    # because planning relies on the JSON grammar the retry path only
+                    # reaches after a failure. Measured with it off, the MoE's design
+                    # rows came back complete; what thinking costs is a filled batch.
                     thinking_budget = 0
             except Exception:
                 thinking_budget = 0
