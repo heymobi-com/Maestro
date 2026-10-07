@@ -10,6 +10,7 @@ import { DirectorH3Optimizations } from './DirectorH3Optimizations'
 import { OmniReferenceSection } from './OmniReferenceSection'
 import { GalleryInput } from '../shared/GalleryInput'
 import { InfoTooltip } from './InfoTooltip'
+import { ProjectBriefTemplate } from './ProjectBriefTemplate'
 import { formatSeconds, recommendedWindowProfile } from './DurationSlider'
 import { DurationPresetControl } from './DurationPresetControl'
 import { LONG_FORM_MAX_SECONDS, formatDuration } from '../../lib/durationPlanning'
@@ -272,10 +273,8 @@ function LlmThinkingStream({ stage }: { stage: string }) {
   // bottom as new tokens arrive so the user always sees the latest
   // generation, just like a terminal tail.
   const streamScrollRef = useRef<HTMLDivElement>(null)
-  // The tail follows the stream only while the reader is already at its
-  // bottom. The box used to jump on every token, so nothing inside it could be
-  // read or copied while the LLM streamed. Scrolling up detaches the follow; a
-  // fresh stream re-attaches it.
+  // The tail follows the stream only while the reader is already at its bottom: the box
+  // used to jump on every token, so nothing in it could be read while the LLM streamed.
   const streamFollowRef = useRef(true)
   const previousStreamRef = useRef('')
 
@@ -675,11 +674,9 @@ export function DirectorChat() {
       .join(', ')
   }, [plannedClips])
 
-  // Auto-scroll follows the newest content only while the reader is already at
-  // the bottom. Automatic clip generation rewrites loadingMessage for every
-  // clip, and the old unconditional scrollTo yanked the view to the end each
-  // time, so the prompt history could not be read or copied while it rendered.
-  // Scrolling up detaches the follow; returning to the bottom re-attaches it.
+  // Auto-scroll follows the newest content only while the reader is at the bottom: automatic
+  // clip generation rewrites loadingMessage per clip, and the old unconditional scrollTo
+  // yanked the view to the end each time, so the history could not be read while it rendered.
   const followBottomRef = useRef(true)
 
   const handleMessagesScroll = useCallback(() => {
@@ -1334,6 +1331,7 @@ export function DirectorChat() {
       {/* Chat input bar */}
       <div data-testid="director-composer" className="min-w-0 px-4 py-3 border-t border-border space-y-2">
         <div className="flex items-end gap-2">
+          <ProjectBriefTemplate onInsert={v => { setChatInput(v); if (step === 'style') setSceneDescription(v) }} disabled={!chatInputEnabled || mvGenerateSetup} />
           {/* Auto-grows with content (issue #11). The composer bar is the
               last child of the panel's flex column, so extra height is
               taken from the messages area above — the box visually

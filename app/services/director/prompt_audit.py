@@ -37,6 +37,7 @@ from services.director.h3_dialogue import (
     h3_unresolved_speaker_cue_problems,
 )
 from services.director.h3_dialogue import project_subject_lock as _project_subject_lock
+from services.director.project_brief import audit_project_brief
 
 # One ``subject_definitions:`` field head. Emitting it twice is how a shot ends up
 # declaring its cast in two blocks.
@@ -255,6 +256,13 @@ def audit_project_prompts(
             if context:
                 break
     lock = project_subject_lock(context)
+    used_subjects = {
+        int(match.group(1))
+        for clip in clips
+        for match in _SUBJECT_ANY_RE.finditer(
+            str((clip or {}).get("_director_h3_source_prompt") or "")
+        )
+    }
 
     # The order the project writes its action sections in most of the time is the order a
     # shot is expected to follow; the deviations are what make editing heterogeneous.
@@ -286,6 +294,7 @@ def audit_project_prompts(
     return {
         "shots": len(clips),
         "subject_lock": {number: name for number, name in sorted(lock.items())},
+        "brief": audit_project_brief(context, used_subjects=used_subjects),
         "action_order": list(dominant),
         # Keyed by the labels joined, because a JSON object cannot be keyed by a list.
         "action_order_variants": {
@@ -315,6 +324,28 @@ def format_audit_report(audit: dict[str, Any], *, limit: int = 8) -> str:
             f"  action sections are written {len(variants)} different way(s); the project's "
             f"own order is {audit.get('action_order')}"
         )
+    brief = audit.get("brief") or {}
+    if brief.get("chars"):
+        lines.append(
+            f"  project text: {brief['chars']} characters; "
+            f"{brief.get('travelling_chars', 0)} of them reach a shot "
+            f"(budget {brief['budget']})"
+        )
+        for label in ("travelling", "dropped", "story"):
+            listed = brief.get(label) or []
+            if not listed:
+                continue
+            what = {
+                "travelling": "copied into every shot",
+                "dropped": "dropped before a shot",
+                "story": "the film's story, not copied into shots",
+            }[label]
+            lines.append(
+                f"    {what}: "
+                + ", ".join(f"{name} ({size})" for name, size in listed[:6])
+            )
+    for note in brief.get("notes") or []:
+        lines.append(f"    ! {note}")
     totals = audit.get("totals") or {}
     if not totals:
         lines.append("  no inconsistencies found.")

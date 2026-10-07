@@ -29,7 +29,8 @@ if _APP_DIR not in sys.path:
 
 from services.director import h3_dialogue  # noqa: E402
 from services.director.h3_dialogue import compile_h3_official_prompt  # noqa: E402
-from services.director.project_brief import clip_project_context  # noqa: E402
+from services.director.project_brief import audit_project_brief, clip_project_context  # noqa: E402
+from services.director.prompt_audit import format_audit_report  # noqa: E402
 
 SHOT = "A wide shot of S2 standing at the piano, his mouth remaining closed."
 # The mode a music video with reference images actually renders in. The other mode has a
@@ -148,6 +149,89 @@ class TheFilmStoryStaysOutOfTheClipTests(unittest.TestCase):
 
         self.assertIn("creeper plants", untrimmed)
         self.assertGreater(len(untrimmed), len(kept))
+
+
+class TheBriefReportTests(unittest.TestCase):
+    """What a director needs to see before rendering: what their text will do."""
+
+    def _over_budget_brief(self):
+        filler = "x" * 1200
+        return (
+            "SUBJECT LOCK (critical, non-negotiable):\n"
+            "- <Subject 1> is ALWAYS Valeria. <Subject 2> is ALWAYS Ricardo.\n\n"
+            f"CHARACTERS AND BINDINGS:\n<Subject 1> (S1): {filler}\n\n"
+            f"AUDIO-DRIVEN GENERATION:\n- {filler}\n\n"
+            f"AMBIENCE:\n{filler}\n\n"
+            f"DESCRIPTION:\n{'w' * 1500}"
+        )
+
+    def test_the_film_story_is_reported_as_not_travelling(self):
+        brief = audit_project_brief(BRIEF)
+
+        self.assertEqual([name for name, _ in brief["story"]], ["DESCRIPTION"])
+        self.assertNotIn(
+            "DESCRIPTION", [name for name, _ in brief["travelling"]],
+        )
+
+    def test_the_sections_that_do_travel_are_named_with_their_size(self):
+        brief = audit_project_brief(BRIEF)
+
+        names = [name for name, _ in brief["travelling"]]
+        self.assertIn("CHARACTERS AND BINDINGS", names)
+        self.assertIn("AUDIO-DRIVEN GENERATION", names)
+        self.assertIn("SINGER", names)
+        self.assertIn("AMBIENCE", names)
+        for _, size in brief["travelling"]:
+            self.assertGreater(size, 0)
+
+    def test_a_brief_over_the_budget_names_what_the_budget_will_drop(self):
+        brief = audit_project_brief(self._over_budget_brief())
+
+        self.assertGreater(brief["chars"], brief["budget"])
+        self.assertIn("AMBIENCE", [name for name, _ in brief["dropped"]])
+        self.assertLessEqual(brief["travelling_chars"], brief["budget"])
+        self.assertTrue(any("budget" in note for note in brief["notes"]))
+
+    def test_the_subject_lock_is_reported_when_the_project_declares_one(self):
+        brief = audit_project_brief(self._over_budget_brief())
+
+        self.assertEqual(brief["subject_lock"], {1: "Valeria", 2: "Ricardo"})
+        self.assertFalse(any("SUBJECT LOCK" in note for note in brief["notes"]))
+
+    def test_two_subjects_without_a_lock_are_reported(self):
+        brief = audit_project_brief(BRIEF, used_subjects=[1, 2])
+
+        self.assertTrue(any("no SUBJECT LOCK" in note for note in brief["notes"]))
+
+    def test_one_subject_without_a_lock_is_not_reported(self):
+        brief = audit_project_brief(BRIEF, used_subjects=[1, 1])
+
+        self.assertFalse(any("SUBJECT LOCK" in note for note in brief["notes"]))
+
+    def test_a_block_with_no_heading_is_named_as_one(self):
+        brief = audit_project_brief("<Subject 1> (S1): " + "a woman in a red dress. " * 20)
+
+        self.assertIn("(no heading)", [name for name, _ in brief["travelling"]])
+        self.assertTrue(any("no section heading" in note for note in brief["notes"]))
+
+    def test_an_empty_brief_says_so_without_failing(self):
+        brief = audit_project_brief("")
+
+        self.assertEqual(brief["chars"], 0)
+        self.assertEqual(brief["travelling"], [])
+        self.assertIn("the project text is empty", brief["notes"])
+
+    def test_a_narrative_heading_is_read_whatever_its_case(self):
+        """A director writing "Description:" means the same section."""
+
+        self.assertNotIn("creeper plants", clip_project_context("Description:\n" + "creeper plants grow. " * 10))
+
+    def test_the_report_shows_the_brief_even_with_no_shot_findings(self):
+        report = format_audit_report({"shots": 3, "brief": audit_project_brief(BRIEF)})
+
+        self.assertIn("project text:", report)
+        self.assertIn("reach a shot", report)
+        self.assertIn("the film's story, not copied into shots: DESCRIPTION", report)
 
 
 if __name__ == "__main__":
