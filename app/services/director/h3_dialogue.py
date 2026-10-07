@@ -20,6 +20,7 @@ from services.dialogue_timing import (
 )
 from services.director import audio_driven_transcript as _transcript
 from services.director import performance_expression as _expression
+from services.director.h3_single_shot_times import strip_loose_cut_times
 from services.director.project_brief import clip_project_context as _clip_context
 from services.h3_prompt_budget import (
     H3_ENHANCED_TEXT_TOKEN_TARGET as _H3_DIRECTOR_TEXT_TOKEN_BUDGET,
@@ -4880,9 +4881,9 @@ def compile_h3_official_prompt(
         body = re.sub(r"^\s*\[Shot\s+1\]\s*", "", body, flags=re.IGNORECASE)
         body = f"[Shot 1] {body}".strip()
         body, _ = _align_h3_time_markers(body, audio_start_seconds)
-        # After the time markers are aligned, because alignment needs the
-        # ``[Shot N] At ...`` shape that this step removes.
-        body = _single_shot_body(body)
+        # After alignment: it needs the ``[Shot N] At ...`` shape this removes, and a
+        # loose ``At MM:SS.mmm`` would otherwise read as a cut inside the one shot.
+        body = strip_loose_cut_times(_single_shot_body(body))[0]
         subject_definitions = _ref2va_subject_definitions(
             subjects or [],
             registry,
@@ -4946,9 +4947,9 @@ def compile_h3_official_prompt(
         compiled_body, _ = _align_h3_time_markers(
             compiled_body, audio_start_seconds,
         )
-        # Before the shot numbers are read, so a clip-local header can no longer
-        # inherit the planner's film-global number.
-        compiled_body = _single_shot_body(compiled_body)
+        # Before the shot numbers are read, so a clip-local header cannot inherit the
+        # planner's film-global number, and a loose timestamp cannot read as a cut.
+        compiled_body = strip_loose_cut_times(_single_shot_body(compiled_body))[0]
         shot_numbers = [int(value) for value in re.findall(
             r"\[Shot\s+(\d+)\]", compiled_body, flags=re.IGNORECASE,
         )]
