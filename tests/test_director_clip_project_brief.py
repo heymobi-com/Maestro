@@ -233,6 +233,41 @@ class TheBriefReportTests(unittest.TestCase):
         self.assertIn("reach a shot", report)
         self.assertIn("the film's story, not copied into shots: DESCRIPTION", report)
 
+    def test_a_camera_heading_stays_out_of_the_clips(self):
+        """Measured on a real project: "CAMERA:" reached all 30 compiled prompts, and every
+        clip orbited the same way at the same speed while the plan underneath held 18 distinct
+        movements, 10 of them static."""
+
+        brief = (
+            "CHARACTERS AND BINDINGS:\n<Subject 1> (S1): Martha.\n\n"
+            "CAMERA:\ncinematic takes, including orbit shots where appropiate.\n\n"
+            "AMBIENCE:\na cavernous warehouse with a glossy floor."
+        )
+
+        kept = clip_project_context(brief)
+
+        self.assertNotIn("orbit", kept)
+        self.assertIn("CHARACTERS AND BINDINGS", kept)
+        self.assertIn("AMBIENCE", kept)
+
+    def test_the_report_names_the_camera_section_as_not_copied_into_shots(self):
+        brief = audit_project_brief(
+            "CAMERA:\ncinematic takes, including orbit shots.\n\nAMBIENCE:\na warehouse."
+        )
+        not_copied = [label for label, _size in brief["story"]]
+
+        self.assertIn("CAMERA", not_copied)
+        self.assertNotIn("AMBIENCE", not_copied)
+
+    def test_a_heading_it_does_not_know_still_travels(self):
+        brief = clip_project_context(
+            "PROPS:\na single upright piano under a spotlight.\n\nCAMERA:\norbits."
+        )
+
+        self.assertIn("PROPS", brief)
+        self.assertIn("piano", brief)
+        self.assertNotIn("orbits", brief)
+
 
 if __name__ == "__main__":
     unittest.main()

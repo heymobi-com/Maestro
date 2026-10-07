@@ -11,6 +11,15 @@ Orbit Shot". The model was therefore asked to perform the entire film inside eve
 which is the reported "it loops all the instructions in every clip instead of building a
 story". The plan already states which moment each clip covers, and that moment is in the
 clip's own prompt, so the film's narrative is the one section that has to stay out.
+
+The same project then showed the other half of the same mistake. Its brief also had a
+``CAMERA:`` section, this one written to stay because a camera language sounds like the clip's
+own business, and it read "including close up, medium shot open shot, sand orbit shots where
+appropiate". That heading appeared in **all 30** compiled prompts, so every clip orbited in the
+same direction at the same speed -- the reported "un movimiento de camara homogeneo y rapido en
+sentido rotativo hacia el mismo lado en todas las tomas" -- while the plan underneath held 18
+distinct movements, 10 of them static, and was never seen. A heading that names a per-shot
+decision therefore travels only as far as the planner, and reaches the clips through the plan.
 """
 
 from __future__ import annotations
@@ -27,6 +36,20 @@ _NARRATIVE_HEADINGS = frozenset({
     "SCRIPT", "SCREENPLAY", "OUTLINE", "BEATS", "SEQUENCE", "SCENE LIST",
     "SHOT LIST", "STORYBOARD", "SCENE BREAKDOWN",
 })
+
+# Headings that prescribe a decision the PLAN already makes shot by shot. One of these travels
+# into every clip as a single instruction repeated once per shot, which is worse than not
+# travelling at all: the plan's own choice is overridden by the brief's, identically everywhere.
+# Measured on a real 30-shot project whose brief read "including close up, medium shot open shot,
+# sand orbit shots where appropiate": "CAMERA:" appeared in all 30 compiled prompts and every
+# clip performed an orbit, while the plan underneath held 18 distinct movements, 10 of them
+# static, and was never seen. The camera a film wants belongs once in the concept the planner
+# reads, and reaches the clips through the plan instead.
+_PER_SHOT_HEADINGS = frozenset({
+    "CAMERA", "CAMERA WORK", "CAMERA MOVEMENT", "CAMERAWORK", "CAMERA PLAN",
+    "CINEMATOGRAPHY", "LENS", "LENSES", "SHOT SIZES", "EDITING", "EDITS", "CUTS",
+})
+_DROPPED_HEADINGS = _NARRATIVE_HEADINGS | _PER_SHOT_HEADINGS
 
 # A ``HEADING:`` on a line of its own, short enough that a prose sentence ending in a colon
 # is not mistaken for one. Parentheses and lower case are allowed: a director writes
@@ -58,7 +81,7 @@ def _is_film_narrative(section: str) -> bool:
 
     first = section.splitlines()[0].strip()
     match = _HEADING_RE.match(first)
-    return bool(match) and match.group(1).strip().upper() in _NARRATIVE_HEADINGS
+    return bool(match) and match.group(1).strip().upper() in _DROPPED_HEADINGS
 
 
 def _sections(text: Any) -> list[str]:

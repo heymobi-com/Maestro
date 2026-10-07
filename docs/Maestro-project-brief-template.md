@@ -60,8 +60,13 @@ effects carry the meaning. This is the planner's text.>
 3. **`AUDIO-DRIVEN GENERATION` and `VOICES`** — the contract that stops invented speech and
    wrong voices. These also rank highest when the 3,000-character budget forces a cut, because
    a section that names a voice's pitch or gender outranks one that merely mentions speakers.
-4. **`CAMERA` and `AMBIENCE`** — the world and the look, so the film does not change aspect
-   between shots. Keep the visual world here, not in `DESCRIPTION`.
+4. **`AMBIENCE`** — the world and the look, so the film does not change aspect between shots.
+   Keep the visual world here, not in `DESCRIPTION`. A `CAMERA` section belongs at this level
+   too, but it travels only as far as the **planner**: measured on a real project whose brief
+   asked for "orbit shots where appropiate", that heading reached all **30** compiled prompts,
+   every clip orbited the same way at the same speed, and the plan's own camera -- 18 distinct
+   movements, 10 of them static -- was never seen. The camera is a per-shot decision, so the
+   planner reads it once and the plan carries it into the clips.
 5. **`DESCRIPTION` last, and long if you want** — the story belongs to the planner. It is the
    one section the per-shot prompt deliberately does not carry: a clip that is told the whole
    film performs the whole film. The planner reads it and distributes it into shots.
