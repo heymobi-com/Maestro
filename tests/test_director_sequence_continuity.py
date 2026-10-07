@@ -212,12 +212,34 @@ class ThePerShotDecisionTests(unittest.TestCase):
 class ThePlanDecidesTests(unittest.TestCase):
     """The planning chooses the effect that carries the idea, shot by shot."""
 
-    def test_a_shot_that_declares_continuity_carries_the_previous_one(self):
+    def test_a_shot_that_asks_to_carry_on_carries_the_previous_one(self):
         """Even across a change of place: the plan asked for it."""
 
         plans = [
+            {"environment": "a warehouse", "continuity_strategy": "extend_previous"},
+            {"environment": "a rainy street", "continuity_strategy": "extend_previous"},
+        ]
+
+        self.assertEqual(continuity_run(plans), [False, True])
+
+    def test_continuous_is_the_ordinary_same_scene_shot_and_carries_the_world(self):
+        """Inside one place and one moment this is the normal answer, not a special case."""
+
+        plans = [
             {"environment": "a warehouse", "continuity_strategy": "continuous"},
-            {"environment": "a rainy street", "continuity_strategy": "continuous"},
+            {"environment": "a warehouse", "continuity_strategy": "continuous"},
+        ]
+
+        self.assertEqual(continuity_run(plans), [False, True])
+
+    def test_continuous_carries_even_when_the_shot_restates_the_place_its_own_way(self):
+        """The declaration decides, not the wording of the environment prose."""
+
+        plans = [
+            {"environment": "Cavernous, brutalist warehouse with a glossy floor",
+             "continuity_strategy": "continuous"},
+            {"environment": "Warehouse, center stage, under the stark spotlight",
+             "continuity_strategy": "continuous"},
         ]
 
         self.assertEqual(continuity_run(plans), [False, True])
@@ -237,7 +259,7 @@ class ThePlanDecidesTests(unittest.TestCase):
 
         plans = [
             {"environment": "a warehouse"},
-            {"environment": "a rainy street", "_director_continuity_strategy": "continuous"},
+            {"environment": "a rainy street", "_director_continuity_strategy": "extend_previous"},
         ]
 
         self.assertEqual(continuity_run(plans), [False, True])
@@ -246,7 +268,7 @@ class ThePlanDecidesTests(unittest.TestCase):
         """The bound is a floor under the fallback, not a ceiling over the author."""
 
         plans = [
-            {"environment": "a warehouse", "continuity_strategy": "continuous"}
+            {"environment": "a warehouse", "continuity_strategy": "extend_previous"}
             for _ in range(MAX_RUN + 2)
         ]
 
@@ -265,7 +287,7 @@ class ThePlanDecidesTests(unittest.TestCase):
     def test_the_batch_is_handed_one_flag_per_shot(self):
         plans = [
             {"environment": "a warehouse", "continuity_strategy": "independent"},
-            {"environment": "a rainy street", "continuity_strategy": "continuous"},
+            {"environment": "a rainy street", "continuity_strategy": "extend_previous"},
             {"environment": "a rainy street", "continuity_strategy": "independent"},
         ]
 

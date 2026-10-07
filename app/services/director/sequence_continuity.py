@@ -6,7 +6,9 @@ video:
 * The final-frame handoff (``extend_previous`` plus a shared ``continuity_group``) lives
   entirely inside ``BOUNDED_START_END``. All three of its call sites require that strategy, so
   for ``omni_reference`` -- the strategy an H3 music video with character references uses -- it
-  can never fire. Declaring it per shot would be inert, which is why this option does not.
+  can never fire on its own. What this option does instead is read that same declaration, the
+  one the planners already write, and answer it on the reference path with the frame the model
+  can actually see.
 * H3's own sequence continuity appends a late frame of the clip that was just rendered to the
   next clip's references, with the role "blocking, environment state, lighting, and screen
   direction only", and binds that ``<Picture N>`` in the next prompt. The engine path is
@@ -37,9 +39,20 @@ OPTION = "_director_sequence_continuity"
 # the cut where the story needs one.
 MAX_RUN = 3
 
-# What a shot's own ``continuity_strategy`` means here. "extend_previous" asks for more than
-# this path can give -- the reference model renders without a start frame -- so it is read as
-# the strongest continuity the path has rather than silently dropped.
+# What a shot's own ``continuity_strategy`` means here, in the vocabulary the planners already
+# write: "continuous" is a shot that carries the world of the one before it on an ordinary cut
+# inside one scene, and "extend_previous" is the same continuation asked for at its tightest.
+# Both are served by the only frame this path can show the model -- a late frame of the previous
+# clip, as a composition-only reference -- because a reference model renders without a start
+# frame, so a frame it can see is the closest thing to a handoff it has. "independent" is a real
+# cut: a new place, a new time, a new point of view.
+#
+# Measured on the same real project, which is why both halves are named here. Reading only
+# "extend_previous" leaves the option with nothing that can ever trigger it: the planner's own
+# guide tells it to use that value sparingly, for a literal continuation, which is the one thing
+# this path cannot do. Reading only "continuous" makes it trigger everywhere, because that is the
+# ordinary same-scene case. The two together are the request, and the plan decides where it is
+# made.
 _CONTINUES = frozenset({"continuous", "extend_previous"})
 _CUTS = frozenset({"independent"})
 
@@ -54,10 +67,12 @@ _GROUP_KEYS = ("continuity_group", "_director_continuity_group")
 def continuity_run(clip_plans: Any) -> list[bool]:
     """For each shot, whether it carries the one before it.
 
-    The plan decides. A shot whose ``continuity_strategy`` says it continues the previous one
-    carries it; a shot that says it is independent cuts. That field is the planner's own
-    judgement of what the story needs, which is the only thing that knows where a cut serves
-    the idea and where it breaks it.
+    The plan decides. A shot declared ``continuous`` -- the ordinary shot inside one place and
+    one moment -- carries the world of the one before it, and ``extend_previous`` asks for the
+    same continuation at its tightest. A shot declared ``independent`` cuts, because that is a
+    new place, time or point of view. That field is the planner's own judgement of what the
+    story needs, which is the only thing that knows where a cut serves the idea and where it
+    breaks it.
 
     Where the plan is silent -- a project planned before this option existed, or a planner that
     declares nothing -- only what the plan states plainly is used: two shots continue when they

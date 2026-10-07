@@ -118,7 +118,7 @@ _MUSIC_IMAGE_FIELDS = frozenset({
 _MUSIC_SHOT_PROPERTIES = {
     "scene_goal": {"type": "string"},
     "scene_type": {"type": "string"},
-    "continuity_strategy": {"type": "string"},
+    "continuity_strategy": {"type": "string", "enum": ["independent", "continuous", "extend_previous"]},
     "subjects_on_screen": {
         "type": "array",
         "items": {

@@ -24,20 +24,31 @@ STAGED PROGRESSION — A PROCESS IS TOLD ACROSS SHOTS, NOT INSIDE ONE:
   each shot. State them once as continuity ("rain still falling across the warehouse") and
   reserve their changes -- it starts, it stops, lightning strikes -- for the shots where
   they actually change.
+- One shot holds ONE stage, whatever its length, and a stage is never compressed with adverbs:
+  "rapidly", "instantly" and "with unnatural speed" are what turn a process into an unreadable
+  flash. Measured on a real 5.6-second shot: growing, blooming and wilting were all asked for in
+  that one shot, with those adverbs carrying the compression, and the whole cycle went past in a
+  blur. If two stages want the same moment, they belong in two shots.
+- The body of a shot carries exactly one [Shot 1] and no timestamp. Numbering it by its place in
+  the film -- "[Shot 9] At MM:31.500" -- tells the renderer the clip holds several shots, which is
+  the other way a single clip becomes a fast succession of everything.
 
-CONTINUITY IS CHOSEN SHOT BY SHOT, WHERE THE IDEA ASKS FOR IT:
+CONTINUITY IS CHOSEN SHOT BY SHOT, AND IT IS WHAT KEEPS THE WORLD FROM DRIFTING:
 
-- Set each shot's continuity_strategy from what the film needs at that point, and let it
-  change from shot to shot. "continuous" when this shot must read as the same place, the
-  same moment and the same staging carrying on: a performance held on one subject, a
-  process whose stages must be seen under one light, a movement followed rather than
-  restarted. "independent" when the film needs its edit: a new location, a new time, a new
-  point of view, a section that should land as a change. "extend_previous" only when the
-  next shot must open on the literal final frame, same camera, with no cut intended.
-- This is the effect that carries the idea, so choose it by asking what the idea needs from
-  this moment, not by habit. A film that continues everywhere has no cuts and loses its
-  rhythm; a film that cuts everywhere has no world and loses its story. The plan is where
-  the two are separated, shot by shot, so the choice can be read and argued with.
+- Set continuity_strategy from what this moment of the film needs, and let it change from shot to
+  shot. "continuous" is the ordinary case inside one place and one moment: the shot carries the
+  world of the one before it, and the render is given a late frame of that clip as a reference for
+  blocking, environment, light and screen direction. It does NOT freeze the framing -- the camera
+  plan below is still this shot's own -- so use it freely for as long as a passage stays in one
+  place and one moment. "independent" is a real cut: a new place, a new time, a new point of view.
+  "extend_previous" asks for the same continuation at its tightest, opening where the previous
+  shot ended; it is the stronger request, not the only one.
+- Measured on a real project: the planner marked all 30 shots "independent", so every shot was
+  built from nothing, one place was re-described from scratch in each shot, and the film had no
+  continuity anywhere. Inside one place and one moment, "continuous" is the normal answer.
+- A film that carries everywhere has no cuts and loses its rhythm; a film that cuts everywhere
+  has no world and loses its story. The plan is where the two are separated, shot by shot, so the
+  choice can be read and argued with.
 - A shot marked "independent" is still the same film: the same people, wardrobe, world and
   visual grammar continue across the cut, because a cut is an edit and not a reset.
 
