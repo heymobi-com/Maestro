@@ -23,7 +23,9 @@ def load_guide(filename: str) -> str:
         return ""
     try:
         with open(filepath, "r", encoding="utf-8") as f:
-            return f.read().strip()
+            content = f.read().strip()
     except Exception as e:
         print(f"[GuideLoader] Failed to load {filename}: {e}")
         return ""
+    from .staged_progression import with_shot_progression
+    return with_shot_progression(content, filename)
