@@ -3,7 +3,6 @@
     "app/launch.py": 179,
     "app/requirements.txt": 6,
     "app/services/audio_analysis.py": 173,
-    "app/services/director/guide_loader.py": 3,
     "app/services/director/h3_dialogue.py": 3014,
     "app/services/director/orchestrator.py": 20,
     "app/services/director/planners/base.py": 50,
@@ -48,8 +47,7 @@
     "app/launch.py": "Priority: upstream edits it; our 221 lines are the Director slot guard and its endpoints.",
     "ui/src/components/MainContent/MediaFeedItem.tsx": "Priority: upstream churn here is heavy (+102/-39 in 2.4.1).",
     "app/requirements.txt": "One line that must survive: the setuptools pin, because ctranslate2 imports pkg_resources and without it every transcription is skipped.",
-    "tests/test_gallery_active_media.py": "New seam: one upstream test asserted the private shape of the height store (useState keyed by outputIds), which our identity-keyed useRef cannot satisfy. It is rewritten to pin the behaviour it names -- a measured height reflows the virtualized offsets at once -- so the regression is still caught without pinning either implementation.",
-    "app/services/director/guide_loader.py": "New seam, 3 lines: the hook that attaches the staged-progression contract to the guides that write shots. It is here because upstream has touched this file with a single commit, while planners/music_video.py -- the other home for that text -- has eight against it. Upstream's guide files stay byte-identical on disk: the contract and its text live in our own staged_progression.py and maestro_staged_progression_rules.md."
+    "tests/test_gallery_active_media.py": "New seam: one upstream test asserted the private shape of the height store (useState keyed by outputIds), which our identity-keyed useRef cannot satisfy. It is rewritten to pin the behaviour it names -- a measured height reflows the virtualized offsets at once -- so the regression is still caught without pinning either implementation."
   },
   "upstream": "origin/main"
 }

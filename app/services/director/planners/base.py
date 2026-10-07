@@ -29,6 +29,7 @@ except ImportError:
     _HAVE_JSON_REPAIR = False
 
 from ..schema import ProductionPlan, ShotPlan
+from ..staged_progression import with_shot_progression
 from services.text_integrity import repair_payload, repair_text
 
 # Grammar fallback for the JSON-fix retry when the caller didn't provide a
@@ -262,8 +263,7 @@ class BasePlanner(ABC):
                     rows.append(dict(fallback or {}))
                     filled += 1
                 if filled:
-                    # Said out loud: a generic clip is a batch that did not come back, not
-                    # the model running out of ideas, and the two looked identical before.
+                    # A generic clip is a batch that did not come back, not the model running out of ideas; the two looked identical.
                     print(
                         f"[Planner] {filled} of {expected} {progress_label} plans in batch "
                         f"{batch_index} were filled deterministically because the model's "
@@ -336,8 +336,8 @@ class BasePlanner(ABC):
             ).lower() if isinstance(entry, dict) else str(entry or "").lower()
         except Exception:
             return default
-        # A whole size token, so that "14b" is a 14-billion model and not a 4B one:
-        # matching the digits of "4b" inside "14b" reported every 14B model as small.
+        # A whole size token, so "14b" is a 14-billion model and not a 4B one: matching the
+        # digits of "4b" inside "14b" reported every 14B model as small.
         sizes = [
             int(match) for match in
             re.findall(r"(?<![0-9])([0-9]{1,2})b(?![0-9a-z])", descriptor)
@@ -414,6 +414,7 @@ class BasePlanner(ABC):
         # planner rather than being limited to H3 prompt compilation.
         user_prompt = repair_text(user_prompt)
         system_prompt = repair_text(system_prompt)
+        system_prompt = with_shot_progression(system_prompt, self.skill_type)
 
         # Model-aware thinking budget when caller didn't specify
         if thinking_budget is None:
@@ -422,8 +423,7 @@ class BasePlanner(ABC):
                 entry = llm_service._active_registry_entry()
                 style = (entry or {}).get("thinking_style", "qwen") if isinstance(entry, dict) else "qwen"
                 if style == "gemma":
-                    # A bounded batch of a long timeline: reasoning on, but a shorter
-                    # budget than a whole short-form plan gets.
+                    # A bounded batch of a long timeline: reasoning on, a shorter budget.
                     thinking_budget = 2048 if bounded else 4096
                 else:
                     # Qwen and any unknown style: thinking off
