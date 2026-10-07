@@ -20,6 +20,7 @@ from services.dialogue_timing import (
 )
 from services.director import audio_driven_transcript as _transcript
 from services.director import performance_expression as _expression
+from services.director.project_brief import clip_project_context as _clip_context
 from services.h3_prompt_budget import (
     H3_ENHANCED_TEXT_TOKEN_TARGET as _H3_DIRECTOR_TEXT_TOKEN_BUDGET,
     fit_h3_base_prompt,
@@ -2799,7 +2800,7 @@ def _source_prompt_parts(
         )
 
     context = _normalized_space(
-        pack_project_context(normalize_h3_text(project_context)),
+        pack_project_context(_clip_context(normalize_h3_text(project_context))),
     )
     # The single-shot guard is decided here but is NOT conditional on the
     # context: it used to share this branch, so every shot whose body looked
