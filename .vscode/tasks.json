@@ -1,0 +1,13 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "battery",
+			"type": "shell",
+			"command": "app\\env\\Scripts\\python.exe -m unittest discover -s tests",
+			"args": [],
+			"isBackground": true,
+			"group": "test"
+		}
+	]
+}
