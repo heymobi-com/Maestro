@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { Loader2, Boxes, RefreshCw, ArrowUpCircle, Cpu } from 'lucide-react'
 import { fetchInstalledCheckpoints, checkCheckpointUpdates } from '../../api/client'
 import type { InstalledCheckpoint } from '../../api/client'
+import { ImportedCheckpointMissingBadge, ImportedCheckpointRemoveButton } from './ImportedCheckpointHealth'
 
 interface Props {
   // Open the CivitAI detail for a model so the user can re-import a new version.
@@ -43,6 +44,7 @@ export function InstalledCheckpoints({ onSelectModel }: Props) {
   }, [checking, load])
 
   const updatableCount = items.filter(c => c.update_status === 'available').length
+  const missingCount = items.filter(c => c.missing).length
 
   return (
     <div className="h-full overflow-y-auto p-4">
@@ -52,6 +54,9 @@ export function InstalledCheckpoints({ onSelectModel }: Props) {
           {items.length} imported checkpoint{items.length === 1 ? '' : 's'}
           {updatableCount > 0 && (
             <span className="ml-2 text-indicator-warning">{updatableCount} update{updatableCount === 1 ? '' : 's'} available</span>
+          )}
+          {missingCount > 0 && (
+            <span className="ml-2 text-indicator-error">{missingCount} with missing weights</span>
           )}
         </span>
         {lastCheck && (
@@ -83,14 +88,15 @@ export function InstalledCheckpoints({ onSelectModel }: Props) {
           {items.map(c => {
             const clickable = !!c.civitai_model_id
             return (
+              <div key={c.model_type} className="relative">
+              {/* Remove needs a positioned sibling: nested buttons are invalid. */}
               <button
-                key={c.model_type}
                 onClick={() => { if (c.civitai_model_id) onSelectModel(c.civitai_model_id) }}
                 disabled={!clickable}
                 title={c.update_status === 'available'
                   ? 'Update available — open to re-import the latest version'
                   : (clickable ? 'Open on CivitAI to re-import' : undefined)}
-                className={`relative rounded-lg border overflow-hidden bg-bg-tertiary text-left transition-all ${
+                className={`w-full relative rounded-lg border overflow-hidden bg-bg-tertiary text-left transition-all ${
                   clickable ? 'border-border hover:border-accent-blue cursor-pointer group' : 'border-border/50 opacity-75'
                 }`}
               >
@@ -111,6 +117,7 @@ export function InstalledCheckpoints({ onSelectModel }: Props) {
                 <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 via-black/50 to-transparent p-2 pt-6">
                   <div className="text-xs font-medium text-white truncate">{c.name || c.model_type}</div>
                   <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                    <ImportedCheckpointMissingBadge item={c} />
                     <span className="text-[9px] px-1.5 py-0.5 rounded bg-black/60 text-white/80">{c.architecture}</span>
                     {c.auto_quantize && (
                       <span className="flex items-center gap-0.5 text-[9px] text-white/60" title="Loads as int8 (optimized VRAM)">
@@ -134,6 +141,8 @@ export function InstalledCheckpoints({ onSelectModel }: Props) {
                   </div>
                 )}
               </button>
+              <ImportedCheckpointRemoveButton item={c} onRemoved={load} />
+              </div>
             )
           })}
         </div>

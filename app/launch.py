@@ -275,6 +275,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from services.access_log_filter import install_quiet_access_filter
 from services.http_runtime import configure_http_runtime
+from services import checkpoint_health
 
 # Uvicorn's logging configuration replaces handlers but retains logger-level
 # filters. Install early, then idempotently confirm it again before startup.
@@ -282,6 +283,7 @@ install_quiet_access_filter()
 
 api = FastAPI(title="Maestro API", version="1.0.0")
 api.add_event_handler("startup", configure_http_runtime)
+api.include_router(checkpoint_health.router)
 
 # Upload size caps — enforced in upload handlers. Tuned for real-world
 # media the app actually ingests; anything larger is almost certainly
@@ -4114,6 +4116,7 @@ def reload_model_definitions():
     server. Returns the new model count and any model_types that appeared."""
     try:
         before = set(wgp.displayed_model_types)
+        checkpoint_health.forget_missing_definitions(wgp.models_def)
         wgp.load_model_definitions()
         after = set(wgp.displayed_model_types)
         added = sorted(after - before)
@@ -4139,6 +4142,7 @@ def checkpoints_installed():
         c["preview_url"] = _checkpoint_preview_url(c["filename"])
         out.append(c)
     out.sort(key=lambda e: (e.get("name") or e["model_type"]).lower())
+    out = checkpoint_health.mark_missing(out)
     return {"checkpoints": out, "manifest_last_check_at": manifest.get("last_full_check_at")}
 
 

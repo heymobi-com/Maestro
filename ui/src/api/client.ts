@@ -2630,6 +2630,7 @@ export interface InstalledCheckpoint {
   filename: string
   auto_quantize: boolean
   update_status: 'current' | 'available' | 'unknown' | 'removed'
+  missing: boolean
   latest_version_id: number | null
   latest_published_at: string | null
   latest_changelog: string | null
