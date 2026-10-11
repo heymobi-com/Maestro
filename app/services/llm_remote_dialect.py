@@ -1,0 +1,168 @@
+"""What a local OpenAI-compatible server needs to hear in Maestro's dialect.
+
+Maestro's remote path deliberately sends the OpenAI common denominator: it drops the llama.cpp
+extensions (``enable_thinking``, ``chat_template_kwargs``) and, because only the bundled
+llama-server can compile a grammar, it drops a requested JSON schema too and calls out
+unconstrained. That is the right default for a hosted API.
+
+It is the wrong default for a local server that speaks more than the common denominator. Measured
+against Strata (``qwen3.8-flash-next-iq2_xs`` on ``127.0.0.1:8081``):
+
+- the model reasons before it answers, so on a tight allowance the whole budget went to
+  ``reasoning_content`` and ``content`` came back empty -- 80 tokens generated, 337 characters of
+  reasoning, nothing to show;
+- ``reasoning_effort: "none"`` and ``chat_template_kwargs.enable_thinking=false`` both silence that,
+  and Strata accepts the first, which is already an OpenAI field;
+- a requested schema sent in llama.cpp's form is misread (the schema came back as the answer), while
+  the **OpenAI standard** form -- ``{"type": "json_schema", "json_schema": {"name", "strict",
+  "schema"}}`` -- returned JSON that conformed to the schema exactly.
+
+So the two fields Maestro needs are the ones it already knows how to send; it just had no reason to
+believe the endpoint could use them. This module supplies that reason: a server says what it is on
+its own ``/health``, and only a server on this machine or the LAN is asked at all, so a hosted API
+never sees an extra request. One unanswered probe means the common denominator -- the behaviour
+every other endpoint already gets.
+"""
+
+from __future__ import annotations
+
+import ipaddress
+import time
+from typing import Any, Mapping
+from urllib.parse import urlsplit
+
+__all__ = [
+    "DEFAULT_URL",
+    "SERVICE_NAME",
+    "applies",
+    "finalize",
+    "forget",
+    "speaks_dialect",
+]
+
+SERVICE_NAME = "strata"
+DEFAULT_URL = "http://127.0.0.1:8081"
+
+_HEALTH_PATH = "/health"
+_PROBE_TIMEOUT = 2.0
+_PROBE_TTL = 60.0
+
+# url -> (monotonic reading, answer)
+_probe_cache: dict[str, tuple[float, bool]] = {}
+
+
+def _host(url: str) -> str:
+    try:
+        return urlsplit(str(url or "")).hostname or ""
+    except ValueError:
+        return ""
+
+
+def _is_local(host: str) -> bool:
+    """Whether a host is on this machine or the LAN, so a probe is cheap and safe."""
+
+    name = (host or "").strip().lower().strip("[]")
+    if name in {"localhost", "localhost.localdomain"}:
+        return True
+    try:
+        address = ipaddress.ip_address(name)
+    except ValueError:
+        return False  # A DNS name could be anywhere; never probe it.
+    return address.is_loopback or address.is_private
+
+
+def _probe(url: str) -> bool:
+    import requests
+
+    from services.llm_endpoint import remote_base
+
+    response = requests.get(f"{remote_base(url)}{_HEALTH_PATH}", timeout=_PROBE_TIMEOUT)
+    if not response.ok:
+        return False
+    body = response.json() or {}
+    return str(body.get("service") or "").strip().lower() == SERVICE_NAME
+
+
+def speaks_dialect(url: str, *, now: float | None = None) -> bool:
+    """Whether the server at this URL introduces itself as one that speaks it."""
+
+    key = str(url or "").strip()
+    if not key or not _is_local(_host(key)):
+        return False
+    moment = time.monotonic() if now is None else now
+    cached = _probe_cache.get(key)
+    if cached is not None and moment - cached[0] < _PROBE_TTL:
+        return cached[1]
+    try:
+        detected = _probe(key)
+    except Exception:
+        detected = False  # A server that does not answer is not one of ours.
+    _probe_cache[key] = (moment, detected)
+    return detected
+
+
+def forget(url: str = "") -> None:
+    """Drop cached detection: for a test, or after the server was restarted."""
+
+    if url:
+        _probe_cache.pop(str(url).strip(), None)
+    else:
+        _probe_cache.clear()
+
+
+def applies(provider: str, url: str) -> bool:
+    """Whether this request is going to an endpoint that can use the dialect."""
+
+    return str(provider or "") in {"remote", "openai"} and speaks_dialect(url)
+
+
+def _thinking_was_refused(raw: Mapping[str, Any]) -> bool:
+    """Whether the caller asked for an answer with no reasoning in front of it."""
+
+    if raw.get("enable_thinking") is False:
+        return True
+    kwargs = raw.get("chat_template_kwargs")
+    return isinstance(kwargs, Mapping) and kwargs.get("enable_thinking") is False
+
+
+def _openai_schema(json_schema: Mapping[str, Any]) -> dict:
+    return {
+        "type": "json_schema",
+        "json_schema": {"name": "maestro_response", "strict": True, "schema": dict(json_schema)},
+    }
+
+
+def finalize(
+    provider: str,
+    url: str,
+    raw: Mapping[str, Any],
+    prepared: Mapping[str, Any],
+) -> dict:
+    """Turn the translated payload into the one this endpoint should receive.
+
+    Without the dialect, nothing changes: the llama.cpp grammar request is dropped and the call goes
+    out unconstrained, exactly as it did before, only now the reason is said once here instead of at
+    each site that builds a payload.
+    """
+
+    grammar = raw.get("response_format")
+    has_grammar = isinstance(grammar, Mapping) and isinstance(grammar.get("schema"), Mapping)
+
+    if not applies(provider, url):
+        out = dict(prepared)
+        if has_grammar:
+            out.pop("response_format", None)
+            print(
+                f"[LLM] json_schema requested but provider={provider} is not a known "
+                "strict-JSON server — sending unconstrained"
+            )
+        return out
+
+    out = dict(prepared)
+    if has_grammar:
+        out["response_format"] = _openai_schema(grammar["schema"])
+    if _thinking_was_refused(raw):
+        # The reasoning is billed against the same allowance as the answer, and a
+        # structured caller only asked for the JSON.
+        out["reasoning_effort"] = "none"
+    return out

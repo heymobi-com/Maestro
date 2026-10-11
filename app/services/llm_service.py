@@ -28,6 +28,8 @@ from services.h3_performance_audio import (
     has_h3_performance_audio,
 )
 from services.llm_endpoint import models_url, remote_base
+from services.llm_idle import idle_timeout, set_idle_timeout
+from services import llm_remote_dialect
 
 logger = logging.getLogger(__name__)
 
@@ -62,26 +64,11 @@ _provider: str = "local"
 _remote_url: str = ""       # Base URL for remote/OpenAI-compatible servers
 _api_key: str = ""           # API key for OpenAI/Anthropic
 
-# Auto-unload idle timer
+# Auto-unload idle timer. The policy lives in services/llm_idle.py; the timer here
+# only uses it.
 _idle_timer: Optional[threading.Timer] = None
-# A safety net, not a policy: the generation paths release the LLM themselves.
-_IDLE_TIMEOUT_DEFAULT: float = 600.0
-_idle_timeout: float = _IDLE_TIMEOUT_DEFAULT
 _idle_generation: int = 0
 _active_uses: int = 0
-
-
-def set_idle_timeout(seconds) -> float:
-    global _idle_timeout
-    try:
-        value = float(seconds)
-    except (TypeError, ValueError):
-        return _idle_timeout
-    if value > 0:
-        _idle_timeout = value
-    return _idle_timeout
-
-set_idle_timeout(os.environ.get("MAESTRO_LLM_IDLE_SECONDS", "").strip() or None)
 
 
 # Streaming state — accumulates tokens during generation
@@ -759,7 +746,7 @@ def _finalize_payload(payload: dict) -> dict:
             f"accepted by provider={_provider}: {', '.join(dropped)}"
         )
     prepared["model"] = _model_id
-    return record_payload(prepared, model_id=_model_id)
+    return record_payload(llm_remote_dialect.finalize(_provider, _remote_url, payload, prepared), model_id=_model_id)
 
 
 def _server_url() -> str:
@@ -2001,7 +1988,7 @@ def _reset_idle_timer():
         if _active_uses or not is_loaded():
             return
         _idle_timer = threading.Timer(
-            _idle_timeout, _auto_unload, args=(_idle_generation,),
+            idle_timeout(), _auto_unload, args=(_idle_generation,),
         )
         _idle_timer.daemon = True
         _idle_timer.start()
@@ -2543,16 +2530,11 @@ def generate(
     if combined_stop:
         payload["stop"] = combined_stop
 
-    # Grammar-constrained JSON output. llama-server compiles the schema to
-    # a GBNF grammar server-side ({"type": "json_object", "schema": ...} is
-    # the long-standing llama.cpp extension form). Local provider only —
-    # remote OpenAI-compatible endpoints vary in which response_format
-    # flavor they accept, so we degrade to an unconstrained call there.
+    # The schema travels in llama.cpp's form, which the bundled server compiles to
+    # a GBNF grammar. _finalize_payload decides what an endpoint without that
+    # grammar, or with a different one, is actually sent.
     if json_schema is not None:
-        if _provider == "local":
-            payload["response_format"] = {"type": "json_object", "schema": json_schema}
-        else:
-            print(f"[LLM] json_schema requested but provider={_provider} — sending unconstrained (grammar is local llama-server only)")
+        payload["response_format"] = {"type": "json_object", "schema": json_schema}
 
     if _provider == "anthropic":
         return _generate_anthropic(messages, total_tokens, max(temperature, 0.01), top_p)
@@ -2763,13 +2745,10 @@ def generate_streaming(
         existing = payload.get("stop") or []
         payload["stop"] = list(existing) + [t for t in stop_tokens if t not in existing]
 
-    # Grammar-constrained JSON output — local llama-server only (see the
-    # matching block in generate() for the full rationale).
+    # Grammar-constrained JSON output — same contract as generate(): the schema
+    # travels in llama.cpp's form and _finalize_payload decides the rest.
     if json_schema is not None:
-        if _provider == "local":
-            payload["response_format"] = {"type": "json_object", "schema": json_schema}
-        else:
-            print(f"[LLM] json_schema requested but provider={_provider} — sending unconstrained (grammar is local llama-server only)")
+        payload["response_format"] = {"type": "json_object", "schema": json_schema}
 
     # Diagnostic — log every payload field except `messages` so we can
     # compare what Maestro sends to llama-server vs what LM Studio sends

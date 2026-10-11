@@ -4,6 +4,7 @@ import { CorrectionLlmSettings } from './CorrectionLlmSettings'
 import { useStore } from '../../stores/useStore'
 import { ApiKeyField } from '../shared/ApiKeyField'
 import { RemoteModelMemoryControls } from './RemoteModelMemoryControls'
+import { isStrataUrl, STRATA_DEFAULT_URL } from '../../lib/strataProvider'
 
 const PUBLIC_PROVIDERS = new Set(['openai', 'anthropic'])
 
@@ -224,6 +225,9 @@ export function ServicesSettingsPanel() {
 
   const provider = servicesConfig.llm_provider || 'local'
   const isRemote = provider === 'remote'
+  // The Strata preset is the remote transport with its URL filled in; the backend
+  // recognises the server itself, so nothing else distinguishes the two here.
+  const isStrata = isRemote && isStrataUrl(servicesConfig.llm_remote_url)
   const isOpenAI = provider === 'openai'
   const isLocal = provider === 'local'
   // The mature-mode warning has to name both stages: with the pipeline on a local model and
@@ -273,10 +277,15 @@ export function ServicesSettingsPanel() {
             LLM Provider
           </label>
           <select
-            value={provider}
+            value={isStrata ? 'strata' : provider}
             onChange={e => {
-              const newProvider = e.target.value
+              // The Strata entry presets the remote transport and its address.
+              const picked = e.target.value
+              const newProvider = picked === 'strata' ? 'remote' : picked
               const updates: Record<string, unknown> = { llm_provider: newProvider }
+              if (picked === 'strata' && !isStrataUrl(servicesConfig.llm_remote_url)) {
+                updates.llm_remote_url = STRATA_DEFAULT_URL
+              }
               // Auto-disable NSFW when switching to a public provider
               if (PUBLIC_PROVIDERS.has(newProvider) && servicesConfig.nsfw_mode) {
                 updates.nsfw_mode = false
@@ -289,6 +298,7 @@ export function ServicesSettingsPanel() {
           >
             <option value="local">Local (llama-server)</option>
             <option value="remote">Remote OpenAI-Compatible (LM Studio, etc.)</option>
+            <option value="strata">Strata (local, strict JSON + no reasoning)</option>
             <option value="openai">OpenAI API</option>
             <option value="anthropic">Anthropic API</option>
           </select>
@@ -378,7 +388,7 @@ export function ServicesSettingsPanel() {
           updateConfig={updateConfig}
           llmModels={llmModels}
         />
-        {isRemote && <RemoteModelMemoryControls
+        {isRemote && !isStrata && <RemoteModelMemoryControls
           key={servicesConfig.llm_remote_url}
           modelId={servicesConfig.llm_model_id}
         />}

@@ -420,12 +420,19 @@ class CorrectionConversationWiringTests(unittest.TestCase):
         # timer is a safety net and the model is a setting.
         self.assertIn("revision_llm_model_id", self.pipeline)
         self.assertIn("set_idle_timeout(", self.pipeline)
+        policy = open(
+            os.path.join(_APP_DIR, "services", "llm_idle.py"), encoding="utf-8",
+        ).read()
+        self.assertIn("DEFAULT_IDLE_SECONDS: float = 600.0", policy)
+        self.assertIn("def set_idle_timeout(", policy)
+        self.assertIn("MAESTRO_LLM_IDLE_SECONDS", policy)
+        # The service keeps the name its callers already use, and the timer reads
+        # the policy instead of carrying its own copy of it.
         service = open(
             os.path.join(_APP_DIR, "services", "llm_service.py"), encoding="utf-8",
         ).read()
-        self.assertIn("_IDLE_TIMEOUT_DEFAULT: float = 600.0", service)
-        self.assertIn("def set_idle_timeout(", service)
-        self.assertIn("MAESTRO_LLM_IDLE_SECONDS", service)
+        self.assertIn("from services.llm_idle import idle_timeout, set_idle_timeout", service)
+        self.assertIn("idle_timeout(), _auto_unload", service)
 
     def test_that_smaller_model_is_a_setting_the_director_can_actually_find(self):
         # The pipeline read a key that nothing else knew about: it was not in

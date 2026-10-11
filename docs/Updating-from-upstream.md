@@ -101,6 +101,10 @@ grows the surface fails the battery rather than passing quietly.
 | `ui/src/components/MainContent/MediaFeedItem.tsx` | `ui/src/lib/directorReroll.ts` | regenerate through the pipeline instead of the Studio reroll |
 | | `ui/src/components/MainContent/DirectorTakeBadges.tsx` | the shot and "new take" badges, progress, failures |
 | `app/launch.py` | `app/services/director_slot_guard.py` | which shot is using a file, and the refusal that names it |
+| | `app/services/checkpoint_health.py` | an imported checkpoint whose weights are gone, the prune the reload never did, and the removal of one import |
+| `app/services/llm_service.py` | `app/services/llm_idle.py` | when the local LLM unloads itself |
+| | `app/services/llm_remote_dialect.py` | the two fields a local strict-JSON server accepts, and the probe that decides |
+| `ui/src/components/SettingsDrawer/ServicesSettingsPanel.tsx` | `ui/src/lib/strataProvider.ts` | the address the Strata provider entry is recognised by |
 
 ## Deferred on purpose
 
