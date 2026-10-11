@@ -37,6 +37,7 @@ from services.director.h3_dialogue import (
     h3_unresolved_speaker_cue_problems,
 )
 from services.director.h3_dialogue import project_subject_lock as _project_subject_lock
+from services.director.prompt_contradictions import contradiction_findings
 from services.director.project_brief import audit_project_brief
 
 # One ``subject_definitions:`` field head. Emitting it twice is how a shot ends up
@@ -233,6 +234,9 @@ def _findings_for_shot(
                 "lost inside the repetition.",
             )
 
+    # The contradictions inside the shot itself: a second shot in a one-shot body, the brief's
+    # own per-shot heading, two outfits for one subject, day and night, stillness and movement.
+    findings.extend(contradiction_findings(prompt, draft=draft, shot=int(clip.get("index", index)) + 1))
     return findings
 
 

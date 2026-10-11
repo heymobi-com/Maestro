@@ -8,6 +8,7 @@ import { multipleShotWarning } from '../../lib/h3Prompt'
 import { HighlightedTextarea } from './HighlightedTextarea'
 import { PromptDiffView } from './PromptDiffView'
 import { splitRevisionOptions } from '../../lib/revisionOptions'
+import { PromptAuditNotices } from './PromptAuditNotices'
 
 /** Safely coerce any value to a displayable string */
 function safeStr(val: unknown): string {
@@ -1400,6 +1401,7 @@ function DirectorDashboardInner() {
               <PipelineProgressBar pipeline={selectedPipeline} />
             </div>
 
+            <PromptAuditNotices pid={selectedPid} status={selectedPipeline.status} />
             {/* LLM Log */}
             <div className="bg-bg-secondary rounded-lg border border-border p-3">
               <h3 className="text-[11px] text-text-secondary uppercase tracking-wider font-medium mb-2">LLM Planning Log</h3>

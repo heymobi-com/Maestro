@@ -27,7 +27,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-__all__ = ["audit_project_brief", "clip_project_context"]
+__all__ = ["audit_project_brief", "clip_project_context", "per_shot_headings"]
 
 # Headings that describe the FILM rather than the clip. Everything else travels: the cast and
 # their wardrobe, the vocal roles, the audio rules and the visual world.
@@ -50,6 +50,10 @@ _PER_SHOT_HEADINGS = frozenset({
     "CINEMATOGRAPHY", "LENS", "LENSES", "SHOT SIZES", "EDITING", "EDITS", "CUTS",
 })
 _DROPPED_HEADINGS = _NARRATIVE_HEADINGS | _PER_SHOT_HEADINGS
+
+# Public, because the prompt audit reports a clip that still carries one of these: that is the
+# leak this set exists to prevent, so something outside this module has to be able to name it.
+per_shot_headings = _PER_SHOT_HEADINGS
 
 # A ``HEADING:`` on a line of its own, short enough that a prose sentence ending in a colon
 # is not mistaken for one. Parentheses and lower case are allowed: a director writes

@@ -102,11 +102,14 @@ grows the surface fails the battery rather than passing quietly.
 | | `ui/src/components/MainContent/DirectorTakeBadges.tsx` | the shot and "new take" badges, progress, failures |
 | `app/launch.py` | `app/services/director_slot_guard.py` | which shot is using a file, and the refusal that names it |
 | | `app/services/checkpoint_health.py` | an imported checkpoint whose weights are gone, the prune the reload never did, and the removal of one import |
+| | `app/services/prompt_audit_api.py` | the prompt audit as an endpoint, so it can be read without opening the interface |
 | `app/services/llm_service.py` | `app/services/llm_idle.py` | when the local LLM unloads itself |
 | | `app/services/llm_remote_dialect.py` | the two fields a local strict-JSON server accepts, and the probe that decides |
 | | `app/services/llm_writer_health.py` | whether a remote writer really answers, and the sentence that names the address |
 | `app/services/director_pipeline.py` | `app/services/llm_writer_binding.py` | the address a run keeps, so a later change does not finish it with another writer |
 | `ui/src/components/SettingsDrawer/ServicesSettingsPanel.tsx` | `ui/src/lib/strataProvider.ts` | the address the Strata provider entry is recognised by |
+| `ui/src/components/DirectorDashboard/DirectorDashboard.tsx` | `ui/src/components/DirectorDashboard/PromptAuditNotices.tsx` | the audit of the selected pipeline, read from its saved plan, per shot |
+| | `ui/src/api/promptAudit.ts` | the audit request itself |
 
 ## Deferred on purpose
 
@@ -115,8 +118,9 @@ grows the surface fails the battery rather than passing quietly.
   they cannot be delegated without rewriting the endpoint; the budget keeps them
   from growing while they wait.
 - `app/services/director/h3_dialogue.py` (3014) and `app/services/director_pipeline.py`
-  (1798), `DirectorDashboard.tsx` (592) and `DirectorChat.tsx` (215): zero upstream
-  churn, so they cost nothing today.
+  (1810), `DirectorDashboard.tsx` (594) and `DirectorChat.tsx` (215): zero upstream
+  churn, so they cost nothing today. The prompt-audit lines in the last two are the
+  deliberate raises recorded in the budget notes.
 
 ## When a conflict lands outside the seam map
 
