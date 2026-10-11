@@ -22,12 +22,19 @@ believe the endpoint could use them. This module supplies that reason: a server 
 its own ``/health``, and only a server on this machine or the LAN is asked at all, so a hosted API
 never sees an extra request. One unanswered probe means the common denominator -- the behaviour
 every other endpoint already gets.
+
+The same probe answers a second question the remote path used to guess: whether images can be sent
+at all. ``load_model`` set ``_vision_available = True`` for every remote writer and left it to the
+provider to complain. Measured against Strata: an image block comes back **400 Bad Request**, in the
+middle of a plan, on a character reference the writer was supposed to read. An endpoint that says
+what it accepts is believed instead; one that says nothing keeps the optimistic behaviour, because a
+hosted API cannot be probed and dropping its images would break what works today.
 """
 
 from __future__ import annotations
 
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 from services.llm_writer_health import is_local_endpoint
 
@@ -38,17 +45,23 @@ __all__ = [
     "finalize",
     "forget",
     "speaks_dialect",
+    "takes_images",
 ]
 
 SERVICE_NAME = "strata"
 DEFAULT_URL = "http://127.0.0.1:8081"
 
 _HEALTH_PATH = "/health"
+_MODELS_PATH = "/v1/models"
 _PROBE_TIMEOUT = 2.0
 _PROBE_TTL = 60.0
 
 # url -> (monotonic reading, answer)
 _probe_cache: dict[str, tuple[float, bool]] = {}
+
+# url -> (monotonic reading, answer); a separate cache because the two probes read
+# different fields and a server may answer one and not the other.
+_images_cache: dict[str, tuple[float, bool]] = {}
 
 
 def _probe(url: str) -> bool:
@@ -86,8 +99,63 @@ def forget(url: str = "") -> None:
 
     if url:
         _probe_cache.pop(str(url).strip(), None)
+        _images_cache.pop(str(url).strip(), None)
     else:
         _probe_cache.clear()
+        _images_cache.clear()
+
+
+def _probe_images(url: str) -> Optional[bool]:
+    """What the server says about image input: True, False, or None when it does not say."""
+
+    import requests
+
+    from services.llm_endpoint import remote_base
+
+    base = remote_base(url)
+    try:
+        health = requests.get(f"{base}{_HEALTH_PATH}", timeout=_PROBE_TIMEOUT)
+        if health.ok:
+            body = health.json() or {}
+            if "images" in body:
+                return bool(body.get("images"))
+        listed = requests.get(f"{base}{_MODELS_PATH}", timeout=_PROBE_TIMEOUT)
+        if listed.ok:
+            for entry in (listed.json() or {}).get("data") or []:
+                modalities = ((entry or {}).get("architecture") or {}).get("input_modalities")
+                if isinstance(modalities, list):
+                    return any(str(mode).strip().lower() == "image" for mode in modalities)
+    except Exception:
+        return None
+    return None
+
+
+def takes_images(url: str, *, now: float | None = None) -> bool:
+    """Whether images can be sent here. Unknown means yes, which is what it always was.
+
+    Two fields are read, in the order a server is likely to answer: ``images`` on ``/health``
+    (Strata reports ``false``), then ``input_modalities`` of the first model on ``/v1/models`` (a
+    llama.cpp or LM Studio style listing). Nothing else is inferred: a server that says nothing is
+    treated as capable, so a hosted API -- which cannot be asked -- keeps sending the images it
+    accepts today.
+    """
+
+    key = str(url or "").strip()
+    if not key or not is_local_endpoint(key):
+        return True
+    moment = time.monotonic() if now is None else now
+    cached = _images_cache.get(key)
+    if cached is not None and moment - cached[0] < _PROBE_TTL:
+        return cached[1]
+    answer = _probe_images(key)
+    capable = True if answer is None else answer
+    _images_cache[key] = (moment, capable)
+    if not capable:
+        # Said once, where the writer is connected, because a silent drop is how a reference image
+        # goes missing without anyone noticing: the plan runs, the prompts describe a picture the
+        # writer never saw, and nothing in the log mentions it.
+        print(f"[LLM] {key} takes text only: reference images will not reach it.")
+    return capable
 
 
 def applies(provider: str, url: str) -> bool:

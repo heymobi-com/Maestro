@@ -64,8 +64,7 @@ _provider: str = "local"
 _remote_url: str = ""       # Base URL for remote/OpenAI-compatible servers
 _api_key: str = ""           # API key for OpenAI/Anthropic
 
-# Auto-unload idle timer. The policy lives in services/llm_idle.py; the timer here
-# only uses it.
+# Auto-unload idle timer. The policy lives in services/llm_idle.py.
 _idle_timer: Optional[threading.Timer] = None
 _idle_generation: int = 0
 _active_uses: int = 0
@@ -1791,10 +1790,7 @@ def load_model(
             _api_key = api_key
             _model_id = model_id
             _device = provider
-            # Remote capability is not discoverable from the provider-neutral
-            # model ID. Send image inputs and let the provider report when a
-            # selected model does not accept them.
-            _vision_available = True
+            _vision_available = llm_remote_dialect.takes_images(remote_url)
             print(f"[LLM] Connected to {provider} provider: model={model_id}, url={remote_url or 'API'}")
             _reset_idle_timer()
         return

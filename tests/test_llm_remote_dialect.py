@@ -38,6 +38,19 @@ def health(service="strata", status=200):
     return FakeResponse(json.dumps({"status": "ok", "service": service, "loaded": True}), status)
 
 
+def routes(health_body=None, models_body=None):
+    """Answer /health and /v1/models the way a server would, and refuse anything else."""
+
+    def get(url, **kwargs):
+        if url.endswith("/health") and health_body is not None:
+            return FakeResponse(json.dumps(health_body))
+        if url.endswith("/v1/models") and models_body is not None:
+            return FakeResponse(json.dumps(models_body))
+        return FakeResponse("{}", status=404)
+
+    return get
+
+
 class DetectionTests(unittest.TestCase):
     def setUp(self):
         dialect.forget()
@@ -199,6 +212,121 @@ class EngineSeamTests(unittest.TestCase):
         self.assertNotIn("reasoning_effort", out)
         self.assertEqual(out["model"], "m")
         self.assertEqual(out["max_tokens"], 256)
+
+
+class ImageCapabilityTests(unittest.TestCase):
+    """Whether a writer can be asked to read a reference image at all.
+
+    Measured against Strata: an image block comes back 400 Bad Request, mid-plan, on a reference the
+    writer was supposed to read. The remote path assumed vision for every remote writer and left it
+    to the provider to complain, so the server's own answer is read instead -- and a server that says
+    nothing keeps the optimistic behaviour, because a hosted API cannot be asked.
+    """
+
+    def setUp(self):
+        dialect.forget()
+
+    def tearDown(self):
+        dialect.forget()
+
+    def test_a_server_that_reports_no_images_is_believed(self):
+        # Strata's own /health, verbatim.
+        with patch("requests.get", side_effect=routes(
+            health_body={
+                "status": "ok", "max_context": 65536, "model": "qwen3.8-flash-next-iq2_xs",
+                "images": False, "api_key": False, "loaded": True, "service": "strata",
+            },
+        )):
+            self.assertFalse(dialect.takes_images(STRATA_URL))
+
+    def test_a_server_that_reports_images_keeps_them(self):
+        with patch("requests.get", side_effect=routes(health_body={"service": "x", "images": True})):
+            self.assertTrue(dialect.takes_images(STRATA_URL))
+
+    def test_a_model_listing_without_an_image_modality_is_a_no(self):
+        with patch("requests.get", side_effect=routes(
+            health_body={"service": "llama.cpp"},
+            models_body={"data": [{"id": "m", "architecture": {"input_modalities": ["text"]}}]},
+        )):
+            self.assertFalse(dialect.takes_images(STRATA_URL))
+
+    def test_a_model_listing_with_an_image_modality_is_a_yes(self):
+        with patch("requests.get", side_effect=routes(
+            health_body={"service": "llama.cpp"},
+            models_body={"data": [{"id": "m", "architecture": {"input_modalities": ["text", "image"]}}]},
+        )):
+            self.assertTrue(dialect.takes_images(STRATA_URL))
+
+    def test_a_server_that_says_nothing_keeps_the_optimistic_answer(self):
+        with patch("requests.get", side_effect=routes(health_body={"service": "llama.cpp"})):
+            self.assertTrue(dialect.takes_images(STRATA_URL))
+
+    def test_an_unreachable_server_keeps_the_optimistic_answer(self):
+        with patch("requests.get", side_effect=OSError("connection refused")):
+            self.assertTrue(dialect.takes_images(STRATA_URL))
+
+    def test_a_hosted_api_is_never_probed(self):
+        with patch("requests.get") as get:
+            self.assertTrue(dialect.takes_images("https://api.openai.com/v1"))
+        get.assert_not_called()
+
+    def test_the_answer_is_cached(self):
+        with patch("requests.get", side_effect=routes(health_body={"images": False})) as get:
+            self.assertFalse(dialect.takes_images(STRATA_URL))
+            self.assertFalse(dialect.takes_images(STRATA_URL))
+        self.assertEqual(get.call_count, 1)
+
+    def test_the_two_probes_do_not_share_a_cache_entry(self):
+        # A server may answer one question and not the other, so a detection answer must not decide
+        # what the image question reads.
+        with patch("requests.get", side_effect=routes(
+            health_body={"service": "strata", "images": False},
+        )):
+            self.assertTrue(dialect.speaks_dialect(STRATA_URL))
+            self.assertFalse(dialect.takes_images(STRATA_URL))
+
+
+class EngineVisionTests(unittest.TestCase):
+    """The engine's own flag, which is what decides whether an image is attached at all."""
+
+    def setUp(self):
+        dialect.forget()
+        self.saved = (
+            llm_service._provider,
+            llm_service._model_id,
+            llm_service._remote_url,
+            llm_service._vision_available,
+        )
+
+    def tearDown(self):
+        dialect.forget()
+        (
+            llm_service._provider,
+            llm_service._model_id,
+            llm_service._remote_url,
+            llm_service._vision_available,
+        ) = self.saved
+
+    def test_connecting_to_a_text_only_writer_disables_images(self):
+        with patch("requests.get", side_effect=routes(
+            health_body={"service": "strata", "images": False},
+        )):
+            llm_service.load_model(model_id="qwen3.8-flash-next-iq2_xs", provider="remote", remote_url=STRATA_URL)
+        self.assertFalse(llm_service._vision_available)
+
+    def test_connecting_to_a_writer_that_says_nothing_keeps_them(self):
+        with patch("requests.get", side_effect=routes(
+            health_body={"service": "llama.cpp"},
+        )):
+            llm_service.load_model(model_id="m", provider="remote", remote_url=STRATA_URL)
+        self.assertTrue(llm_service._vision_available)
+
+    def test_a_reference_image_is_then_left_out_of_the_request(self):
+        # The degrade path the codebase already had for a local model with no mmproj: the prompt
+        # goes as plain text instead of as an image block the writer would refuse.
+        llm_service._vision_available = False
+        message = llm_service._user_message("plan the shot", ["C:/refs/martha.png"])
+        self.assertEqual(message, {"role": "user", "content": "plan the shot"})
 
 
 if __name__ == "__main__":
