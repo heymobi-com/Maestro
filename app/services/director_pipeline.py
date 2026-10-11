@@ -35,6 +35,7 @@ from services.director_model_compat import (
     DIRECTOR_PIPELINE_TYPES,
     assess_director_model,
 )
+from services.llm_writer_binding import remote_url as bound_remote_url
 from services.director_video_strategy import (
     BOUNDED_START_END,
     OMNI_REFERENCE,
@@ -7550,7 +7551,7 @@ def _ensure_llm_loaded(params: dict):
     desired_model = params.get("llm_model_id") or services_cfg.get("llm_model_id", "Abhiray/gemma-4-E4B-it-heretic-GGUF")
     desired_device = params.get("llm_device") or services_cfg.get("llm_device", "cpu")
     desired_provider = params.get("llm_provider") or services_cfg.get("llm_provider", "local")
-    desired_remote_url = services_cfg.get("llm_remote_url", "")
+    desired_remote_url = bound_remote_url(params, services_cfg)
     desired_api_key = llm_service.provider_api_key(
         desired_provider,
         services_cfg,

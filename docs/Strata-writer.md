@@ -56,6 +56,35 @@ curl http://127.0.0.1:8081/health
 - **A model on another host by DNS name** is not probed. Point the Strata entry at an address, not a
   hostname, if the server lives elsewhere on the LAN.
 
+## What Maestro will not pretend
+
+A remote writer is not loaded by Maestro, so nothing about it can be inferred from this machine: the
+server's own answer is the only honest one. Two things follow from that.
+
+**"Loaded" means the server answers.** A writer on this machine or the LAN is asked, and the answer
+is cached for a few seconds; a hosted API is taken at its word, because polling it would be both
+pointless and impolite, and its reachability is not something you can fix here. So when Strata is
+stopped, the writer stops showing as loaded instead of the run dying later with a connection error:
+
+```
+LLM request failed: HTTPConnectionPool(host='127.0.0.1', port=8081): Max retries exceeded
+The writer at http://127.0.0.1:8081 is not answering. Start that server (for example Strata) or
+choose a different writer in Settings -> LLM.
+```
+
+That is what makes stopping Strata for a render practical: you are told, by name, what to start.
+
+**A run keeps the address it started with.** A Director run is bound to the writer it was created
+with -- provider and model -- and every planning phase re-loads that one, so a later change in
+Settings does not rewrite a run already underway. The address is now part of that record too: the
+first phase writes it into the run, and the run's own value wins from then on. Without it, a run
+silently followed a later change of address, and if a different server had moved in, the run was
+finished by a different writer with the same name.
+
+The record lives in the run's parameters, so it lasts as long as the run does in this session
+(phases, reruns, and a queue entry frozen with it). A run rebuilt from disk after a Maestro restart
+takes the current setting, exactly as it did before this existed.
+
 ## Checking it works
 
 The verification profile records a given structured call as JSON, not as prose:

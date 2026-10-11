@@ -29,7 +29,7 @@ from services.h3_performance_audio import (
 )
 from services.llm_endpoint import models_url, remote_base
 from services.llm_idle import idle_timeout, set_idle_timeout
-from services import llm_remote_dialect
+from services import llm_remote_dialect, llm_writer_health
 
 logger = logging.getLogger(__name__)
 
@@ -1164,7 +1164,7 @@ def _log_generation_metrics(metrics: dict) -> None:
 
 def is_loaded() -> bool:
     if _provider in ("remote", "openai", "anthropic"):
-        return bool(_model_id)
+        return llm_writer_health.answers(_provider, _remote_url, _model_id)
     return _process is not None and _process.poll() is None
 
 
@@ -1179,7 +1179,6 @@ def get_status() -> dict:
 
 def _download_gguf(repo_id: str, filename: str, cache_dir: str) -> str:
     """Download a GGUF file from HuggingFace and return the local path."""
-    # Only local loads arrive here, so a hosted model name is a contradiction.
     from services.llm_model_choice import require_local_repo
     require_local_repo(repo_id)
     local_path = os.path.join(cache_dir, filename)
@@ -2167,7 +2166,7 @@ def _diagnose_llm_request_failure(exc: Exception) -> "RuntimeError":
             if len(body) > 800:
                 body = body[:800] + "... (truncated)"
             detail = f"\nEndpoint response: {body}"
-    return RuntimeError(f"LLM request failed: {exc}{detail}")
+    return RuntimeError(f"LLM request failed: {exc}{detail}{llm_writer_health.unreachable_hint(_provider, _remote_url, exc)}")
 
 
 def _diagnose_llm_image_request_failure(
@@ -2446,7 +2445,7 @@ def generate(
         )
 
     if not is_loaded():
-        raise RuntimeError("LLM not loaded. Call load_model() first.")
+        raise RuntimeError(llm_writer_health.not_loaded_message(_provider, _remote_url))
 
     # Cancel idle timer during active request — prevents auto-unload mid-generation.
     # Timer is reset at the END of the request (after response is received).
@@ -2530,9 +2529,7 @@ def generate(
     if combined_stop:
         payload["stop"] = combined_stop
 
-    # The schema travels in llama.cpp's form, which the bundled server compiles to
-    # a GBNF grammar. _finalize_payload decides what an endpoint without that
-    # grammar, or with a different one, is actually sent.
+    # llama.cpp's long-standing form; _finalize_payload decides what an endpoint without a grammar gets.
     if json_schema is not None:
         payload["response_format"] = {"type": "json_object", "schema": json_schema}
 
@@ -2654,7 +2651,7 @@ def generate_streaming(
     from services.studio_enhancement import check_cancelled
     check_cancelled()
     if not is_loaded():
-        raise RuntimeError("LLM not loaded. Call load_model() first.")
+        raise RuntimeError(llm_writer_health.not_loaded_message(_provider, _remote_url))
 
     # Grammar-constrained JSON mode requires thinking OFF — same rationale
     # as the matching block in generate(): the grammar masks sampling from
@@ -2745,8 +2742,7 @@ def generate_streaming(
         existing = payload.get("stop") or []
         payload["stop"] = list(existing) + [t for t in stop_tokens if t not in existing]
 
-    # Grammar-constrained JSON output — same contract as generate(): the schema
-    # travels in llama.cpp's form and _finalize_payload decides the rest.
+    # Same contract as generate(): llama.cpp's form, translated by _finalize_payload.
     if json_schema is not None:
         payload["response_format"] = {"type": "json_object", "schema": json_schema}
 

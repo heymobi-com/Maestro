@@ -26,10 +26,10 @@ every other endpoint already gets.
 
 from __future__ import annotations
 
-import ipaddress
 import time
 from typing import Any, Mapping
-from urllib.parse import urlsplit
+
+from services.llm_writer_health import is_local_endpoint
 
 __all__ = [
     "DEFAULT_URL",
@@ -51,26 +51,6 @@ _PROBE_TTL = 60.0
 _probe_cache: dict[str, tuple[float, bool]] = {}
 
 
-def _host(url: str) -> str:
-    try:
-        return urlsplit(str(url or "")).hostname or ""
-    except ValueError:
-        return ""
-
-
-def _is_local(host: str) -> bool:
-    """Whether a host is on this machine or the LAN, so a probe is cheap and safe."""
-
-    name = (host or "").strip().lower().strip("[]")
-    if name in {"localhost", "localhost.localdomain"}:
-        return True
-    try:
-        address = ipaddress.ip_address(name)
-    except ValueError:
-        return False  # A DNS name could be anywhere; never probe it.
-    return address.is_loopback or address.is_private
-
-
 def _probe(url: str) -> bool:
     import requests
 
@@ -87,7 +67,7 @@ def speaks_dialect(url: str, *, now: float | None = None) -> bool:
     """Whether the server at this URL introduces itself as one that speaks it."""
 
     key = str(url or "").strip()
-    if not key or not _is_local(_host(key)):
+    if not key or not is_local_endpoint(key):
         return False
     moment = time.monotonic() if now is None else now
     cached = _probe_cache.get(key)

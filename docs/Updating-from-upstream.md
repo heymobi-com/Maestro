@@ -104,6 +104,8 @@ grows the surface fails the battery rather than passing quietly.
 | | `app/services/checkpoint_health.py` | an imported checkpoint whose weights are gone, the prune the reload never did, and the removal of one import |
 | `app/services/llm_service.py` | `app/services/llm_idle.py` | when the local LLM unloads itself |
 | | `app/services/llm_remote_dialect.py` | the two fields a local strict-JSON server accepts, and the probe that decides |
+| | `app/services/llm_writer_health.py` | whether a remote writer really answers, and the sentence that names the address |
+| `app/services/director_pipeline.py` | `app/services/llm_writer_binding.py` | the address a run keeps, so a later change does not finish it with another writer |
 | `ui/src/components/SettingsDrawer/ServicesSettingsPanel.tsx` | `ui/src/lib/strataProvider.ts` | the address the Strata provider entry is recognised by |
 
 ## Deferred on purpose
