@@ -66,6 +66,47 @@ console.log(audit.report)   // the same text the server log prints
 `404` means the pipeline has no saved plan yet. The audit needs no GPU and no live
 run: it answers for a finished project as well as for one about to be rendered.
 
+Each finding in the response says where it lives and what can be done about it:
+
+```json
+{
+  "shot": 2, "index": 1,
+  "prompt": "<the compiled prompt this shot renders>",
+  "findings": [{
+    "code": "clip-holds-two-shots", "severity": "error", "message": "...",
+    "in_prompt": true,
+    "fix": "<the same prompt with the stray timestamp removed, or \"\">"
+  }]
+}
+```
+
+## Correcting from the panel
+
+The audit never applies anything. Every finding it shows comes with a way to fix it,
+and the director saves:
+
+- **`suggest the fix`** appears only when the contradiction is a leftover piece of text
+  — a stray `At MM:SS.mmm`, a marker naming another shot, a leaked `CAMERA:` heading.
+  It puts the corrected text in the editor *without saving it*, so the change is read
+  before it is applied. The suggestion is withheld when the same heading reaches the
+  pre-polish draft as well, because editing the compiled prompt would then clear
+  nothing and the button would be a lie.
+- **`fix`** opens the shot's compiled prompt in the same editor, for everything that
+  needs a decision: two descriptions disagreeing, a subject in two outfits, a camera
+  locked and moving. No rule knows which of the two the director meant.
+- **`lives in the pre-polish draft`** marks a finding that the compiled prompt does not
+  carry. The editor writes the compiled prompt, so those are reported and left alone.
+- Saving goes through the endpoint the clip cards already save with
+  (`PUT /api/v1/director/pipelines/{pid}/clips/{index}/prompt`), so an edit here and an
+  edit there are the same edit, and the plan — and this audit — reload behind both.
+
+Nothing is blocked and nothing is rewritten behind the director's back: the finding is
+signalled, the correction is offered, and the write happens when they press save.
+
+Measured end to end on a real 178-shot project: 19 findings of `clip-holds-two-shots`,
+one suggested fix applied to shot 2, and the audit came back at 18 — with the shot's
+unrelated `project-text-in-draft` finding still there, exactly as it should be.
+
 ## The rules that keep it quiet
 
 A noisy audit is an audit nobody reads, so every check was sharpened against 2156
@@ -123,4 +164,6 @@ and the identity off the reference.
 measurement added: a healthy prompt, the same outfit described twice, a hold-then-pan,
 a panorama that is not a pan, a marker inside a sentence, a timestamp at zero, a
 sweater under a blazer, and the wiring — that the router serves the path the
-interface asks for and that each clip is told which shot it is.
+interface asks for, that each clip is told which shot it is, that a suggestion clears
+its finding, that a suggestion is withheld when it would clear nothing, and that the
+panel saves through the endpoint the clip cards use.

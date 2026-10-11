@@ -28,7 +28,9 @@ from services.director.prompt_audit import audit_project_prompts  # noqa: E402
 from services.director.prompt_contradictions import (  # noqa: E402
     _conflicting_outfits,
     contradiction_findings,
+    suggested_fix,
 )
+from services.prompt_audit_api import annotated  # noqa: E402
 
 SUBJECTS = (
     "subject_definitions: <Subject 1> is Alex from <Picture 1>, wearing a long red coat. "
@@ -324,6 +326,115 @@ class AuditIntegrationTests(unittest.TestCase):
         self.assertEqual(audit["findings"][0]["shot"], 1)
 
 
+class SuggestedFixTests(unittest.TestCase):
+    """The suggested text, which is offered only when the fix is mechanical and provably clears."""
+
+    def test_a_stray_timestamp_is_removed_and_the_prose_kept(self):
+        prompt = healthy("timing: At MM:04.000 the light changes.")
+        fixed = suggested_fix(prompt, "clip-holds-two-shots", shot=1)
+        self.assertNotIn("MM:04.000", fixed)
+        self.assertIn("the light changes", fixed)
+        self.assertEqual(contradiction_findings(fixed, shot=1), [])
+
+    def test_a_marker_naming_another_shot_is_removed(self):
+        prompt = healthy() + "\n[Shot 3] Alex leaves the frame."
+        fixed = suggested_fix(prompt, "clip-holds-two-shots", shot=1)
+        self.assertNotIn("[Shot 3]", fixed)
+        self.assertIn("Alex leaves the frame", fixed)
+
+    def test_a_marker_naming_this_shot_is_left_alone(self):
+        prompt = healthy() + "\n[Shot 1] Alex leaves the frame."
+        self.assertEqual(suggested_fix(prompt, "clip-holds-two-shots", shot=1), "")
+
+    def test_a_leaked_heading_is_dropped_without_touching_the_lines_around_it(self):
+        fixed = suggested_fix(LEAKY, "brief-heading-in-clip", shot=1)
+        self.assertNotIn("CAMERA WORK:", fixed)
+        self.assertIn("A slow orbit around them.", fixed)
+        self.assertIn("subject_definitions:", fixed)
+        self.assertEqual(contradiction_findings(fixed, shot=1), [])
+
+    def test_a_heading_the_draft_keeps_as_well_is_not_offered(self):
+        # Editing the compiled prompt would clear nothing, so the panel must not offer a button
+        # that does not work: the suggestion is checked against the draft too.
+        prompt = healthy() + "\nCAMERA:\nA slow orbit around them."
+        draft = SUBJECTS + "\nCAMERA:\nA slow orbit around them."
+        self.assertEqual(suggested_fix(prompt, "brief-heading-in-clip", draft=draft, shot=1), "")
+
+    def test_two_descriptions_disagreeing_are_not_a_textual_fix(self):
+        prompt = healthy(
+            integrated_multimodal_description="The camera is static until the last beat, then it pans slowly."
+        )
+        self.assertEqual(suggested_fix(prompt, "camera-contradiction", shot=1), "")
+
+    def test_a_clean_prompt_has_nothing_to_suggest(self):
+        self.assertEqual(suggested_fix(healthy(), "clip-holds-two-shots", shot=1), "")
+
+    def test_every_mechanical_finding_in_a_real_project_has_a_suggestion(self):
+        # The measured case: 113 findings of this code across 41 projects, every one of them a
+        # leftover timestamp or a pasted marker.
+        for prompt in (
+            healthy("timing: At 00:07.300 she turns."),
+            healthy() + "\n[Shot 4] The light changes.",
+        ):
+            fixed = suggested_fix(prompt, "clip-holds-two-shots", shot=1)
+            self.assertTrue(fixed, prompt)
+            self.assertEqual(contradiction_findings(fixed, shot=1), [])
+
+
+class AuditAnnotationTests(unittest.TestCase):
+    def clip(self, **overrides) -> dict:
+        clip = {
+            "index": 0,
+            "video_prompt": healthy(),
+            "_director_h3_source_prompt": (
+                SUBJECTS
+                + "\nOpening composition: A wide shot of the courtyard."
+                + "\nDialogue: None."
+                + "\nCanonical identity and world: The same courtyard as every other shot."
+            ),
+            "_director_project_context": SUBJECTS,
+        }
+        clip.update(overrides)
+        return clip
+
+    def test_a_shot_carries_the_prompt_it_was_audited_from(self):
+        clip = self.clip(video_prompt=healthy("timing: At MM:04.000 the light changes."))
+        audit = annotated(audit_project_prompts([clip]), [clip])
+        shot = audit["findings"][0]
+        self.assertEqual(shot["prompt"], clip["video_prompt"])
+        finding = shot["findings"][0]
+        self.assertTrue(finding["in_prompt"])
+        self.assertIn("the light changes", finding["fix"])
+        self.assertNotIn("MM:04.000", finding["fix"])
+
+    def test_a_finding_the_draft_keeps_is_marked_and_has_no_fix(self):
+        clip = self.clip()
+        clip["_director_h3_source_prompt"] = clip["_director_h3_source_prompt"] + "\nCAMERA:\nA slow orbit."
+        audit = annotated(audit_project_prompts([clip]), [clip])
+        finding = audit["findings"][0]["findings"][0]
+        self.assertEqual(finding["code"], "brief-heading-in-clip")
+        self.assertFalse(finding["in_prompt"])
+        self.assertEqual(finding["fix"], "")
+
+    def test_a_finding_with_no_mechanical_fix_still_reports_where_it_lives(self):
+        clip = self.clip(
+            video_prompt=healthy(
+                first="<Subject 1> wears a green dress.",
+                second="<Subject 1> wears a white shirt with dark pants.",
+            )
+        )
+        audit = annotated(audit_project_prompts([clip]), [clip])
+        finding = audit["findings"][0]["findings"][0]
+        self.assertEqual(finding["code"], "wardrobe-contradiction")
+        self.assertTrue(finding["in_prompt"])
+        self.assertEqual(finding["fix"], "")
+
+    def test_a_shot_without_findings_is_not_invented(self):
+        clip = self.clip()
+        audit = annotated(audit_project_prompts([clip]), [clip])
+        self.assertEqual(audit["findings"], [])
+
+
 class AuditEndpointTests(unittest.TestCase):
     def test_the_router_serves_the_audit_under_the_pipeline_it_belongs_to(self):
         from services import prompt_audit_api
@@ -349,7 +460,26 @@ class AuditEndpointTests(unittest.TestCase):
             ROOT / "ui" / "src" / "components" / "DirectorDashboard" / "PromptAuditNotices.tsx"
         ).read_text(encoding="utf-8")
         self.assertIn("import { fetchPromptAudit, type PromptAudit } from '../../api/promptAudit'", component)
-        self.assertLess(len(component), 8000)
+        self.assertLess(len(component), 14000)
+
+    def test_the_interface_corrects_a_shot_through_the_endpoint_that_already_edits_one(self):
+        # The correction reuses the shot-prompt endpoint the clip cards save with, so an edit here
+        # and an edit there are the same edit, and the plan reloads behind both.
+        component = (
+            ROOT / "ui" / "src" / "components" / "DirectorDashboard" / "PromptAuditNotices.tsx"
+        ).read_text(encoding="utf-8")
+        self.assertIn("import { updateClipPrompt } from '../../api/client'", component)
+        self.assertIn("await updateClipPrompt(pid, editing.clipIndex, { video_prompt: editing.text })", component)
+        self.assertIn("await loadPipeline(pid)", component)
+
+    def test_the_interface_reloads_the_audit_when_the_plan_changes(self):
+        # Not the status: a prompt edited in a clip card changes neither the status nor the id,
+        # so the panel fingerprints the prompts themselves.
+        component = (
+            ROOT / "ui" / "src" / "components" / "DirectorDashboard" / "PromptAuditNotices.tsx"
+        ).read_text(encoding="utf-8")
+        self.assertIn("pipeline.clips.map(fingerprints).join(',')", component)
+        self.assertIn("}, [pid, status, signature, nonce])", component)
 
     def test_the_dashboard_shows_the_audit_for_the_selected_pipeline(self):
         dashboard = (

@@ -1,13 +1,17 @@
 /**
- * What the prompt audit found, where the decision to render is made.
+ * What the prompt audit found, and the way to fix it, where the decision is made.
  *
  * The audit runs inside the pipeline on the compiled prompts, and until now its findings reached
  * the server log only — a terminal is not where GPU hours get approved. The same audit is read
  * back here from the saved plan, so a contradiction between two shots is on screen before either
- * shot is paid for, and a re-planned project re-reads it.
+ * shot is paid for.
+ *
+ * Fixing is offered, never applied on its own: a finding that is a leftover piece of text comes
+ * with the corrected text as a suggestion, the others open the shot's prompt to be edited, and
+ * either way the director saves. Nothing is blocked, and nothing is rewritten behind their back.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   AlertOctagon,
   AlertTriangle,
@@ -15,9 +19,15 @@ import {
   ChevronDown,
   ChevronRight,
   ClipboardCopy,
+  Pencil,
   RefreshCw,
+  Save,
+  Wand2,
+  X,
 } from 'lucide-react'
 import { fetchPromptAudit, type PromptAudit } from '../../api/promptAudit'
+import { updateClipPrompt } from '../../api/client'
+import { useStore } from '../../stores/useStore'
 
 /** What has been read for which pipeline: a record keeps a stale audit off a new selection. */
 interface Loaded {
@@ -26,18 +36,49 @@ interface Loaded {
   failed: boolean
 }
 
+/** The shot being corrected, and the text the director is looking at. */
+interface Editing {
+  clipIndex: number
+  shot: number
+  text: string
+  suggested: boolean
+}
+
 const NOTHING_LOADED: Loaded = { pid: null, audit: null, failed: false }
 
+/** A cheap fingerprint of the plan's prompts, so an edit made anywhere reloads this panel. */
+function fingerprints(clip: { index: number; video_prompt?: string }): string {
+  const text = clip.video_prompt || ''
+  let hash = 0
+  for (let position = 0; position < text.length; position += 1) {
+    hash = (hash * 31 + text.charCodeAt(position)) | 0
+  }
+  return `${clip.index}:${text.length}:${hash}`
+}
+
 export function PromptAuditNotices({ pid, status }: { pid: string | null; status?: string }) {
+  const pipeline = useStore(state => state.dashboardSelectedPipeline)
+  const loadPipeline = useStore(state => state.loadSavedPipeline)
+
   const [loaded, setLoaded] = useState<Loaded>(NOTHING_LOADED)
+  const [editing, setEditing] = useState<Editing | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [savedShot, setSavedShot] = useState<number | null>(null)
   const [open, setOpen] = useState(true)
   const [nonce, setNonce] = useState(0)
   const [copied, setCopied] = useState(false)
 
+  // The plan itself, not the status: a prompt edited in a clip card changes neither the status
+  // nor the id, and this panel is about the prompts.
+  const signature = useMemo(
+    () => (pipeline && pipeline.pipeline_id === pid ? pipeline.clips.map(fingerprints).join(',') : ''),
+    [pipeline, pid],
+  )
+
   useEffect(() => {
     if (!pid) return
     let live = true
-    // Re-read whenever the plan moves on, so the findings shown are the ones the plan has now.
     fetchPromptAudit(pid)
       .then(audit => {
         if (live) setLoaded({ pid, audit, failed: false })
@@ -48,7 +89,7 @@ export function PromptAuditNotices({ pid, status }: { pid: string | null; status
     return () => {
       live = false
     }
-  }, [pid, status, nonce])
+  }, [pid, status, signature, nonce])
 
   const copyReport = useCallback((report: string | undefined) => {
     if (!report) return
@@ -60,6 +101,22 @@ export function PromptAuditNotices({ pid, status }: { pid: string | null; status
       () => setCopied(false),
     )
   }, [])
+
+  const save = useCallback(async () => {
+    if (!editing || !pid) return
+    setSaving(true)
+    setError(null)
+    try {
+      await updateClipPrompt(pid, editing.clipIndex, { video_prompt: editing.text })
+      await loadPipeline(pid)
+      setSavedShot(editing.shot)
+      setEditing(null)
+    } catch (failure) {
+      setError(String(failure instanceof Error ? failure.message : failure))
+    } finally {
+      setSaving(false)
+    }
+  }, [editing, pid, loadPipeline])
 
   if (!pid) return null
 
@@ -90,6 +147,11 @@ export function PromptAuditNotices({ pid, status }: { pid: string | null; status
           Prompt audit
         </button>
         <span className="flex-1" />
+        {savedShot !== null && (
+          <span className="flex items-center gap-1 text-[10px] text-indicator-success">
+            <Check size={10} /> shot {savedShot} saved
+          </span>
+        )}
         {failed ? (
           <span className="text-[10px] text-red-400">audit unavailable</span>
         ) : busy ? (
@@ -130,6 +192,8 @@ export function PromptAuditNotices({ pid, status }: { pid: string | null; status
         </button>
       </div>
 
+      {error && <p className="mt-2 text-[10px] text-red-400">{error}</p>}
+
       {open && total > 0 && (
         <ul className="mt-2 space-y-1.5">
           {shots
@@ -137,18 +201,98 @@ export function PromptAuditNotices({ pid, status }: { pid: string | null; status
             .map(shot => (
               <li key={shot.index} className="text-[11px]">
                 <span className="text-text-muted">Shot {shot.shot}</span>
-                <ul className="mt-0.5 space-y-0.5">
+                <ul className="mt-0.5 space-y-1">
                   {shot.findings.map((finding, position) => (
-                    <li
-                      key={`${finding.code}-${position}`}
-                      className={
-                        finding.severity === 'error'
-                          ? 'flex gap-1.5 text-red-400'
-                          : 'flex gap-1.5 text-indicator-warning'
-                      }
-                    >
-                      <span className="shrink-0 font-medium">{finding.code}</span>
-                      <span className="text-text-secondary">{finding.message}</span>
+                    <li key={`${finding.code}-${position}`}>
+                      <div
+                        className={
+                          finding.severity === 'error'
+                            ? 'flex flex-wrap items-baseline gap-1.5 text-red-400'
+                            : 'flex flex-wrap items-baseline gap-1.5 text-indicator-warning'
+                        }
+                      >
+                        <span className="shrink-0 font-medium">{finding.code}</span>
+                        <span className="flex-1 text-text-secondary">{finding.message}</span>
+                        {finding.in_prompt === false ? (
+                          <span className="text-[10px] text-text-muted">
+                            lives in the pre-polish draft
+                          </span>
+                        ) : (
+                          <>
+                            {finding.fix && (
+                              <button
+                                onClick={() => {
+                                  setError(null)
+                                  setSavedShot(null)
+                                  setEditing({
+                                    clipIndex: shot.index,
+                                    shot: shot.shot,
+                                    text: finding.fix || '',
+                                    suggested: true,
+                                  })
+                                }}
+                                className="flex items-center gap-0.5 rounded border border-border px-1.5 py-0.5 text-[10px] text-text-muted hover:text-text-primary transition-colors"
+                                title="Put the corrected text in the editor, to review before saving"
+                              >
+                                <Wand2 size={9} /> suggest the fix
+                              </button>
+                            )}
+                            <button
+                              onClick={() => {
+                                setError(null)
+                                setSavedShot(null)
+                                setEditing({
+                                  clipIndex: shot.index,
+                                  shot: shot.shot,
+                                  text: shot.prompt || '',
+                                  suggested: false,
+                                })
+                              }}
+                              className="flex items-center gap-0.5 rounded border border-border px-1.5 py-0.5 text-[10px] text-text-muted hover:text-text-primary transition-colors"
+                            >
+                              <Pencil size={9} /> fix
+                            </button>
+                          </>
+                        )}
+                      </div>
+                      {editing && editing.shot === shot.shot && (
+                        <div className="mt-1 space-y-1">
+                          <textarea
+                            value={editing.text}
+                            onChange={event =>
+                              setEditing(value =>
+                                value ? { ...value, text: event.target.value, suggested: false } : value,
+                              )
+                            }
+                            rows={8}
+                            spellCheck={false}
+                            className="w-full rounded border border-border bg-bg-primary p-2 font-mono text-[10px] text-text-primary"
+                          />
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              onClick={save}
+                              disabled={saving}
+                              className="flex items-center gap-1 rounded bg-accent-blue/20 px-2 py-0.5 text-[10px] text-accent-blue hover:bg-accent-blue/30 disabled:opacity-40 transition-colors"
+                            >
+                              <Save size={10} /> {saving ? 'saving…' : `save shot ${editing.shot}`}
+                            </button>
+                            <button
+                              onClick={() => {
+                                setEditing(null)
+                                setError(null)
+                              }}
+                              className="flex items-center gap-1 rounded border border-border px-2 py-0.5 text-[10px] text-text-muted hover:text-text-primary transition-colors"
+                            >
+                              <X size={10} /> cancel
+                            </button>
+                            <span className="text-[10px] text-text-muted">
+                              {editing.suggested
+                                ? 'suggested text — review it before saving'
+                                : 'the shot renders this text as written'}
+                            </span>
+                          </div>
+                        </div>
+                      )}
                     </li>
                   ))}
                 </ul>

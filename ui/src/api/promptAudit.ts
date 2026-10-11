@@ -6,12 +6,18 @@ export interface PromptAuditFinding {
   code: string
   severity: string
   message: string
+  /** False when the finding lives in the pre-polish draft rather than in this prompt. */
+  in_prompt?: boolean
+  /** The corrected text when this finding is a leftover piece of text; empty otherwise. */
+  fix?: string
 }
 
 /** The findings that belong to one shot. */
 export interface PromptAuditShot {
   shot: number
   index: number
+  /** The compiled prompt this shot renders, as the saved plan has it. */
+  prompt?: string
   findings: PromptAuditFinding[]
 }
 

@@ -35,13 +35,16 @@ from __future__ import annotations
 import re
 from typing import Iterable, Optional
 
+from services.director.h3_single_shot_times import strip_loose_cut_times
 from services.director.project_brief import per_shot_headings
 
-__all__ = ["contradiction_findings"]
+__all__ = ["contradiction_findings", "suggested_fix"]
 
 _SHOT_AT_LINE_START = re.compile(r"(?m)^[ \t]*\[Shot\s*(\d+)\]", re.IGNORECASE)
 _LOOSE_TIMESTAMP = re.compile(r"\bAt\s+(?:MM:|\d{1,2}:)\d{2}(?:\.\d{1,3})?\b")
 _HEADING_LINE = re.compile(r"(?m)^[ \t]*([^\n:]{2,60}):[ \t]*$")
+# The same marker, with whatever follows it on its line, for removal rather than detection.
+_PASTED_MARKER = re.compile(r"(?m)^[ \t]*\[Shot\s*(\d+)\][ \t]*")
 
 # Camera wording, in two piles that cannot both be the whole truth. A prompt may honestly say
 # "static until the last beat, then a slow pan", so this is a warning that names both halves.
@@ -360,3 +363,54 @@ def contradiction_findings(
     findings.extend(_wardrobe(text))
     findings.extend(_music(text))
     return findings
+
+
+def _cleanup(code: str, prompt: str, shot: Optional[int]) -> str:
+    """The prompt with one code's mechanical artifact removed, or "" when there is none.
+
+    Only the two findings that are literally a leftover piece of text have a fix. The others are
+    two descriptions disagreeing, and no rule here can know which of them the director meant, so
+    the answer to those is the editor and not a rewrite.
+    """
+
+    if code == "clip-holds-two-shots":
+        # The pipeline's own stripper, so a suggestion and the compile step cannot drift apart.
+        cleaned, _removed = strip_loose_cut_times(prompt)
+        cleaned = _PASTED_MARKER.sub(
+            lambda match: "" if shot is None or int(match.group(1)) != shot else match.group(0),
+            cleaned,
+        )
+        return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+
+    if code == "brief-heading-in-clip":
+        return "\n".join(
+            line
+            for line in prompt.splitlines()
+            if line.strip().rstrip(":").strip().upper() not in per_shot_headings
+        ).strip()
+
+    return ""
+
+
+def suggested_fix(
+    prompt: str,
+    code: str,
+    *,
+    draft: str = "",
+    shot: Optional[int] = None,
+) -> str:
+    """The prompt with that one contradiction taken out, or "" when there is no safe fix.
+
+    The result is checked by auditing it again -- with the draft, exactly as the audit does -- and
+    is withheld if the code still fires. That is what keeps a suggestion honest: when the same
+    heading reaches the pre-polish draft as well, editing the compiled prompt would clear nothing
+    and the panel has to say so instead of offering a button that does not work.
+    """
+
+    original = str(prompt or "")
+    fixed = _cleanup(str(code or ""), original, shot)
+    if not fixed or fixed == original:
+        return ""
+    if code in {finding["code"] for finding in contradiction_findings(fixed, draft=draft, shot=shot)}:
+        return ""
+    return fixed
