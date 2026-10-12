@@ -35,21 +35,62 @@ from __future__ import annotations
 import json
 import time
 
-__all__ = ["release", "released_note"]
+from fastapi import APIRouter
+
+__all__ = ["load", "memory", "release", "released_note", "router"]
+
+# The control in Settings asks these on the page's behalf: Strata accepts /v1/unload and /v1/load
+# only from its own page or a trusted origin, and Maestro's page is neither, while a server-to-server
+# call sends no Origin at all.
+router = APIRouter()
 
 # address -> monotonic reading of the last "it is released" note, so a status poll does not repeat it
 _noted: dict[str, float] = {}
 _NOTE_TTL = 120.0
 
 _TIMEOUT = 5.0
+# A load waits for the model: measured 22 s warm and 52.7 s cold on this machine, so the ceiling is
+# generous -- the point is to answer with the truth, not to give up on the model.
+_LOAD_TIMEOUT = 600.0
 
 
-def _address() -> tuple[str, str]:
-    """The writer Maestro last used: (provider, address), or ("", "") when there is none."""
+def _configured() -> tuple[str, str]:
+    """The writer named in Settings, for a server that has not planned anything yet.
+
+    Only the configuration of a **running** application counts: the live settings when the engine is
+    already imported, and nothing otherwise. Two reasons, both learned the hard way -- importing
+    ``wgp`` from here exits the process when a dependency of the engine is missing (correct for the
+    application, fatal for anything that merely wants to read the settings), and reading the saved
+    file would let a test suite reach a real server and unload the model a director is using.
+    """
+
+    try:
+        import sys
+
+        running = sys.modules.get("wgp")
+        services = (getattr(running, "server_config", None) or {}).get("services", {}) or {}
+        return str(services.get("llm_provider", "")), str(services.get("llm_remote_url", "") or "")
+    except Exception:
+        return "", ""
+
+
+def _target() -> str:
+    """The address whose memory this module may act on, or "" when there is none.
+
+    The address a run used comes first, because that is the one in use. Failing that -- a server that
+    has not planned anything yet -- the remote URL named in Settings answers instead, which is what
+    the control in Settings is looking at before the first call. The provider field is deliberately
+    not consulted: the memory worth releasing is the server's, whether or not the current selection
+    happens to be that server, and a server that cannot do this simply does not answer the request.
+    """
 
     from services import llm_writer_health
 
-    return llm_writer_health.last_writer()
+    recorded = llm_writer_health.last_writer()
+    address = recorded[1] or _configured()[1]
+    if not address or not llm_writer_health.is_local_endpoint(address):
+        return ""
+    return address
 
 
 def _state(url: str) -> str:
@@ -92,6 +133,89 @@ def _forget_notes() -> None:
     _noted.clear()
 
 
+def _ours() -> str:
+    """The address this module may act on, or "" when the writer is not one on this machine."""
+
+    return _target()
+
+
+def memory() -> dict:
+    """What the writer is holding right now, for a control that has to show it before it acts."""
+
+    address = _ours()
+    if not address:
+        return {"state": "unknown", "address": "", "detail": "no writer on this machine is configured"}
+    try:
+        state = _state(address)
+    except Exception as exc:
+        return {"state": "unknown", "address": address, "detail": str(exc)}
+    return {
+        "state": state or "unknown",
+        "address": address,
+        "detail": "released: the next request loads it back" if state == "unloaded" else "",
+    }
+
+
+def load(pid: str = "") -> bool:
+    """Load the writer now, ahead of the request that would otherwise pay for it.
+
+    Used by the control in Settings, where the wait is the point: the director is about to work and
+    wants the writer ready rather than slow on the first call.
+    """
+
+    try:
+        import requests
+
+        from services.llm_endpoint import remote_base
+
+        address = _ours()
+        if not address:
+            return False
+        response = requests.post(
+            f"{remote_base(address)}/v1/load",
+            json={},
+            headers={"Content-Type": "application/json"},
+            timeout=_LOAD_TIMEOUT,
+        )
+        if response.status_code != 200:
+            detail = f"HTTP {response.status_code}"
+            try:
+                detail = (response.json() or {}).get("error", {}).get("message") or detail
+            except ValueError:
+                pass
+            print(f"[LLM] {address} would not load: {detail}")
+            return False
+    except Exception as exc:  # the control reports this; nothing else depends on it
+        print(f"[LLM] {address} would not load: {exc}")
+        return False
+    _forget_notes()
+    print(f"[LLM] {address} loaded on request")
+    return True
+
+
+@router.get("/api/v1/llm/writer/memory")
+def writer_memory():
+    """What the writer is holding, so the control can show it before it acts."""
+
+    return memory()
+
+
+@router.post("/api/v1/llm/writer/memory/release")
+def writer_release():
+    """Give the memory back now, instead of waiting for a render to start."""
+
+    released = release(stage="control in Settings")
+    return {"released": released, **memory()}
+
+
+@router.post("/api/v1/llm/writer/memory/load")
+def writer_load():
+    """Load the writer now, so the first call of the session is not the slow one."""
+
+    loaded = load()
+    return {"loaded": loaded, **memory()}
+
+
 def _freed_summary(response) -> str:
     """What is still held after a release, from the server's own reading, or ""."""
 
@@ -116,12 +240,11 @@ def release(pid: str = "", stage: str = "") -> bool:
     try:
         import requests
 
-        from services import llm_writer_health
         from services.llm_endpoint import remote_base
 
-        provider, address = _address()
-        if provider not in {"remote", "openai"} or not address or not llm_writer_health.is_local_endpoint(address):
-            return False  # a hosted API has no such switch, and we cannot ask one that is not ours
+        address = _ours()
+        if not address:
+            return False  # nothing on this machine to ask
         state = _state(address)
         if state == "unloaded":
             return True  # already given back; nobody needs to be told

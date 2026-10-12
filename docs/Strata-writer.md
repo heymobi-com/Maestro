@@ -194,6 +194,27 @@ the wait once instead of leaving it unexplained:
 (around 20-50 s on this machine, once).
 ```
 
+### The control in Settings
+
+**Settings → LLM** shows *Writer memory* for the Strata entry: the state (`loaded` / `released`), the
+address it is talking about, **Release memory**, **Load now** and a refresh. It is the manual form of
+the two automatic behaviours above — for a director who knows a render is next, or who would rather
+load the model before the session instead of paying for it on the first planning call.
+
+The request goes to Maestro, not to the writer: a model server accepts `/v1/unload` and `/v1/load`
+only from its own page or an origin it trusts, and Maestro's page is neither, while a server-side call
+sends no `Origin` at all.
+
+```bash
+curl http://127.0.0.1:<maestro-port>/api/v1/llm/writer/memory
+curl -X POST http://127.0.0.1:<maestro-port>/api/v1/llm/writer/memory/release
+curl -X POST http://127.0.0.1:<maestro-port>/api/v1/llm/writer/memory/load     # blocks until ready
+```
+
+The control acts on the **address** — the one a run used, or the remote URL in Settings — and not on
+which provider is selected, because the memory worth releasing belongs to the server either way.
+"A local writer and a Strata URL": releasing Strata still frees 20 GiB.
+
 ### The pieces, if you want to drive it yourself
 
 ```bash

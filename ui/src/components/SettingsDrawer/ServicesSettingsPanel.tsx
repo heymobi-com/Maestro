@@ -5,6 +5,7 @@ import { useStore } from '../../stores/useStore'
 import { ApiKeyField } from '../shared/ApiKeyField'
 import { RemoteModelMemoryControls } from './RemoteModelMemoryControls'
 import { isStrataUrl, STRATA_DEFAULT_URL } from '../../lib/strataProvider'
+import { WriterReleaseControl } from './WriterReleaseControl'
 
 const PUBLIC_PROVIDERS = new Set(['openai', 'anthropic'])
 
@@ -225,8 +226,7 @@ export function ServicesSettingsPanel() {
 
   const provider = servicesConfig.llm_provider || 'local'
   const isRemote = provider === 'remote'
-  // The Strata preset is the remote transport with its URL filled in; the backend
-  // recognises the server itself, so nothing else distinguishes the two here.
+  // The Strata preset is the remote transport with its URL filled in; the backend recognises the server itself.
   const isStrata = isRemote && isStrataUrl(servicesConfig.llm_remote_url)
   const isOpenAI = provider === 'openai'
   const isLocal = provider === 'local'
@@ -283,9 +283,7 @@ export function ServicesSettingsPanel() {
               const picked = e.target.value
               const newProvider = picked === 'strata' ? 'remote' : picked
               const updates: Record<string, unknown> = { llm_provider: newProvider }
-              if (picked === 'strata' && !isStrataUrl(servicesConfig.llm_remote_url)) {
-                updates.llm_remote_url = STRATA_DEFAULT_URL
-              }
+              if (picked === 'strata' && !isStrataUrl(servicesConfig.llm_remote_url)) updates.llm_remote_url = STRATA_DEFAULT_URL
               // Auto-disable NSFW when switching to a public provider
               if (PUBLIC_PROVIDERS.has(newProvider) && servicesConfig.nsfw_mode) {
                 updates.nsfw_mode = false
@@ -388,10 +386,8 @@ export function ServicesSettingsPanel() {
           updateConfig={updateConfig}
           llmModels={llmModels}
         />
-        {isRemote && !isStrata && <RemoteModelMemoryControls
-          key={servicesConfig.llm_remote_url}
-          modelId={servicesConfig.llm_model_id}
-        />}
+        {isRemote && (isStrata ? <WriterReleaseControl url={servicesConfig.llm_remote_url} /> :
+          <RemoteModelMemoryControls key={servicesConfig.llm_remote_url} modelId={servicesConfig.llm_model_id} />)}
 
         {/* Device selector (local only) */}
         {isLocal && (

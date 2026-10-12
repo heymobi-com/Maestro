@@ -450,8 +450,9 @@ class AuditEndpointTests(unittest.TestCase):
 
     def test_the_application_mounts_the_router(self):
         source = (ROOT / "app" / "launch.py").read_text(encoding="utf-8")
-        self.assertIn("from services import checkpoint_health, prompt_audit_api", source)
         self.assertIn("api.include_router(prompt_audit_api.router)", source)
+        # Imported and mounted: the count survives another feature joining the same import line.
+        self.assertGreaterEqual(source.count("prompt_audit_api"), 2, "imported and mounted")
 
     def test_the_interface_asks_for_the_same_path_the_router_serves(self):
         api = (ROOT / "ui" / "src" / "api" / "promptAudit.ts").read_text(encoding="utf-8")

@@ -275,7 +275,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from services.access_log_filter import install_quiet_access_filter
 from services.http_runtime import configure_http_runtime
-from services import checkpoint_health, prompt_audit_api
+from services import checkpoint_health, llm_writer_supervision, prompt_audit_api
 
 # Uvicorn's logging configuration replaces handlers but retains logger-level
 # filters. Install early, then idempotently confirm it again before startup.
@@ -285,6 +285,7 @@ api = FastAPI(title="Maestro API", version="1.0.0")
 api.add_event_handler("startup", configure_http_runtime)
 api.include_router(checkpoint_health.router)
 api.include_router(prompt_audit_api.router)
+api.include_router(llm_writer_supervision.router)
 
 # Upload size caps — enforced in upload handlers. Tuned for real-world
 # media the app actually ingests; anything larger is almost certainly
@@ -10804,8 +10805,7 @@ async def director_v2_plan(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
     finally:
-        # The card disappears the moment the pass stops, whether it finished,
-        # failed or was cancelled.
+        # The card disappears the moment the pass stops, finished, failed or cancelled.
         plan_operation.finish(operation)
 
 
