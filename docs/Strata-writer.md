@@ -194,6 +194,37 @@ the wait once instead of leaving it unexplained:
 (around 20-50 s on this machine, once).
 ```
 
+### A writer that is not running at all
+
+The control also starts a stopped server, and that is the half that was missing. Reported from use:
+"si no esta funcionando strata maestro no muestra el selector de model qwen3.8-flash-next-iq2_xs, es
+hasta que se inicia strata que lo puede uno seleccionar" — a closed circle, because the model list
+comes from the server, so there is nothing to select until the server is up.
+
+So the panel now carries the command that starts the writer (**start command**, saved by Maestro in
+`app/writer_supervision.json`, which is machine-specific and not part of the repository). When the
+panel finds the writer down it runs that command once, waits for it, and asks the panel to refresh the
+model list — after which the model is there to select. `Start now` does the same on demand, and
+clearing the command means Maestro never starts anything by itself.
+
+The pipeline asks for the same thing when it needs the writer, so planning does not stop at an empty
+list either: with the writer down, a call waits up to 120 s for it to come up, and the honest error
+arrives only if it does not.
+
+```bash
+curl http://127.0.0.1:<maestro-port>/api/v1/llm/writer/autostart
+curl -X POST http://127.0.0.1:<maestro-port>/api/v1/llm/writer/autostart \
+     -H 'Content-Type: application/json' -d '{"start":"powershell -File C:\\Strata\\restart-strata.ps1 -NoBrowser"}'
+curl -X POST http://127.0.0.1:<maestro-port>/api/v1/llm/writer/start     # blocks until it answers
+```
+
+Verified with the server stopped: the state read `unknown` ("not running"), `start` answered
+`{"started": true, "state": "loaded"}`, and `/v1/models` then listed `qwen3.8-flash-next-iq2_xs` —
+which is the list the selector is built from.
+
+Only the running application starts a process: a test suite imports these modules, and it must never
+launch a server on the machine it runs on.
+
 ### The control in Settings
 
 **Settings → LLM** shows *Writer memory* for the Strata entry: the state (`loaded` / `released`), the

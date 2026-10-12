@@ -1,5 +1,6 @@
 {
   "files": {
+    ".gitignore": 1,
     "app/launch.py": 183,
     "app/requirements.txt": 6,
     "app/services/audio_analysis.py": 173,
@@ -51,7 +52,8 @@
     "app/services/llm_service.py": "Priority: upstream edits it. Lowered from 25 while adding the remote dialect: the idle-unload policy moved out to app/services/llm_idle.py, which paid for the three seams the dialect needed (the import, one call in _finalize_payload that both request paths already pass through, and letting the two grammar sites state the request instead of each deciding what to send). Every rule about which endpoint receives which form lives in app/services/llm_remote_dialect.py. Two more seams paid for the same way, by compressing the comments at the grammar sites: is_loaded now asks app/services/llm_writer_health.py whether a remote writer really answers, and the remote failure path asks it for the sentence that names the address to go and start.",
     "ui/src/components/MainContent/MediaFeedItem.tsx": "Priority: upstream churn here is heavy (+102/-39 in 2.4.1).",
     "app/requirements.txt": "One line that must survive: the setuptools pin, because ctranslate2 imports pkg_resources and without it every transcription is skipped.",
-    "tests/test_gallery_active_media.py": "New seam: one upstream test asserted the private shape of the height store (useState keyed by outputIds), which our identity-keyed useRef cannot satisfy. It is rewritten to pin the behaviour it names -- a measured height reflows the virtualized offsets at once -- so the regression is still caught without pinning either implementation."
+    "tests/test_gallery_active_media.py": "New seam: one upstream test asserted the private shape of the height store (useState keyed by outputIds), which our identity-keyed useRef cannot satisfy. It is rewritten to pin the behaviour it names -- a measured height reflows the virtualized offsets at once -- so the regression is still caught without pinning either implementation.",
+    ".gitignore": "One line, and the smallest seam here: app/writer_supervision.json is machine-specific (it holds the command that starts this machine's writer), so it must not be committed. Adding it to the ignore list is the only way to keep it out of the repository, and the line is a path, not code: a merge that takes upstream's side loses the ignore and shows the file as untracked, which is visible and harmless, unlike committing a local path."
   },
   "upstream": "origin/main"
 }

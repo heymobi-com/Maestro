@@ -27,3 +27,33 @@ export async function loadWriter(): Promise<WriterMemory & { loaded: boolean }> 
   if (!res.ok) throw new Error('Could not load the writer')
   return res.json()
 }
+
+/** What Maestro would run to start a writer that is not running at all. */
+export interface WriterAutostart {
+  start: string
+  wait_seconds: number
+}
+
+export async function fetchWriterAutostart(): Promise<WriterAutostart> {
+  const res = await fetch('/api/v1/llm/writer/autostart')
+  if (!res.ok) throw new Error('Writer autostart unavailable')
+  return res.json()
+}
+
+/** Set or clear the command. Empty means Maestro never starts the writer by itself. */
+export async function saveWriterAutostart(start: string): Promise<WriterAutostart> {
+  const res = await fetch('/api/v1/llm/writer/autostart', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ start }),
+  })
+  if (!res.ok) throw new Error('Could not save the start command')
+  return res.json()
+}
+
+/** Start a stopped writer and wait for it (this is the call that ends the chicken and egg). */
+export async function startWriter(): Promise<WriterMemory & { started: boolean }> {
+  const res = await fetch('/api/v1/llm/writer/start', { method: 'POST' })
+  if (!res.ok) throw new Error('Could not start the writer')
+  return res.json()
+}

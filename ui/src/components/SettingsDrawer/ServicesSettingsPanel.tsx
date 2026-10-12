@@ -386,7 +386,7 @@ export function ServicesSettingsPanel() {
           updateConfig={updateConfig}
           llmModels={llmModels}
         />
-        {isRemote && (isStrata ? <WriterReleaseControl url={servicesConfig.llm_remote_url} /> :
+        {isRemote && (isStrata ? <WriterReleaseControl url={servicesConfig.llm_remote_url} onStarted={loadLlmModels} /> :
           <RemoteModelMemoryControls key={servicesConfig.llm_remote_url} modelId={servicesConfig.llm_model_id} />)}
 
         {/* Device selector (local only) */}

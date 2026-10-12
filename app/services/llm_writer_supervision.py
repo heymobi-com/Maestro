@@ -37,7 +37,16 @@ import time
 
 from fastapi import APIRouter
 
-__all__ = ["load", "memory", "release", "released_note", "router"]
+__all__ = [
+    "autostart",
+    "load",
+    "memory",
+    "release",
+    "released_note",
+    "router",
+    "set_autostart",
+    "start",
+]
 
 # The control in Settings asks these on the page's behalf: Strata accepts /v1/unload and /v1/load
 # only from its own page or a trusted origin, and Maestro's page is neither, while a server-to-server
@@ -52,6 +61,162 @@ _TIMEOUT = 5.0
 # A load waits for the model: measured 22 s warm and 52.7 s cold on this machine, so the ceiling is
 # generous -- the point is to answer with the truth, not to give up on the model.
 _LOAD_TIMEOUT = 600.0
+
+# The command that starts a writer which is not running at all, and how long to wait for it. Ours,
+# in our own file: it is machine-specific (a path, a launcher) and therefore not something the shared
+# application settings should carry.
+_CONFIG_NAME = "writer_supervision.json"
+_DEFAULT_WAIT = 300.0
+_START_TIMEOUT = 900.0
+
+# Guards for the start path: one attempt at a time, and no attempt within this many seconds of the
+# last one, so a status poll cannot turn into a stream of launches.
+_starting = False
+_last_attempt = 0.0
+_ATTEMPT_COOLDOWN = 120.0
+
+
+def _config_path() -> str:
+    import os
+
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), _CONFIG_NAME)
+
+
+def autostart() -> dict:
+    """The command that starts the writer, and how long to wait for it. Empty means never start it."""
+
+    try:
+        import json
+
+        with open(_config_path(), "r", encoding="utf-8") as handle:
+            saved = json.load(handle) or {}
+        return {
+            "start": str(saved.get("start") or ""),
+            "wait_seconds": float(saved.get("wait_seconds") or _DEFAULT_WAIT),
+        }
+    except Exception:
+        return {"start": "", "wait_seconds": _DEFAULT_WAIT}
+
+
+def set_autostart(command: str, wait_seconds=None) -> dict:
+    """Save the start command. Clearing it means Maestro never starts the writer by itself."""
+
+    import json
+
+    saved = {"start": str(command or "").strip()}
+    if wait_seconds:
+        try:
+            saved["wait_seconds"] = float(wait_seconds)
+        except (TypeError, ValueError):
+            saved["wait_seconds"] = _DEFAULT_WAIT
+    with open(_config_path(), "w", encoding="utf-8", newline="\n") as handle:
+        json.dump(saved, handle, indent=1, ensure_ascii=False)
+        handle.write("\n")
+    _forget_notes()
+    return autostart()
+
+
+def _answers(address: str) -> bool:
+    """Whether this address answers at all, right now. Cheap: one models request."""
+
+    try:
+        import requests
+
+        from services.llm_endpoint import models_url
+
+        return bool(requests.get(models_url(address), timeout=_TIMEOUT).ok)
+    except Exception:
+        return False
+
+
+def start(address: str = "", wait_seconds: float = 0.0) -> bool:
+    """Run the configured start command and wait for the writer to answer.
+
+    Reported from use: "quiero decir que si no lo arranco primero nunca va a iniciar? aqui es donde
+    estoy confundido" -- with the writer stopped, the model list was empty and generating did nothing,
+    and nothing said that starting a server was the whole fix. Now Maestro starts it when it needs it,
+    from a command the operator controls, and says how long that takes.
+
+    Never raises: a start that cannot happen leaves the honest error the pipeline already shows.
+    """
+
+    global _starting, _last_attempt
+
+    address = address or _ours()
+    if not address or not _in_application():
+        return False
+    if _answers(address):
+        return True
+    setting = autostart()
+    if not setting["start"]:
+        return False
+    moment = time.monotonic()
+    if _starting or moment - _last_attempt < _ATTEMPT_COOLDOWN:
+        return False  # one attempt at a time, and not one per status poll
+    _starting = True
+    _last_attempt = moment
+    try:
+        import subprocess
+        import sys
+
+        print(f"[LLM] starting the writer at {address}: {setting['start']}")
+        creation = 0
+        if sys.platform == "win32":
+            creation = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess.Popen(setting["start"], shell=True, creationflags=creation)
+        limit = float(wait_seconds or 0) or min(float(setting["wait_seconds"]), _START_TIMEOUT)
+        limit = min(limit, _START_TIMEOUT)
+        waited = 0.0
+        while waited < limit:
+            time.sleep(3.0)
+            waited += 3.0
+            if _answers(address):
+                print(f"[LLM] the writer at {address} is up after {waited:.0f} s")
+                return True
+            if int(waited) % 30 == 0:
+                print(f"[LLM] still starting the writer at {address} ({waited:.0f} s)")
+        print(f"[LLM] the writer at {address} did not come up in {limit:.0f} s")
+        return False
+    except Exception as exc:  # the honest error the pipeline already shows is the fallback
+        print(f"[LLM] could not start the writer at {address}: {exc}")
+        return False
+    finally:
+        _starting = False
+
+
+@router.get("/api/v1/llm/writer/autostart")
+def writer_autostart():
+    """What Maestro would run to start the writer, if it is not running."""
+
+    return autostart()
+
+
+@router.post("/api/v1/llm/writer/autostart")
+def writer_set_autostart(body: dict | None = None):
+    """Set or clear that command."""
+
+    body = body or {}
+    return set_autostart(body.get("start", ""), body.get("wait_seconds"))
+
+
+@router.post("/api/v1/llm/writer/start")
+def writer_start():
+    """Start the writer now, and report whether it came up."""
+
+    started = start()
+    return {"started": started, **memory()}
+
+
+def _in_application() -> bool:
+    """Whether Maestro itself is running, rather than a test or a one-off import.
+
+    The autostart is an action of the application: it launches a process, and a test suite must never
+    launch one. The engine module being imported is what tells the two apart.
+    """
+
+    import sys
+
+    return sys.modules.get("wgp") is not None
 
 
 def _configured() -> tuple[str, str]:
@@ -148,7 +313,12 @@ def memory() -> dict:
     try:
         state = _state(address)
     except Exception as exc:
-        return {"state": "unknown", "address": address, "detail": str(exc)}
+        from services import llm_writer_health
+
+        # A refused connection is the ordinary "it is not running", and the panel should say that
+        # rather than show the pool's stack of retries.
+        detail = "not running" if llm_writer_health.is_connection_failure(exc) else str(exc)
+        return {"state": "unknown", "address": address, "detail": detail}
     return {
         "state": state or "unknown",
         "address": address,

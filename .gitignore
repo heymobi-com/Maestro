@@ -70,6 +70,7 @@ app/settings/
 app/icons/lora_previews/
 app/uploads/
 app/wgp_config.json
+app/writer_supervision.json
 app/plugins_local.json
 app/loras_url_cache.json
 app/presets.json

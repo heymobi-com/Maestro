@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 __all__ = [
     "answers",
     "forget",
+    "is_connection_failure",
     "is_local_endpoint",
     "last_writer",
     "not_loaded_message",
@@ -35,6 +36,10 @@ __all__ = [
 _REMOTE_PROVIDERS = {"remote", "openai", "anthropic"}
 _TTL = 10.0
 _TIMEOUT = 2.0
+
+# How long a caller that merely asks whether the writer is there waits for a configured start. The
+# pipeline retries; a status poll must not.
+_ON_NEED_WAIT = 120.0
 
 # A connection that never reached the server, by the name requests and the
 # standard library give it. A status code means the server did answer.
@@ -112,6 +117,19 @@ def _note_released(address: str) -> None:
         print(f"[LLM] {note}")
 
 
+def _start_on_need(address: str) -> bool:
+    """Start a writer that is not running, if the operator configured how.
+
+    The wait is capped here on purpose: this predicate is also what a status poll reads, and a poll
+    should not hang for the several minutes a cold start can take. The control in Settings and the
+    pipeline's own retry both finish the job.
+    """
+
+    from services import llm_writer_supervision
+
+    return llm_writer_supervision.start(address, wait_seconds=_ON_NEED_WAIT)
+
+
 def answers(provider: str, url: str, model_id: str = "") -> bool:
     """Whether the configured writer can be reached right now.
 
@@ -140,6 +158,11 @@ def answers(provider: str, url: str, model_id: str = "") -> bool:
         reachable, state = _reachable(address)
     except Exception:
         reachable, state = False, ""  # A server that does not answer is not reachable.
+    if not reachable and _start_on_need(address):
+        try:
+            reachable, state = _reachable(address)
+        except Exception:
+            reachable, state = False, ""
     if reachable and state == "unloaded":
         _note_released(address)
     _cache[address] = (moment, reachable)
@@ -155,7 +178,9 @@ def forget(url: str = "") -> None:
         _cache.clear()
 
 
-def _is_connection_failure(exc: Any) -> bool:
+def is_connection_failure(exc: Any) -> bool:
+    """Whether this exception means the server was never reached, rather than that it refused."""
+
     return any(cls.__name__ in _CONNECTION_FAILURES for cls in type(exc).__mro__)
 
 
@@ -182,7 +207,7 @@ def not_loaded_message(provider: str, url: str) -> str:
 def unreachable_hint(provider: str, url: str, exc: Any) -> str:
     """A sentence for the error the pipeline shows, or "" when it does not apply."""
 
-    if str(provider or "") not in _REMOTE_PROVIDERS or not _is_connection_failure(exc):
+    if str(provider or "") not in _REMOTE_PROVIDERS or not is_connection_failure(exc):
         return ""
     address = str(url or "").strip()
     if not address or not is_local_endpoint(address):

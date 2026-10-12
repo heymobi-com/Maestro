@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -239,9 +240,12 @@ class MemoryControlTests(unittest.TestCase):
     def test_the_routes_the_control_calls(self):
         paths = sorted((route.path, tuple(sorted(route.methods))) for route in llm_writer_supervision.router.routes)
         self.assertEqual(paths, [
+            ("/api/v1/llm/writer/autostart", ("GET",)),
+            ("/api/v1/llm/writer/autostart", ("POST",)),
             ("/api/v1/llm/writer/memory", ("GET",)),
             ("/api/v1/llm/writer/memory/load", ("POST",)),
             ("/api/v1/llm/writer/memory/release", ("POST",)),
+            ("/api/v1/llm/writer/start", ("POST",)),
         ])
 
     def test_the_release_route_answers_with_the_new_state(self):
@@ -274,7 +278,9 @@ class MemoryControlTests(unittest.TestCase):
         panel = (ROOT / "ui" / "src" / "components" / "SettingsDrawer" / "ServicesSettingsPanel.tsx").read_text(
             encoding="utf-8")
         self.assertIn("import { WriterReleaseControl } from './WriterReleaseControl'", panel)
-        self.assertIn("<WriterReleaseControl url={servicesConfig.llm_remote_url} />", panel)
+        # The control is told to refresh the model list: a writer that was down is started here, and
+        # the list it fills is what makes the model selectable at all.
+        self.assertIn("<WriterReleaseControl url={servicesConfig.llm_remote_url} onStarted={loadLlmModels} />", panel)
         # The LM Studio control stays for every other remote provider.
         self.assertIn("<RemoteModelMemoryControls key={servicesConfig.llm_remote_url}", panel)
 
@@ -286,6 +292,137 @@ class MemoryControlTests(unittest.TestCase):
         self.assertIn("'/api/v1/llm/writer/memory/release'", api)
         self.assertIn("'/api/v1/llm/writer/memory/load'", api)
         self.assertNotIn("8081", api)
+
+
+class AutostartTests(unittest.TestCase):
+    """Starting a writer that is not running, which is the half that was missing.
+
+    Reported from use: "quiero decir que si no lo arranco primero nunca va a iniciar? aqui es donde
+    estoy confundido" -- with the server stopped the model list was empty and generating did nothing.
+    """
+
+    def setUp(self):
+        llm_writer_health.forget()
+        llm_writer_supervision._forget_notes()
+        llm_writer_supervision._last_attempt = 0.0
+        llm_writer_supervision._starting = False
+        self.config = Path(tempfile.mkdtemp()) / "writer_supervision.json"
+        self.path = patch.object(llm_writer_supervision, "_config_path", return_value=str(self.config))
+        self.path.start()
+        self.addCleanup(self.path.stop)
+        self.configured = patch.object(llm_writer_supervision, "_configured", return_value=("", ""))
+        self.configured.start()
+        self.addCleanup(self.configured.stop)
+        with patch("requests.get", return_value=listing()):
+            llm_writer_health.answers("remote", STRATA, "m")
+
+    def test_a_test_never_launches_a_process(self):
+        # The suite must not start a server on the machine it runs on, whatever the config says.
+        llm_writer_supervision.set_autostart("start-strata")
+        with patch.object(llm_writer_supervision, "_in_application", return_value=False), \
+             patch("subprocess.Popen") as popen:
+            self.assertFalse(llm_writer_supervision.start())
+        popen.assert_not_called()
+
+    def test_nothing_is_started_without_a_command(self):
+        with patch.object(llm_writer_supervision, "_in_application", return_value=True), \
+             patch.object(llm_writer_supervision, "_answers", return_value=False), \
+             patch("subprocess.Popen") as popen:
+            self.assertFalse(llm_writer_supervision.start())
+        popen.assert_not_called()
+
+    def test_a_writer_that_already_answers_is_not_started(self):
+        llm_writer_supervision.set_autostart("start-strata")
+        with patch.object(llm_writer_supervision, "_in_application", return_value=True), \
+             patch.object(llm_writer_supervision, "_answers", return_value=True), \
+             patch("subprocess.Popen") as popen:
+            self.assertTrue(llm_writer_supervision.start())
+        popen.assert_not_called()
+
+    def test_the_configured_command_is_run_and_waited_for(self):
+        llm_writer_supervision.set_autostart("start-strata")
+        answers = iter([False, False, True])          # down, then up
+
+        def probe(_address):
+            return next(answers, True)
+
+        with patch.object(llm_writer_supervision, "_in_application", return_value=True), \
+             patch.object(llm_writer_supervision, "_answers", side_effect=probe), \
+             patch("time.sleep", return_value=None), \
+             patch("subprocess.Popen", return_value=object()) as popen, patch("builtins.print") as printed:
+            self.assertTrue(llm_writer_supervision.start(wait_seconds=30))
+        popen.assert_called_once()
+        self.assertIn("start-strata", popen.call_args[0][0])
+        line = " ".join(str(c.args[0]) for c in printed.call_args_list)
+        self.assertIn("is up after", line)
+
+    def test_a_start_that_does_not_come_up_gives_up_and_says_so(self):
+        llm_writer_supervision.set_autostart("start-strata")
+        with patch.object(llm_writer_supervision, "_in_application", return_value=True), \
+             patch.object(llm_writer_supervision, "_answers", return_value=False), \
+             patch("time.sleep", return_value=None), \
+             patch("subprocess.Popen", return_value=object()), patch("builtins.print") as printed:
+            self.assertFalse(llm_writer_supervision.start(wait_seconds=9))
+        self.assertIn("did not come up", " ".join(str(c.args[0]) for c in printed.call_args_list))
+
+    def test_a_status_poll_cannot_start_a_stream_of_launches(self):
+        llm_writer_supervision.set_autostart("start-strata")
+        with patch.object(llm_writer_supervision, "_in_application", return_value=True), \
+             patch.object(llm_writer_supervision, "_answers", side_effect=[False, False, False, False]), \
+             patch("time.sleep", return_value=None), \
+             patch("subprocess.Popen", return_value=object()) as popen:
+            self.assertFalse(llm_writer_supervision.start(wait_seconds=3))
+            self.assertFalse(llm_writer_supervision.start(wait_seconds=3))   # inside the cooldown
+        self.assertEqual(popen.call_count, 1)
+
+    def test_the_command_is_saved_and_read_back(self):
+        self.assertEqual(llm_writer_supervision.autostart()["start"], "")
+        llm_writer_supervision.set_autostart('start-strata -NoBrowser', 120)
+        saved = llm_writer_supervision.autostart()
+        self.assertEqual(saved["start"], "start-strata -NoBrowser")
+        self.assertEqual(saved["wait_seconds"], 120)
+        llm_writer_supervision.set_autostart("")                          # cleared: never start it
+        self.assertEqual(llm_writer_supervision.autostart()["start"], "")
+
+    def test_the_settings_control_reports_a_stopped_writer_as_down(self):
+        with patch.object(llm_writer_supervision, "_answers", return_value=False), \
+             patch("requests.get", side_effect=OSError("connection refused")):
+            answer = llm_writer_supervision.memory()
+        self.assertEqual(answer["state"], "unknown")
+        self.assertEqual(answer["address"], STRATA)
+
+    def test_a_stopped_writer_is_reported_in_plain_words(self):
+        # The panel shows this line, so it must not be the connection pool's stack of retries.
+        refused = ConnectionRefusedError("Failed to establish a new connection: [WinError 10061]")
+        with patch.object(llm_writer_supervision, "_state", side_effect=refused):
+            answer = llm_writer_supervision.memory()
+        self.assertEqual(answer["detail"], "not running")
+
+
+class AutostartRouteTests(unittest.TestCase):
+    def setUp(self):
+        self.config = Path(tempfile.mkdtemp()) / "writer_supervision.json"
+        self.path = patch.object(llm_writer_supervision, "_config_path", return_value=str(self.config))
+        self.path.start()
+        self.addCleanup(self.path.stop)
+
+    def test_the_route_saves_the_command(self):
+        answer = llm_writer_supervision.writer_set_autostart({"start": "start-strata -NoBrowser"})
+        self.assertEqual(answer["start"], "start-strata -NoBrowser")
+        self.assertEqual(llm_writer_supervision.writer_autostart()["start"], "start-strata -NoBrowser")
+
+    def test_the_route_clears_it(self):
+        llm_writer_supervision.writer_set_autostart({"start": "start-strata"})
+        llm_writer_supervision.writer_set_autostart({"start": ""})
+        self.assertEqual(llm_writer_supervision.writer_autostart()["start"], "")
+
+    def test_the_start_route_reports_whether_it_came_up(self):
+        with patch.object(llm_writer_supervision, "start", return_value=True) as started, \
+             patch.object(llm_writer_supervision, "memory", return_value={"state": "loaded", "address": STRATA}):
+            answer = llm_writer_supervision.writer_start()
+        started.assert_called_once()
+        self.assertTrue(answer["started"])
+        self.assertEqual(answer["state"], "loaded")
 
 
 class WiringTests(unittest.TestCase):
