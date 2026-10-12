@@ -36,6 +36,7 @@ from services.director_model_compat import (
     assess_director_model,
 )
 from services.llm_writer_binding import remote_url as bound_remote_url
+from services.llm_writer_supervision import release as release_writer
 from services.director_video_strategy import (
     BOUNDED_START_END,
     OMNI_REFERENCE,
@@ -2059,13 +2060,11 @@ def update_clip_prompt(out_dir: str, pid: str, clip_index: int, update: dict) ->
                 clip["_director_h3_source_prompt"] = clip["video_prompt"]
                 clip["_director_prompt_user_edited"] = True
                 clip["_director_h3_compiled_prompt"] = ""
-                # Clearing the beat cache outright also destroyed the speech
-                # plan: with no beats this compiler can no longer rebuild the
-                # shot's dialogue and timing contract, and a reviewed compiled
-                # prompt is rendered verbatim, so nothing downstream restored
-                # it. The shot then rendered with closed mouths however often
-                # the director note was rewritten. Keep the beats whose lines
-                # survived the edit; the ones it removed must not come back.
+                # Clearing the beat cache outright also destroyed the speech plan: with no beats this
+                # compiler can no longer rebuild the shot's dialogue and timing contract, and a
+                # reviewed compiled prompt is rendered verbatim, so nothing downstream restored it.
+                # The shot then rendered with closed mouths however often the note was rewritten.
+                # Keep the beats whose lines survived the edit; the ones it removed must not return.
                 clip["_director_dialogue_beats"] = _retained_h3_beats(clip)
 
         with _pipeline_file_lock:
@@ -2926,14 +2925,13 @@ EDITS are also checked word for word, which is what keeps the spoken lines intac
 - No commentary outside the five markers."""
 
 
-# A model writes "FIXED_PROMPT:", "**FIXED_PROMPT:**", "## FIXED_PROMPT:" or
-# "- **FIXED_PROMPT**:" for the same thing. A marker that is not recognized is not "no
-# marker": the whole answer -- analysis, quoted fields and the prompt -- was then read as
-# ONE prompt, and the gate refused it for having five subject_definitions fields, three
-# overall_soundscape fields and twelve spoken lines (measured in the logs of a real
-# session). The decoration is therefore part of the pattern, on BOTH sides of the colon:
-# bold around the colon ("**ANALYSIS:**") and bold around the name ("**ANALYSIS**:") are
-# both common, and only the first one matched an earlier version of this pattern.
+# A model writes "FIXED_PROMPT:", "**FIXED_PROMPT:**", "## FIXED_PROMPT:" or "- **FIXED_PROMPT**:"
+# for the same thing, so the decoration is part of the pattern on BOTH sides of the colon: bold
+# around the colon and bold around the name are both common, and only the first matched an earlier
+# version. A marker that is not recognized is not "no marker": the whole answer -- analysis, quoted
+# fields and the prompt -- was then read as ONE prompt, and the gate refused it for having five
+# subject_definitions fields, three overall_soundscape fields and twelve spoken lines (measured in
+# the logs of a real session).
 _REVISION_MARKER_RE = re.compile(
     r"(?mi)^[ \t]*(?:[-*+][ \t]+)?(?:#{1,6}[ \t]*)?[*_`]{0,2}[ \t]*"
     r"(ANALYSIS|QUESTION|FIXES|FIXED_PROMPT|EDITS|OPTIONS)[ \t]*[*_`]{0,2}[ \t]*:[ \t]*[*_`]{0,2}[ \t]*"
@@ -2972,8 +2970,8 @@ def _parse_revision_edits(value: str) -> list[dict]:
     return [edit for edit in edits if edit["find"]]
 
 
-# A FIND read loosely is only accepted when it is this long: punctuation, spacing and
-# case are ignored to place it, so a short one could land on the wrong sentence.
+# A FIND read loosely is only accepted when it is this long: punctuation, spacing and case are
+# ignored to place it, so a short one could land on the wrong sentence.
 _LOOSE_FIND_MIN_CHARS = 24
 _LOOSE_FIND_MIN_WORDS = 4
 
@@ -8287,6 +8285,7 @@ def _run_image_generation(pid: str, params: dict, clip_plans: list[dict], out_di
         - clip_keyframes[i] = list of keyframe image filenames for clip i (may be empty)
     """
     _validate_director_models(params, stages=("image",))
+    release_writer(pid, "image render")
     ref_image_path = params.get("reference_image_path")
     character_ref_paths = params.get("character_ref_paths", []) or []
     location_ref_paths = params.get("location_ref_paths", []) or []
@@ -8846,6 +8845,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
     _validate_director_models(params, stages=("video",))
     video_model = params.get("video_model") or "ltx2_22B_distilled_1_1"
     _audit_prompts_before_generating(pid, clip_plans)
+    release_writer(pid, "video render")
     _apply_h3_music_audio_contract(video_model, clip_plans, params)
     _preflight_h3_director_prompts(video_model, clip_plans, pid=pid)
     video_params = params.get("video_params", {})

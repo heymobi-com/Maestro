@@ -45,15 +45,14 @@ curl http://127.0.0.1:8081/health
 
 ## What it cannot do
 
-- **Maestro cannot unload Strata's memory for you.** [LM Studio's memory
-  control](./LM-Studio-memory.md) works through LM Studio's native API, and Strata does not
-  implement it (`/api/v0/model/unload` answers *not found*). The control is hidden for the Strata
-  entry rather than offering a button that cannot work. When a video model needs the RAM back, stop
-  Strata's server yourself. This is the opposite of Maestro's own local writer, which it releases on
-  demand and after an idle timeout.
-- **No vision.** `/health` reports `"images": false` and `/v1/models` lists
-  `"input_modalities": ["text"]`: Strata cannot read a reference image. See
-  [Vision, and the reference images](#vision-and-the-reference-images) below.
+- **The LM Studio memory control is hidden for Strata** — it works through LM Studio's native API,
+  which Strata does not implement (`/api/v0/model/unload` answers *not found*). Strata's own switch
+  is `/v1/unload` and Maestro uses it by itself:
+  [Automating load and unload](#automating-load-and-unload). The hidden button is about that one
+  protocol, not about Maestro's ability to give the memory back.
+- **No vision until it is turned on.** `/health` reports `"images": false` when the encoder is not
+  installed, and Strata cannot read a reference image then — which Director planning needs, since it
+  hands the writer the reference photos. See [Vision, and the reference images](#vision-and-the-reference-images).
 - **A model on another host by DNS name** is not probed. Point the Strata entry at an address, not a
   hostname, if the server lives elsewhere on the LAN.
 
@@ -81,8 +80,19 @@ writer's eyes: the compiled prompts bind it by name and slot (`<Subject 1> … i
 <Picture 1>`), and the video model is handed the picture directly. So a text-only writer still plans
 a multi-reference project; it just cannot describe what it has not seen.
 
-If a step genuinely needs the images read, run that work on a local vision writer — a GGUF with an
-`mmproj`, chosen in the same menu — and keep Strata for the text.
+What this costs you, concretely: the steps that *read* a picture run without it. And in Maestro's
+Director, that is not a side path — the planners hand the writer **the reference photos themselves**
+(the main image, every character reference and every location reference, through their own
+`_build_all_image_paths`), so the shot plan can follow what is actually in them. Cast binding itself
+does not depend on it (the compiled prompts bind identity by name and slot, and the video model is
+handed the picture directly), but the writing does.
+
+So for Director work, keep Strata's vision on. The no-vision mode is for text-only work, and the
+difference in speed is small once the memory is arranged: measured here on real prompts, ~80 tok/s
+with vision against ~84 without, both with 64k context and the 20 GiB arena.
+
+If you do want the images read by a different model, pick a local vision writer — a GGUF with an
+`mmproj` — in the same menu and keep Strata for the text.
 
 ### Turning Strata's own vision on
 
@@ -138,6 +148,65 @@ finished by a different writer with the same name.
 The record lives in the run's parameters, so it lasts as long as the run does in this session
 (phases, reruns, and a queue entry frozen with it). A run rebuilt from disk after a Maestro restart
 takes the current setting, exactly as it did before this existed.
+
+## Automating load and unload
+
+The writer and the video models want the same memory, and on a 48 GB machine they cannot both hold
+it. That hand-over is now arranged on both sides, and neither side kills a process.
+
+Measured here (Strata, `qwen3.8-flash-next-iq2_xs`, vision on, RTX 5080 / 48 GB):
+
+| | RAM in use | VRAM in use |
+|---|---|---|
+| writer loaded | 32.7 GiB | 14915 MiB |
+| **writer released** | **8.9 GiB** | **5416 MiB** |
+| loaded again | 22.0 s warm · 52.7 s cold, streaming | and the call that follows runs at full speed |
+
+**Maestro hands the memory over when a render starts.** Before the first image and before the video
+stage it asks the writer to release, and says so in the log:
+
+```
+[Pipeline 93acc71a] writer released for the video render; it loads itself again on the next request
+(~20-50 s, once) (8.9 GiB of RAM and 5416 MiB of VRAM still in use)
+```
+
+A release that cannot happen is silent and harmless: a hosted API has no such switch, an endpoint
+that is not on this machine is never asked, a writer that is already released is not asked twice, and
+a writer that is **busy** answers `409` — the render waits its turn rather than fighting for the GPU.
+Maestro never raises over this; a render does not fail because a convenience could not be arranged.
+
+**Strata releases itself when it is left alone.** Its own `idle_unload_s` watches for requests:
+
+```json
+{ "idle_unload_s": 600 }
+```
+
+Ten minutes of no requests and the model goes; verified here by setting it to 60 s and watching the
+model state become `unloaded` on its own. Set it to `0` to keep the model loaded always.
+
+**The reload is automatic and announced.** `/v1/models` reports `status: {"value": "unloaded"}` and
+`"auto_load": true`; the next request — plain or streaming — loads the model and answers. Maestro
+counts such a writer as reachable (it *is* one call away, so a run is never refused for it) and names
+the wait once instead of leaving it unexplained:
+
+```
+[LLM] http://127.0.0.1:8081 released the model to free memory; the next call loads it back
+(around 20-50 s on this machine, once).
+```
+
+### The pieces, if you want to drive it yourself
+
+```bash
+# give the memory back now (200; 409 while a request is running)
+curl -X POST http://127.0.0.1:8081/v1/unload -H 'Content-Type: application/json' -d '{}'
+
+# load it back now, ahead of a request (blocks until ready)
+curl -X POST http://127.0.0.1:8081/v1/load -H 'Content-Type: application/json' -d '{}'
+```
+
+Both need JSON and no `Origin` header, which is what any server-side client sends, so Maestro needs
+no browser and no elevation. They are also the reason the desktop shortcuts only matter for a hard
+restart or switching modes — day to day, the writer sleeps and wakes on its own.
 
 ## Checking it works
 

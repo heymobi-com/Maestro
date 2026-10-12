@@ -107,6 +107,7 @@ grows the surface fails the battery rather than passing quietly.
 | | `app/services/llm_remote_dialect.py` | the two fields a local strict-JSON server accepts, and the probe that decides |
 | | `app/services/llm_writer_health.py` | whether a remote writer really answers, and the sentence that names the address |
 | `app/services/director_pipeline.py` | `app/services/llm_writer_binding.py` | the address a run keeps, so a later change does not finish it with another writer |
+| | `app/services/llm_writer_supervision.py` | releasing the writer's memory before a render, and announcing the reload it costs |
 | `ui/src/components/SettingsDrawer/ServicesSettingsPanel.tsx` | `ui/src/lib/strataProvider.ts` | the address the Strata provider entry is recognised by |
 | `ui/src/components/DirectorDashboard/DirectorDashboard.tsx` | `ui/src/components/DirectorDashboard/PromptAuditNotices.tsx` | the audit of the selected pipeline, read from its saved plan, per shot |
 | | `ui/src/api/promptAudit.ts` | the audit request itself |

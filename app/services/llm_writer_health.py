@@ -23,7 +23,14 @@ import time
 from typing import Any
 from urllib.parse import urlsplit
 
-__all__ = ["answers", "forget", "is_local_endpoint", "not_loaded_message", "unreachable_hint"]
+__all__ = [
+    "answers",
+    "forget",
+    "is_local_endpoint",
+    "last_writer",
+    "not_loaded_message",
+    "unreachable_hint",
+]
 
 _REMOTE_PROVIDERS = {"remote", "openai", "anthropic"}
 _TTL = 10.0
@@ -46,6 +53,17 @@ _CONNECTION_FAILURES = {
 # address -> (monotonic reading, answer)
 _cache: dict[str, tuple[float, bool]] = {}
 
+# The writer Maestro last asked about: (provider, address). Recorded here so a module that has to act
+# on the writer (releasing its memory before a render) learns the address the same way this module
+# does -- from what the service told us -- instead of reaching into llm_service's own fields.
+_writer: tuple[str, str] = ("", "")
+
+
+def last_writer() -> tuple[str, str]:
+    """The provider and address of the writer Maestro last asked about, or ("", "")."""
+
+    return _writer
+
 
 def is_local_endpoint(url: str) -> bool:
     """Whether a host is on this machine or the LAN, so asking it is cheap and safe."""
@@ -64,13 +82,34 @@ def is_local_endpoint(url: str) -> bool:
     return address.is_loopback or address.is_private
 
 
-def _reachable(url: str) -> bool:
+def _reachable(url: str) -> tuple[bool, str]:
+    """(it answers, what it says about its model). The state is "" when the server does not say."""
+
     import requests
 
     from services.llm_endpoint import models_url
 
     response = requests.get(models_url(url), timeout=_TIMEOUT)
-    return bool(response.ok)
+    if not response.ok:
+        return False, ""
+    try:
+        entries = (response.json() or {}).get("data") or []
+    except ValueError:
+        return True, ""
+    if not entries:
+        return True, "unloaded"  # up, and holding no model: it loads one on the next request
+    status = (entries[0] or {}).get("status")
+    return True, str(status.get("value") or "") if isinstance(status, dict) else "loaded"
+
+
+def _note_released(address: str) -> None:
+    """Say once that the next call pays for the model, instead of leaving the pause unexplained."""
+
+    from services import llm_writer_supervision
+
+    note = llm_writer_supervision.released_note(address)
+    if note:
+        print(f"[LLM] {note}")
 
 
 def answers(provider: str, url: str, model_id: str = "") -> bool:
@@ -79,8 +118,13 @@ def answers(provider: str, url: str, model_id: str = "") -> bool:
     A provider that is not remote keeps its own answer elsewhere (a subprocess is loaded, or it is
     not). A hosted API is taken at its word: it cannot be verified cheaply and the operator could
     not act on the answer anyway.
+
+    "Reached" includes a server that is up and holding no model: it is a writer that answers, it
+    loads itself on the next request, and the wait is announced rather than guessed at.
     """
 
+    global _writer
+    _writer = (str(provider or ""), str(url or "").strip())
     if str(provider or "") not in _REMOTE_PROVIDERS:
         return False
     if not str(model_id or "").strip():
@@ -93,9 +137,11 @@ def answers(provider: str, url: str, model_id: str = "") -> bool:
     if cached is not None and moment - cached[0] < _TTL:
         return cached[1]
     try:
-        reachable = _reachable(address)
+        reachable, state = _reachable(address)
     except Exception:
-        reachable = False  # A server that does not answer is not reachable.
+        reachable, state = False, ""  # A server that does not answer is not reachable.
+    if reachable and state == "unloaded":
+        _note_released(address)
     _cache[address] = (moment, reachable)
     return reachable
 
