@@ -260,6 +260,41 @@ Both need JSON and no `Origin` header, which is what any server-side client send
 no browser and no elevation. They are also the reason the desktop shortcuts only matter for a hard
 restart or switching modes — day to day, the writer sleeps and wakes on its own.
 
+## Tuning for this machine, measured
+
+Reported from use: "tarda demasiado en arrancar, el sistema completo se pone non-responsive por un rato
+y al final me esta generando 43 tok/sec, la ram anda por 33/34 gb de 48 asi que hay margen". Measured
+on this PC (RTX 5080 16 GB, 48 GB RAM, IQ2_XS abliterated, vision on, 64k context, KV int8), each
+figure from a 5.5k-token prompt answered with ~110 tokens, one warm-up pass then the measured one:
+
+| `--resident-budget-gib` | start | decode | prefill | system RAM | engine RAM |
+|---|---|---|---|---|---|
+| 12 | **28 s** | 29.8 tok/s | 491 tok/s | 24.9 GB | 14.4 GB |
+| 20 | 40 s | 54.6 tok/s | 744 tok/s | 32.9 GB | 22.4 GB |
+| **24** | **28 s** | **70.6-74.9 tok/s** | 958 tok/s | 37.1 GB | 26.6 GB |
+
+The arena is the whole story: it decides how many experts are resident in page-locked RAM, and every
+expert that is not resident is read per token. Lowering it makes the start shorter (8 s of copying
+instead of 12) and frees RAM for the file cache -- and that does **not** pay for the missing experts
+(29.8 against 70.6 tok/s). Free VRAM is the same in all three (about 1.0 GB), so this has nothing to do
+with the video card.
+
+So this machine runs at `--resident-budget-gib 24`: it starts in 28 s and answers at 70-75 tok/s, with
+37 of 48 GB in use, which leaves room for the rest of the desktop.
+
+**Idle unload is off (`"idle_unload_s": 0`).** The automatic release after ten minutes was making every
+pause pay the full start again -- 28 s of copying 24 GiB into page-locked memory, which is also what
+makes the desktop unresponsive while it happens. The memory is still handed over when it matters: the
+render path releases the writer before an image or a video stage
+([Automating load and unload](#automating-load-and-unload)), and **Release memory** in Settings does it
+by hand. Set `idle_unload_s` to a number of seconds to have it give the memory back on its own after a
+quiet spell, knowing that the next call then pays the start.
+
+Smaller, still untested here: `--draft-vocab en` trades the draft head's Chinese/Japanese/Korean token
+subset for the English/code one -- 110 MiB less VRAM (about 80 more expert slots) and English answers
+1-2% faster, at the cost of almost no drafts for languages outside that subset. It needs a `--setup`
+run because the subset is a file in the MTP folder, not a flag.
+
 ## Checking it works
 
 The verification profile records a given structured call as JSON, not as prose:
