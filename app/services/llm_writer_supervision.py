@@ -25,7 +25,11 @@ Three rules keep it safe:
 - **It never raises.** A render must not fail because a convenience could not be arranged; a failure
   here is a line in the log and nothing else.
 - **It only speaks to a writer that says it can do this.** A hosted API has no such switch, and an
-  endpoint we cannot reach is left alone. In those cases the release is a silent no-op.
+  endpoint we cannot reach is left alone. **The hand-over is what says so when that happens**:
+  ``release_before_render`` names the reason, because a silent release is indistinguishable from a
+  render that ran out of memory for no stated reason. Reported from use: a video render failed with
+  "CUDA reported an out-of-memory error" while VRAM was free (0.03 GiB allocated, 14.5 GiB free) and
+  the GPU idle -- the shortage was host RAM, and the writer's page-locked arena was holding it.
 - **It does not fight for the GPU.** The server answers ``busy`` when a request is running or queued,
   and then nothing happens -- which is the right outcome while a planning pass is in flight.
 """
@@ -42,6 +46,7 @@ __all__ = [
     "load",
     "memory",
     "release",
+    "release_before_render",
     "released_note",
     "router",
     "set_autostart",
@@ -443,3 +448,26 @@ def release(pid: str = "", stage: str = "") -> bool:
         return False
     _forget_notes()
     return True
+
+
+def release_before_render(pid: str = "") -> bool:
+    """Hand the writer's memory back before the render stages its checkpoint.
+
+    Called by the queue, because the Director's own stages do not always run on the path a render
+    takes: a render started from the film tab never enters that pipeline, so its writer stayed
+    resident and the video checkpoint pinned its weights into memory the writer was holding. Nothing
+    said the hand-over had not happened, and the render failed out of memory with VRAM free and the
+    GPU idle.
+
+    Prints the reason when the writer is not released. The happy path is quiet, because ``release``
+    already announced the memory it gave back.
+    """
+
+    if release(pid, "render"):
+        return True
+    answer = memory()
+    print(
+        f"[Pipeline {pid}] the writer was not released before the render: "
+        f"{answer.get('detail') or answer.get('state') or 'no reason reported'}"
+    )
+    return False

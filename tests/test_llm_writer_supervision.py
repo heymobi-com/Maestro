@@ -6,9 +6,10 @@ loaded: 32.7 GiB of RAM and 14915 MiB of VRAM in use; after ``POST /v1/unload``:
 The server loads itself again on the next request -- 22.0 s warm, 52.7 s cold with streaming -- so the
 hand-over costs one slow call and buys the render the difference.
 
-Two halves have to stay honest: a release that cannot happen must be silent (a hosted API has no such
-switch, and a render must never fail because of this), and a call that is about to pay for the reload
-must say so instead of pausing unexplained.
+Two halves have to stay honest: a release that cannot happen must never fail a render (a hosted API
+has no such switch), and it must say so rather than pass in silence -- a hand-over that never happened
+is what a render reports as an out-of-memory error with the GPU idle. A call that is about to pay for
+the reload says so too, instead of pausing unexplained.
 """
 from __future__ import annotations
 
@@ -80,6 +81,30 @@ class ReleaseTests(unittest.TestCase):
         line = " ".join(str(call.args[0]) for call in printed.call_args_list)
         self.assertIn("writer released for the video render", line)
         self.assertIn("8.9 GiB of RAM and 5416 MiB of VRAM still in use", line)
+
+    def test_the_queue_hand_over_releases_a_loaded_writer(self):
+        with patch("requests.get", return_value=listing()), \
+             patch("requests.post", return_value=unloaded_response()), \
+             patch("builtins.print") as printed:
+            self.assertTrue(llm_writer_supervision.release_before_render(pid="job-1"))
+        line = " ".join(str(call.args[0]) for call in printed.call_args_list)
+        self.assertIn("writer released for the render", line)
+
+    def test_the_queue_hand_over_names_the_reason_when_nothing_came_back(self):
+        # Reported from use: the render failed out of memory with the GPU idle and free VRAM, and
+        # nothing in the log said whether the writer had been given back. Now it does.
+        llm_writer_health._writer = ("", "")          # nothing connected and nothing configured
+        with patch.object(llm_writer_supervision, "_configured", return_value=("", "")), \
+             patch("builtins.print") as printed:
+            self.assertFalse(llm_writer_supervision.release_before_render(pid="job-1"))
+        line = " ".join(str(call.args[0]) for call in printed.call_args_list)
+        self.assertIn("the writer was not released before the render", line)
+        self.assertIn("no writer on this machine is configured", line)
+
+    def test_the_queue_hand_over_never_raises(self):
+        with patch("requests.get", side_effect=OSError("no route to host")), \
+             patch("builtins.print"):
+            self.assertFalse(llm_writer_supervision.release_before_render(pid="job-1"))
 
     def test_a_writer_that_already_gave_it_back_is_left_alone(self):
         with patch("requests.get", return_value=listing("unloaded")), \
@@ -441,6 +466,24 @@ class WiringTests(unittest.TestCase):
         video = source.index("def _run_video_generation")
         self.assertLess(source.index('release_writer(pid, "video render")', video),
                         source.index("_apply_h3_music_audio_contract", video))
+
+    def test_the_queue_hands_the_writer_over_between_writing_and_staging(self):
+        """The path a render actually takes: after the last prompt it owes, before the checkpoint.
+
+        Reported from use: a render started from the film tab never enters the Director pipeline, so
+        the writer stayed resident, the video checkpoint tried to pin its weights into memory the
+        writer was holding, and the render failed with "CUDA reported an out-of-memory error" while
+        VRAM was free and the GPU idle.
+        """
+
+        source = (ROOT / "app" / "launch.py").read_text(encoding="utf-8")
+        generation = source.index("def _run_generation(")
+        hand_over = source.index("llm_writer_supervision.release_before_render", generation)
+        self.assertLess(
+            source.index("_apply_deferred_prompt_enhancement(job, raw_params)", generation),
+            hand_over,
+        )
+        self.assertLess(hand_over, source.index("_apply_per_job_coefficient(job)", generation))
 
 
 if __name__ == "__main__":

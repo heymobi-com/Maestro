@@ -10668,8 +10668,8 @@ async def director_v2_plan(request: Request):
     }
     skill_type = skill_map.get(skill_type, skill_type)
 
-    # A long timeline is planned in batches that can take ten minutes, and this endpoint
-    # never passed the planner's batch counters: no progress, and no way to stop it.
+    # A long timeline is planned in batches that can take ten minutes, and this endpoint never passed
+    # the planner's batch counters: no progress, and no way to stop it.
     from services.director import plan_operation
     operation = plan_operation.begin(
         "plan",
@@ -10716,8 +10716,7 @@ async def director_v2_plan(request: Request):
         provider = services.get("llm_provider", "local")
         planner_kwargs["nsfw"] = services.get("nsfw_mode", False) and provider not in _PUBLIC_LLM_PROVIDERS
 
-        # Checked at every batch boundary and progress publish, so these turn a
-        # Stop click into an actual interruption.
+        # Checked at every batch boundary and progress publish: a Stop click interrupts the pass.
         planner_kwargs["_planning_progress_callback"] = _publish_plan_progress
         planner_kwargs["_planning_cancelled_callback"] = _plan_was_cancelled
 
@@ -10777,8 +10776,7 @@ async def director_v2_plan(request: Request):
                 )
             )
 
-        # A Stop during the polish pass would otherwise be ignored: it has no
-        # cancellation hook, so honour it here rather than return a cancelled plan.
+        # A Stop during the polish pass has no cancellation hook, so honour it here, not there.
         if plan_operation.is_cancelled(operation):
             raise InterruptedError("Director planning cancelled")
 
@@ -25700,6 +25698,8 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
             from services import llm_service
             if llm_service.is_loaded():
                 llm_service.unload_model()
+            # A remote writer holds host RAM, not VRAM: the checkpoint pins into that same memory.
+            llm_writer_supervision.release_before_render(job.get("id"))
             if is_cancel_requested(job):
                 return False
 

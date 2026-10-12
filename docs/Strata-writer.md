@@ -162,17 +162,42 @@ Measured here (Strata, `qwen3.8-flash-next-iq2_xs`, vision on, RTX 5080 / 48 GB)
 | **writer released** | **8.9 GiB** | **5416 MiB** |
 | loaded again | 22.0 s warm · 52.7 s cold, streaming | and the call that follows runs at full speed |
 
-**Maestro hands the memory over when a render starts.** Before the first image and before the video
-stage it asks the writer to release, and says so in the log:
+**Maestro hands the memory over when a render starts.** The queue asks the writer to release in the
+job that holds the generation slot, after the last prompt that job owed and before any checkpoint is
+staged — the same place it lets a local planner go. That is the path every render takes, and it has to
+be: a render started from the film tab never enters the Director pipeline, so the two releases inside
+that pipeline were not enough. Measured here, with the writer resident and holding its arena:
+
+| | RAM free |
+|---|---|
+| writer loaded, arena resident | 11.91 GiB |
+| after `release_before_render` | 39.19 GiB |
 
 ```
-[Pipeline 93acc71a] writer released for the video render; it loads itself again on the next request
-(~20-50 s, once) (8.9 GiB of RAM and 5416 MiB of VRAM still in use)
+[Pipeline 93acc71a] writer released for the render; it loads itself again on the next request
+(~20-50 s, once) (9.1 GiB of RAM and 2437 MiB of VRAM still in use)
 ```
 
-A release that cannot happen is silent and harmless: a hosted API has no such switch, an endpoint
-that is not on this machine is never asked, a writer that is already released is not asked twice, and
-a writer that is **busy** answers `409` — the render waits its turn rather than fighting for the GPU.
+**Why it matters, measured from the failure it caused.** A video render failed with "CUDA reported an
+out-of-memory error" while the GPU was *idle*: PyTorch had 0.03 GiB allocated, 14.5 GiB of VRAM were
+free, and the traceback ended in the reference-image processor —
+`qwen2_vl/image_processing_qwen2_vl_fast.py:201`, `torch.stack(images_list, dim=0)` — that is, an
+allocation from **pinned host memory**, not from VRAM. The video checkpoint was pinning ~20 GB of
+weights ("Unable to pin more tensors … no reserved RAM left") into memory the writer's page-locked
+arena was holding. Strata's arena only grows on real work: `loaded` alone showed 13.9 GiB in use, and
+the first completion took the machine to 33.8 GiB used, where it stayed.
+
+A release that cannot happen is harmless, and at the render hand-over it is **never silent**: a hosted
+API has no such switch, an endpoint that is not on this machine is never asked, a writer that is
+already released is not asked twice, and a writer that is **busy** answers `409` — the render waits its
+turn rather than fighting for the GPU. When nothing came back, the log names the reason, because a
+hand-over that quietly did not happen is what a render reports as an out-of-memory error with an idle
+GPU:
+
+```
+[Pipeline b54b4066] the writer was not released before the render: not running
+```
+
 Maestro never raises over this; a render does not fail because a convenience could not be arranged.
 
 **Strata releases itself when it is left alone.** Its own `idle_unload_s` watches for requests:
