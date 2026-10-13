@@ -223,19 +223,21 @@ def continuity(pid: str, out_dir: str) -> dict:
 
     path = _pipeline_file(pid, out_dir)
     if not path:
-        return {"shots": 0, "duplicates": []}
+        return {"shots": 0, "duplicates": [], "steps": []}
     try:
         with open(path, encoding="utf-8") as handle:
             state = json.load(handle)
     except Exception as exc:
-        return {"shots": 0, "duplicates": [], "error": str(exc)}
+        return {"shots": 0, "duplicates": [], "steps": [], "error": str(exc)}
     clips = state.get("clips")
     if not isinstance(clips, list):
-        return {"shots": 0, "duplicates": []}
+        return {"shots": 0, "duplicates": [], "steps": []}
     plan = [clip for clip in clips if isinstance(clip, dict)]
+    images = [str(clip.get("start_image_filename") or "") for clip in plan]
     return {
         "shots": len(plan),
         "duplicates": sequence_continuity.duplicate_image_prompts(plan, announce=False),
+        "steps": sequence_continuity.keyframe_steps(images, os.path.dirname(path)),
     }
 
 

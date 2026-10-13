@@ -3197,8 +3197,7 @@ def _parse_revision_envelope(text: str, current: str = "") -> dict:
         from services.director.h3_dialogue import looks_like_compiled_h3_prompt
         head = _PROMPT_FIELD_HEAD_RE.search(raw)
         if head and looks_like_compiled_h3_prompt(raw[head.start():]):
-            # An answer that explains first and then writes the prompt has no marker, so the
-            # prose, the quoted fields and the prompt were read as one and the gate refused it.
+            # An answer that explains and then writes the prompt has no marker: prose plus fields read as one.
             return {
                 "analysis": raw[: head.start()].strip(),
                 "question": "",
@@ -3321,8 +3320,7 @@ def _clip_scoped_rewrite(
     current = "".join(text[start:end] for start, end in spans)
     if not current:
         return None
-    # An answer that carries the project's text is a whole prompt, not a clip: leave it to the caller.
-    # Measured, the clip is a quarter of a prompt, so an answer that is 90% its own text is that scale.
+    # An answer that carries the project's text answers at the clip's scale (a quarter of a prompt).
     own_text = sum(
         end - start for start, end in h3_clip_spans(candidate, frozen)
     )
@@ -3357,9 +3355,7 @@ def _clip_scoped_rewrite(
                 continue
             if right <= left:
                 continue
-            # replace and delete, cut to this span. The answer's text is taken in the same proportion, which is
-            # exact for a replacement of equal length and a rounding choice otherwise.
-            if tag != "replace" or j2 <= j1 or i2 <= i1:
+            # replace and delete, cut to this span, in the same proportion: exact when the lengths match.            if tag != "replace" or j2 <= j1 or i2 <= i1:
                 continue
             factor = (j2 - j1) / (i2 - i1)
             ja = j1 + int((left - i1) * factor)
@@ -3367,15 +3363,14 @@ def _clip_scoped_rewrite(
             original = text[start + (left - low):start + (right - low)]
             replacement = candidate[ja:jb]
             if tag == "delete":
-                # A deletion that only removes whitespace keeps the prompt's layout: the answer may drop a blank
-                # line, and losing the newline between two fields glues their heads together.
+                # A deletion that only removes whitespace keeps the layout: a dropped blank line would
+                # glue two field heads together.
                 if not original.strip():
                     pieces.append(original)
                 continue
-            # A difference that is only whitespace keeps the prompt's own layout, in both directions.
-            # Measured with an answer the model had reflowed onto one line: the newlines between the six
-            # fields became single spaces and the prompt came back with one field instead of six. Whitespace
-            # carries no meaning here and the prompt's structure does.
+            # A difference that is only whitespace keeps the prompt's own layout. Measured with an answer the
+            # model had reflowed onto one line: the newlines between the six fields became single spaces and
+            # the prompt came back with one field instead of six.
             if not replacement.strip() and original:
                 pieces.append(original)
             else:
@@ -3422,8 +3417,7 @@ def _revise_problem_nudge(problems: list[str], expected_lines: list[str] | None 
         )
         expected = f"\nThe lines to copy exactly, in order:\n{numbered}\n"
     # An unappliable EDITS is the most common dead end: the assistant paraphrases a sentence it can see
-    # in THIS SHOT'S TEXT, and the whole turn ends as an error. Telling it what to do instead is worth
-    # more than repeating the rule.
+    # in THIS SHOT'S TEXT, so saying what to do instead beats repeating the rule.
     edits_note = ""
     if any("not in the current prompt" in problem for problem in problems):
         edits_note = (
@@ -3599,10 +3593,9 @@ def revise_clip_prompt(
     if neighbours:
         task.extend(["", "ADJACENT SHOTS (keep continuity):", neighbours])
 
-    # Read the shot before writing anything. The assistant used to receive only
-    # the prompt text and the note, so it reasoned about a symptom it could not
-    # see: three notes on one shot never mentioned the second shot or the
-    # "background right" placement that were producing the duplicate.
+    # Read the shot before writing anything: the assistant used to receive only the prompt and the
+    # note, so it reasoned about a symptom it could not see, and three notes on one shot never
+    # mentioned the second shot that was producing the duplicate.
     anchors = _h3_plan_context_anchors(clip)
     diagnosis = diagnose_h3_clip_prompt(
         prompt,
@@ -3627,8 +3620,8 @@ def revise_clip_prompt(
     if anchors:
         # The system prompt asks the assistant to keep the anchors "the measurement lists", and the
         # measurement listed none: the instruction pointed at nothing, so the exact sentences were
-        # never in front of it. Which of them the prompt already carries decides whether losing one
-        # is a change to refuse, so state it rather than leave it to be guessed.
+        # never in front of it, so which anchors the prompt already carries decides whether losing
+        # one can be refused.
         task.append(
             "- Canonical identity and world anchors, spelled verbatim: "
             + " | ".join(anchors)
@@ -3694,8 +3687,8 @@ def revise_clip_prompt(
     revision_model = str(
         services.get("revision_llm_model_id") or ""
     ).strip()
-    # The editing stage may answer from its own endpoint, and then the pipeline's
-    # model is never touched: no unload, no wait for a render, no reload after.
+    # The editing stage may answer from its own endpoint, and then the pipeline's model is never
+    # touched: no unload, no wait for a render, no reload after.
     editing = revision_llm.prepare(
         services, revision_model, f"Shot {clip_index + 1}", pid, _ensure_llm_loaded
     )
@@ -3725,8 +3718,7 @@ def revise_clip_prompt(
         parsed = _parse_revision_envelope(answer, prompt)
         # What the answer actually looked like. Two proposals on one line became a
         # single chip whose text was both of them, and nothing recorded the shape that
-        # produced it, so the only way to know was to guess. One line per answer:
-        # characters, how many markers were seen, and how the choices came out.
+        # produced it. One line per answer: characters, markers seen, and how the choices came out.
         markers = sorted({match.group(1).upper() for match in _REVISION_MARKER_RE.finditer(answer)})
         print(
             f"[Pipeline {pid}] Shot {clip_index + 1}: answer {len(answer)} chars, "
@@ -3790,8 +3782,8 @@ def revise_clip_prompt(
         if answer["prompt"]:
             # The answer may be the whole prompt or only this shot's text, which is what
             # the task asks for when it sends THIS SHOT'S TEXT and the project text as
-            # read-only context. A clip-scoped answer is placed back into the prompt;
-            # anything the placement cannot align is judged as a whole prompt, as before.
+            # read-only context. A clip-scoped answer is placed back into the prompt; what the
+            # placement cannot align is judged as a whole prompt, as before.
             text = str(answer["prompt"])
             placed = _clip_scoped_rewrite(prompt, text, frozen)
             if placed is not None:
@@ -8598,13 +8590,14 @@ def _run_image_generation(pid: str, params: dict, clip_plans: list[dict], out_di
         img_t0 = time.time()
         try:
             if image_source == "previous" and source_ref != ref_image_path:
-                # Dual reference: previous scene output as primary + original reference for character identity
-                # _gen_image puts source_ref first, then extra_refs (which includes character/location refs).
-                # We temporarily prepend the original ref to extra_refs so the model sees both.
-                saved_extras = extra_refs[:]
-                extra_refs.insert(0, ref_image_path)
-                start_img = _gen_image(prompt, source_ref, include_extra_refs=True)
-                extra_refs[:] = saved_extras  # restore
+                # The frame already carries the cast, the wardrobe and the room, and the reference
+                # photos only pin the pose back: measured on this machine, the previous frame with
+                # the anchor moved 18.6% of the pixels where the full set moved 11.8%, and the
+                # previous frame with the character photos moved 7.9%.
+                start_img = _gen_image(
+                    prompt, source_ref, include_extra_refs=True,
+                    supplemental_refs=[ref_image_path],
+                )
             else:
                 start_img = _gen_image(prompt, ref_image_path)
             clip_images.append(start_img)

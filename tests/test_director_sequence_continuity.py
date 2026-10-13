@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -34,6 +36,7 @@ from services.director.sequence_continuity import (  # noqa: E402
     continuity_run,
     duplicate_image_prompts,
     hands_over_the_frame,
+    keyframe_steps,
     restale_neighbours,
     sequence_continuity_flags,
     starts_to_keep,
@@ -627,6 +630,76 @@ class TheFrameHandoverTests(unittest.TestCase):
             source.index("keep_start = sequence_continuity.starts_to_keep("),
             source.index("and keep_start[i]"),
         )
+
+
+class TheKeyframeStepTests(unittest.TestCase):
+    """How far each keyframe moved, measured on the images rather than on the prompt that asked.
+
+    Reported from use: "veo imagenes de inicio muy similares entre un clip y otro... genera siempre la
+    imagen del primer clip con una minima o ninguna variacion". Measured on that run, consecutive
+    keyframes differed by 6-12% of pixels, which is what this readout names.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def image(self, name, left, right=None):
+        from PIL import Image
+
+        picture = Image.new("RGB", (64, 64), left)
+        if right is not None:
+            for x in range(32, 64):
+                for y in range(64):
+                    picture.putpixel((x, y), right)
+        picture.save(self.tmp / name)
+        return name
+
+    def test_two_identical_frames_are_a_zero_step(self):
+        same = self.image("a.png", (10, 10, 10))
+
+        steps = keyframe_steps([same, same], str(self.tmp))
+
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0]["change"], 0.0)
+        self.assertTrue(steps[0]["still"])
+
+    def test_a_half_frame_of_change_is_not_still(self):
+        first = self.image("a.png", (10, 10, 10))
+        second = self.image("b.png", (10, 10, 10), (250, 250, 250))
+
+        steps = keyframe_steps([first, second], str(self.tmp))
+
+        self.assertGreater(steps[0]["change"], 40)
+        self.assertFalse(steps[0]["still"])
+
+    def test_the_step_names_the_shots_it_belongs_to(self):
+        same = self.image("a.png", (10, 10, 10))
+
+        steps = keyframe_steps([same, same, same], str(self.tmp))
+
+        self.assertEqual([(step["after_shot"], step["shot"]) for step in steps], [(1, 2), (2, 3)])
+
+    def test_one_frame_is_no_step(self):
+        self.assertEqual(keyframe_steps([self.image("a.png", (0, 0, 0))], str(self.tmp)), [])
+        self.assertEqual(keyframe_steps([], str(self.tmp)), [])
+        self.assertEqual(keyframe_steps(None, str(self.tmp)), [])
+
+    def test_a_frame_that_is_gone_is_not_measured_rather_than_guessed(self):
+        # A boundary whose two frames cannot both be read is not reported: an unmeasurable step is not
+        # a step, and the pipeline already refuses to render a shot whose start image is missing.
+        first = self.image("a.png", (10, 10, 10))
+
+        steps = keyframe_steps([first, "missing.png", first], str(self.tmp))
+
+        self.assertEqual(steps, [])
+
+    def test_an_absolute_path_is_read_where_it_points(self):
+        first = self.image("a.png", (10, 10, 10))
+        absolute = str(self.tmp / first)
+
+        steps = keyframe_steps([absolute, absolute], str(self.tmp))
+
+        self.assertEqual(steps[0]["change"], 0.0)
 
 
 class TheNeighbourGoesStaleTests(unittest.TestCase):

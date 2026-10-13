@@ -30,9 +30,20 @@ export interface ContinuityFinding {
   similarity: number
 }
 
+export interface ContinuityStep {
+  /** The shot that follows the one this step is measured from. */
+  shot: number
+  after_shot: number
+  /** Percentage of the frame's pixels that moved materially from the shot before. */
+  change: number
+  /** True when the step is small enough that the clip between them has little to render. */
+  still: boolean
+}
+
 export interface ContinuityReadout {
   shots: number
   duplicates: ContinuityFinding[]
+  steps: ContinuityStep[]
   error?: string
 }
 

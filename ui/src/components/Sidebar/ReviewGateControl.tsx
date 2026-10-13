@@ -22,6 +22,7 @@ import {
   fetchReviewGate,
   saveReviewGate,
   type ContinuityFinding,
+  type ContinuityStep,
 } from '../../api/reviewGate'
 
 const REVIEW_PAUSES = ['review_images', 'review_prompts']
@@ -34,6 +35,7 @@ export function ReviewGateControl() {
 
   const [enabled, setEnabled] = useState<boolean | null>(null)
   const [duplicates, setDuplicates] = useState<ContinuityFinding[]>([])
+  const [steps, setSteps] = useState<ContinuityStep[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -49,12 +51,14 @@ export function ReviewGateControl() {
   }, [])
 
   const readPlan = useCallback(async () => {
-    if (!pipelineId) { setDuplicates([]); return }
+    if (!pipelineId) { setDuplicates([]); setSteps([]); return }
     try {
       const readout = await fetchContinuity(pipelineId)
       setDuplicates(readout.duplicates || [])
+      setSteps(readout.steps || [])
     } catch {
       setDuplicates([])
+      setSteps([])
     }
   }, [pipelineId])
 
@@ -113,6 +117,25 @@ export function ReviewGateControl() {
               same frame. Correct one of them before continuing.
             </div>
           ))}
+        </div>
+      )}
+
+      {steps.some(step => step.still) && (
+        <div className="border-t border-accent-blue/15 pt-1 text-chip-orange">
+          {steps.filter(step => step.still).map(step => (
+            <div key={step.shot}>
+              Shots {step.after_shot} and {step.shot} differ by {step.change}% of the frame, so the
+              clip between them has almost nothing to move through. Regenerate one of them, or widen
+              the change its prompt describes.
+            </div>
+          ))}
+        </div>
+      )}
+
+      {steps.length > 0 && (
+        <div className="border-t border-accent-blue/15 pt-1 text-text-muted">
+          Where each clip travels from: {' '}
+          {steps.map(step => `${step.after_shot}→${step.shot} ${step.change}%`).join(' · ')}
         </div>
       )}
 

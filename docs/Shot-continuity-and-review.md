@@ -134,6 +134,54 @@ run confirms it in one line, `[Continuation] Extracted last frame for clip N`, a
 N's first frame with clip N-1's last frame.
 
 
+## What holds the images back, measured
+
+Reported after the first attempt: "veo imagenes de inicio muy similares entre un clip y otro... genera
+siempre la imagen del primer clip con una minima o ninguna variacion en todas las demas imagenes".
+
+It is not the first image or the first prompt: replaying the pipeline's exact recipe (six references,
+four steps, the same seed) reproduced its frame pixel for pixel. What the measurement shows is how
+little the image model moves, and which reference does the holding. Variation against the first
+keyframe of a real run, same seed, 1280×720:
+
+| references sent | pixels changed materially |
+|---|---|
+| the pipeline's set: previous frame + anchor + 3 character photos + location | 11.8% |
+| **previous frame + anchor only** | **18.6%** |
+| previous frame only, 12 steps instead of 4 | 19.1% |
+| previous frame + the character photos + location (no anchor) | 7.9% |
+| no previous frame: anchor + character photos + location | 9.5% |
+
+Two things follow. The **character reference photos are the strongest grip** — a photo pins a pose,
+and the frame a shot is drawn from already contains those people, their wardrobe and the room, so the
+photos only pin the pose back: sending them alongside the previous frame changes *less* than the
+pipeline's own output did (7.9% against 11.8%). And **not chaining is worse, not better** (9.5%): the
+anchor and the photos grip harder than the frame does.
+
+So a shot that carries the previous one is generated from **the previous frame and the character
+anchor**, and nothing else. Identity is carried by the chain — every frame comes from the one before
+it — which is what the anchor exists to protect across a long run. Steps are left alone: they belong
+to the image model's saved settings, and 12 instead of 4 was measured to help (19.1%) if that is
+wanted.
+
+### Where each clip travels from
+
+A keyframe pair that barely differs leaves the clip between them with almost nothing to move through.
+The review control measures it on the generated images themselves — the share of pixels that moved
+materially from one keyframe to the next — and names the joins that are nearly one frame:
+
+```
+Shots 3 and 4 differ by 6% of the frame, so the clip between them has almost nothing to move
+through. Regenerate one of them, or widen the change its prompt describes.
+```
+
+The number is a readout, not a verdict: a held moment is a legitimate small step. A pair differing by
+less than 10% is named, a boundary whose two frames cannot both be read is not reported at all (an
+unmeasurable step is not a step), and the measurement never fails a run. It reads the same plan the
+panel already fetches, so a corrected image stops being reported the moment it is corrected.
+
+## Two shots that would render one frame
+
 Consecutive shots whose image prompts are at least **85% the same text** are named before the renders
 are spent — in the terminal and in the Director panel, from the saved plan rather than from memory:
 

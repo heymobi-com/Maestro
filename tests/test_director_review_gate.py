@@ -326,8 +326,35 @@ class TheContinuityReadoutTests(GateTestCase):
 
         self.assertEqual(printed.call_args_list, [])
 
+    def test_it_reports_where_each_clip_travels_from(self):
+        from PIL import Image
+
+        same = self.out_dir / "shot-1.png"
+        still = self.out_dir / "shot-2.png"
+        moved = self.out_dir / "shot-3.png"
+        Image.new("RGB", (64, 64), (10, 10, 10)).save(same)
+        Image.new("RGB", (64, 64), (10, 10, 10)).save(still)
+        picture = Image.new("RGB", (64, 64), (10, 10, 10))
+        for x in range(32, 64):
+            for y in range(64):
+                picture.putpixel((x, y), (250, 250, 250))
+        picture.save(moved)
+        self.write_state(clips=[
+            {"index": 0, "start_image_filename": "shot-1.png"},
+            {"index": 1, "start_image_filename": "shot-2.png"},
+            {"index": 2, "start_image_filename": "shot-3.png"},
+        ])
+
+        answer = gate.continuity(PID, str(self.out_dir))
+
+        self.assertEqual([step["still"] for step in answer["steps"]], [True, False])
+        self.assertEqual(answer["steps"][1]["after_shot"], 2)
+
     def test_a_project_with_no_state_is_not_an_error(self):
-        self.assertEqual(gate.continuity("nosuch", str(self.out_dir)), {"shots": 0, "duplicates": []})
+        self.assertEqual(
+            gate.continuity("nosuch", str(self.out_dir)),
+            {"shots": 0, "duplicates": [], "steps": []},
+        )
 
 
 class TheRoutesTests(GateTestCase):
