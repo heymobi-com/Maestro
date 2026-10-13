@@ -51,6 +51,8 @@ __all__ = [
     "duplicate_image_prompts",
     "hands_over_the_frame",
     "keyframe_steps",
+    "offered_reference_modes",
+    "reference_mode",
     "restale_neighbours",
     "sequence_continuity_flags",
     "starts_to_keep",
@@ -225,6 +227,64 @@ def _enabled(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().casefold() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+# The two reference formats a family can offer, in the words its own menu uses. "Main image /
+# landscape first" (KI) makes the first image the compositional source a generation edits; "Reference
+# images" (I) hands the same images over as subjects. Reported from use: "en cada imagen metio la
+# misma pose de la referencia sin ninguna variacion... las imagenes de referencia son de referencia
+# para que invente los escenarios y personajes y mantenga consistencia pero no para que los copie
+# exactamente". The Director preferred KI wherever a family offered it, which is what made every
+# generated start image a copy of the one it was handed, and Qwen Image 2.1 even declares I as its
+# own default.
+_MAIN_IMAGE_MODE = "KI"
+_REFERENCE_MODE = "I"
+
+
+def offered_reference_modes(model_def: Mapping[str, Any] | None) -> set[str]:
+    """The reference formats a family's own menu offers."""
+
+    config = (model_def or {}).get("image_ref_choices")
+    if not isinstance(config, Mapping):
+        return set()
+    choices = config.get("choices") or []
+    if not isinstance(choices, (list, tuple)):
+        return set()
+    modes: set[str] = set()
+    for choice in choices:
+        if isinstance(choice, (list, tuple)) and len(choice) >= 2:
+            modes.add(str(choice[1] or ""))
+        elif isinstance(choice, Mapping) and choice.get("value") is not None:
+            modes.add(str(choice.get("value") or ""))
+    return modes
+
+
+def reference_mode(resolved: Any, get_model_def: Any = None) -> str:
+    """Which reference format the Director's generated images are submitted in.
+
+    "Reference images" when the family offers it, because a reference is there to keep the cast and
+    the world consistent while the text invents the frame. A family that offers only the main-image
+    format keeps it -- z_image and flux_uso declare no reference mode at all, and handing them letters
+    their own menu does not list is a broken payload rather than a preference.
+
+    ``get_model_def`` is the caller's own registry accessor, passed in rather than imported: this
+    module must not import the engine, which exits the process when its dependency is missing.
+    """
+
+    assessment = {}
+    if isinstance(resolved, tuple) and len(resolved) == 2:
+        assessment = resolved[1] or {}
+    elif isinstance(resolved, Mapping):
+        assessment = resolved
+    chosen = str((assessment or {}).get("image_reference_mode") or "")
+    if chosen != _MAIN_IMAGE_MODE or not callable(get_model_def):
+        return chosen
+    try:
+        model_type = resolved[0] if isinstance(resolved, tuple) else ""
+        offered = offered_reference_modes(get_model_def(model_type) or {})
+    except Exception:
+        return chosen  # an unreadable registry keeps the format the caller already chose
+    return _REFERENCE_MODE if _REFERENCE_MODE in offered else chosen
 
 
 # Engine families whose video path reads an end frame. Verified by reading them rather than assumed:

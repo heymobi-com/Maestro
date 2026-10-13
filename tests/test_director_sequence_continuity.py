@@ -37,6 +37,8 @@ from services.director.sequence_continuity import (  # noqa: E402
     duplicate_image_prompts,
     hands_over_the_frame,
     keyframe_steps,
+    offered_reference_modes,
+    reference_mode,
     restale_neighbours,
     sequence_continuity_flags,
     starts_to_keep,
@@ -457,33 +459,35 @@ class ThePlannerCanDeclareItTests(unittest.TestCase):
 
 
 class TheShotImageChainTests(unittest.TestCase):
-    """A shot that carries the one before it is drawn from it, not from the character anchor.
+    """These images are not drawn from each other, and that was measured rather than assumed.
 
-    Reported from use: "tres de las 5 son exactamente iguales... esas imagenes no sirven ya que deben
-    tener una secuencia logica en las escenas del video no repetirse iguales". Every start image was
-    regenerated from the same anchor, so consecutive shots re-invented the same frame and the scene
-    started over at every clip.
+    Reported from use, after the chaining shipped: "en cada imagen metio la misma pose de la
+    referencia sin ninguna variacion y la siguiente imagen esta mas distorionada que la anterior,
+    como si hicera copia de la copia". Measured on that run, consecutive keyframes differed by 1.8%
+    and 4.1% of the frame -- the second merely accumulating on the first -- while the same project
+    without chaining differed by 6-13%. A capable model reproduces the reference it is handed, so
+    drawing a shot from the frame before it leaves the clip between them nothing to move through.
     """
 
-    def test_a_continuous_shot_carries_the_image_before_it(self):
+    def test_a_continuous_shot_is_still_recognised_as_carrying_the_one_before(self):
         plans = [_image_shot("first"), _image_shot("second", "continuous")]
+
         self.assertEqual(continuity_run(plans), [False, True])
 
-    def test_an_independent_shot_is_drawn_from_the_anchor(self):
+    def test_an_independent_shot_cuts(self):
         plans = [_image_shot("first"), _image_shot("second", "independent")]
+
         self.assertEqual(continuity_run(plans), [False, False])
 
-    def test_the_image_stage_asks_instead_of_trusting_the_plans_own_field(self):
-        # The planner wrote image_source "original" on every shot of the reported project while also
-        # declaring them continuous: the declaration is the one that knows the story continues.
+    def test_the_image_stage_does_not_draw_a_shot_from_the_one_before_it(self):
         source = _pipeline_source()
 
-        self.assertIn("chains = sequence_continuity.continuity_run(clip_plans)", source)
-        self.assertIn(
-            'image_source = "previous" if (i < len(chains) and chains[i]) '
-            'else plan.get("image_source", "original")',
-            source,
-        )
+        self.assertNotIn("chains = sequence_continuity.continuity_run(clip_plans)", source)
+        self.assertNotIn('image_source = "previous" if (i < len(chains)', source)
+        self.assertIn('image_source = plan.get("image_source", "original")', source)
+        # The notice that two shots would render one frame stays: it is what says so before the
+        # renders are paid for.
+        self.assertIn("sequence_continuity.duplicate_image_prompts(clip_plans)", source)
 
 
 class TheStitchTests(unittest.TestCase):
@@ -700,6 +704,73 @@ class TheKeyframeStepTests(unittest.TestCase):
         steps = keyframe_steps([absolute, absolute], str(self.tmp))
 
         self.assertEqual(steps[0]["change"], 0.0)
+
+
+class TheReferenceModeTests(unittest.TestCase):
+    """A reference is there to keep the cast consistent while the text invents the frame.
+
+    Reported from use: "en cada imagen metio la misma pose de la referencia sin ninguna variacion...
+    las imagenes de referencia son de referencia para que invente los escenarios y personajes y
+    mantenga consistencia pero no para que los copie exactamente". Qwen Image 2.1's own menu offers
+    "Main image / landscape first" (KI) and "Reference images" (I), and declares I as its default --
+    the Director preferred KI wherever it existed, which is what made every image a copy.
+    """
+
+    @staticmethod
+    def defs(modes):
+        return lambda _model_type: {"image_ref_choices": {"choices": [[m, m] for m in modes]}}
+
+    def resolved(self, chosen):
+        return ("some_model", {"image_reference_mode": chosen})
+
+    def test_a_family_that_offers_references_is_asked_for_references(self):
+        self.assertEqual(reference_mode(self.resolved("KI"), self.defs(["KI", "I"])), "I")
+
+    def test_a_family_that_offers_only_the_main_image_keeps_it(self):
+        # z_image and flux_uso declare no reference mode: handing them letters their own menu does not
+        # list is a broken payload rather than a preference.
+        self.assertEqual(reference_mode(self.resolved("KI"), self.defs(["KI"])), "KI")
+        self.assertEqual(reference_mode(self.resolved("KI"), self.defs(["KIJ"])), "KI")
+
+    def test_a_family_that_already_offers_only_references_is_unchanged(self):
+        self.assertEqual(reference_mode(self.resolved("I"), self.defs(["I"])), "I")
+        self.assertEqual(reference_mode(self.resolved("I"), None), "I")
+
+    def test_no_reference_format_is_left_alone(self):
+        self.assertEqual(reference_mode(self.resolved(""), self.defs(["KI", "I"])), "")
+
+    def test_a_registry_that_cannot_be_read_keeps_the_chosen_format(self):
+        self.assertEqual(reference_mode(self.resolved("KI"), None), "KI")
+
+        def broken(_model_type):
+            raise RuntimeError("no registry")
+
+        self.assertEqual(reference_mode(self.resolved("KI"), broken), "KI")
+
+    def test_an_assessment_without_the_model_type_still_answers(self):
+        # With no model type to look up, the registry answers for nothing, so the chosen format stands.
+        def nothing(_model_type):
+            return {}
+
+        self.assertEqual(reference_mode({"image_reference_mode": "KI"}, nothing), "KI")
+        self.assertEqual(reference_mode(None, self.defs(["I", "KI"])), "")
+
+    def test_the_offered_modes_come_from_the_models_own_menu(self):
+        model_def = {"image_ref_choices": {"choices": [
+            ["None", ""], ["Main image / landscape first", "KI"], ["Reference images", "I"],
+        ]}}
+
+        self.assertEqual(offered_reference_modes(model_def), {"", "KI", "I"})
+        self.assertEqual(offered_reference_modes({}), set())
+        self.assertEqual(offered_reference_modes(None), set())
+        self.assertEqual(offered_reference_modes({"image_ref_choices": "nonsense"}), set())
+
+    def test_the_image_stage_asks_for_the_mode_instead_of_reading_it(self):
+        source = _pipeline_source()
+
+        self.assertIn(
+            "sequence_continuity.reference_mode(resolved, _wgp.get_model_def)", source,
+        )
 
 
 class TheNeighbourGoesStaleTests(unittest.TestCase):

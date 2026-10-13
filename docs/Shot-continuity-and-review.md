@@ -46,14 +46,28 @@ resumes, so the video renders from the image the reviewer chose rather than the 
 
 The setting lives in `app/director_review_gate.json` (not committed: it is this machine's preference).
 
-## The image chain
+## The images are not drawn from each other, and that was a correction
 
-A shot the plan declares `continuous` (`continuous_strategy`, the planner's own judgement) is drawn
-from the shot before it rather than from the character anchor — upstream's `image_source: "previous"`
-path, which also passes the anchor as a second reference so identity is not lost. Before this, the
-plan's `image_source` field was trusted on its own, and the planner wrote `"original"` on every shot
-of a run whose own shots declared they continue each other: a plan that contradicts itself, resolved
-in favour of the declaration the story needs.
+An earlier version of this drew a `continuous` shot from the shot before it (upstream's
+`image_source: "previous"` path), to stop each shot from being re-invented from the character anchor.
+It shipped, and it was wrong. Reported from use: "en cada imagen metio la misma pose de la referencia
+sin ninguna variacion y la siguiente imagen esta mas distorionada que la anterior, como si hicera
+copia de la copia". Measured on that run:
+
+| | difference from the first keyframe |
+|---|---|
+| shot 2 | 1.8% of the frame |
+| shot 3 | 4.1% of the frame |
+
+The shots' own image prompts differed by 25% and 67%, so the prompts were asking for different moments
+and the model was ignoring them: it was reproducing the frame it had been handed, and each generation
+added its own artefacts to the previous one's, with nothing to reset them. The same project without
+chaining had produced 6-13% between keyframes.
+
+So the images are drawn from the character anchor and the reference photographs again, one generation
+away from a good reference each time, and continuity is the video's job — the shot before ends on this
+image and this shot starts from the frame that shot really ended on. Two ways to keep the film
+continuous, and only the one that does not compound belongs in the image stage.
 
 ## The stitch
 
@@ -155,14 +169,26 @@ keyframe of a real run, same seed, 1280×720:
 Two things follow. The **character reference photos are the strongest grip** — a photo pins a pose,
 and the frame a shot is drawn from already contains those people, their wardrobe and the room, so the
 photos only pin the pose back: sending them alongside the previous frame changes *less* than the
-pipeline's own output did (7.9% against 11.8%). And **not chaining is worse, not better** (9.5%): the
-anchor and the photos grip harder than the frame does.
+pipeline's own output did (7.9% against 11.8%).
 
-So a shot that carries the previous one is generated from **the previous frame and the character
-anchor**, and nothing else. Identity is carried by the chain — every frame comes from the one before
-it — which is what the anchor exists to protect across a long run. Steps are left alone: they belong
-to the image model's saved settings, and 12 instead of 4 was measured to help (19.1%) if that is
-wanted.
+**The reference format was the deeper cause.** A family's own menu offers two formats, and they are
+named exactly for this difference:
+
+```json
+{"choices": [["None", ""],
+             ["Main image / landscape first", "KI"],   <- the first image is a composition to edit
+             ["Reference images", "I"]],               <- the images are subjects
+ "default": "I"}
+```
+
+That is Qwen Image 2.1's, and its own default is `I`. The Director preferred `KI` wherever a family
+offered it, which is what made a generated start image a copy of the image it was handed — the anchor
+for an unChained shot, the previous frame for a chained one. `I` is what the requirement asks for:
+reported from use, "las imagenes de referencia son de referencia para que invente los escenarios y
+personajes y mantenga consistencia pero no para que los copie exactamente". So the Director asks for
+the reference format when the family offers one and keeps `KI` when it does not (`z_image` and
+`flux_uso` declare no reference mode, and letters their own menu does not list are a broken payload,
+not a preference).
 
 ### Where each clip travels from
 
