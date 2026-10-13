@@ -227,3 +227,20 @@ A stitched shot ends on the image of the shot after it, so replacing that image 
 ending somewhere else: a visible jump, and one only re-rendering removes. `restale_neighbours()`
 names that neighbour, and `rerun_clip_image` marks it — alongside the shot whose own image changed —
 so a repair pass knows both clips are out of date.
+
+## A model entry that saves black frames
+
+Reported as "it generated nothing, but it doesn't mark any error and I see no image".
+
+| Where | What was found |
+|---|---|
+| The files | They were saved. `Qwen Image Edit GGUF Q4_K_M 20B` wrote 1296x704 JPEGs of 17.6 KB whose 2,737,152 pixels are **exactly zero** in R, G and B. No error, no warning, in any log. |
+| The recipe | Four runs and four seeds, at 4 steps and at 40: all absolute black. The 4 steps were the *lightning* sibling's recipe; the GGUF definition declares no steps and no guidance at all, so the UI kept the value it remembers per model. |
+| The file | Complete: 1,934 tensors, 60 blocks, `img_in` [64, 3072] against a config of 24 heads x 128. It loads and pins 12,620 MB. |
+| The VAE | Healthy, and it is what rules the decoder out: it loads with 0 missing tensors and decodes a synthetic latent into a 704x1296 tensor spanning -1 to 1. A decoder whose biases are non-zero cannot emit exact zeros. |
+| The discriminator | The fp8 safetensors of the **same architecture** (`qwen_image_edit_2511_20B_fp8_lightning_4step`) draws a valid 1296x704 image from the same reference photo, prompt, 4 steps and cfg 1: 41.8 s per image. |
+
+The architecture, the VAE, the text encoder, the reference and the recipe are all fine. What does not
+reach the compute path is the GGUF container: only `krea2` ships a GGUF mapping
+(`shared/utils/gguf_mapping.py` plus its own name map), while the qwen family hands the `.gguf` to the
+generic loader with a fused-qkv split map and nothing else. Use the fp8 entry, not the GGUF one.
