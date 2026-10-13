@@ -1,4 +1,17 @@
-"""Whether each clip carries the one before it, as a per-project option.
+"""Whether each clip carries the one before it.
+
+Three mechanisms answer that, and which one a run can use depends on its model:
+
+* **The shot-image chain.** With a start image per shot, a shot the plan declares ``continuous`` is
+  generated *from the shot before it* rather than from the project's character anchor. Reported from
+  use: "tres de las 5 son exactamente iguales... esas imagenes no sirven ya que deben tener una
+  secuencia logica en las escenas del video no repetirse iguales". Re-inventing every frame from the
+  same anchor gives the same frame back, and the scene starts over each time.
+* **The stitch.** A shot's own image is its first frame and the *next* shot's image is its last, so
+  the two clips meet on one frame instead of restarting the scene -- "se regresa el video al punto
+  inicial perdiendo la coherencia con la imagen del final del clip anterior". MiniMax H3's bounded
+  strategy has always done this; LTX 2 reads an end frame in the engine too, so it is asked of it.
+* **The reference handoff**, below: H3's own late-frame reference, which is a per-project option.
 
 Two continuity mechanisms exist, and only one of them is reachable for an H3 reference music
 video:
@@ -28,9 +41,18 @@ escena de un clip al siguiente".
 
 from __future__ import annotations
 
+import difflib
 from typing import Any, Mapping
 
-__all__ = ["continuity_run", "sequence_continuity_flags"]
+from services.director_video_strategy import BOUNDED_START_END
+
+__all__ = [
+    "continuity_run",
+    "duplicate_image_prompts",
+    "restale_neighbours",
+    "sequence_continuity_flags",
+    "stitches_shots",
+]
 
 OPTION = "_director_sequence_continuity"
 
@@ -200,3 +222,101 @@ def _enabled(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().casefold() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+# Engine families whose video path reads an end frame. Verified by reading them rather than assumed:
+# models/ltx2/ltx2.py carries ``image_end`` into its conditioning entries and the frame index it
+# lands on, the same way MiniMax H3 does. A family that does not appear here keeps the behaviour it
+# had, because asking a model to end on a frame it ignores is a stitch that only looks arranged.
+_END_FRAME_ARCHITECTURES = ("ltx2",)
+
+# How alike two consecutive image prompts have to be before they are the same frame. Measured on the
+# project this exists for: the duplicated pair scored 91.8% and rendered as one frame twice, and the
+# pair after it scored 74.5% and rendered differently.
+_DUPLICATE_PROMPT_RATIO = 0.85
+
+
+def stitches_shots(director_strategy: Any, model_def: Mapping[str, Any] | None) -> bool:
+    """Whether a shot may be told where it must end, so the next one starts on that frame.
+
+    With a start image per shot this is the only thing that makes consecutive clips meet: shot N is
+    rendered from its own image to the image of shot N+1, so the join is one frame rather than two
+    different ones. The plan still decides *where* -- a shot the plan cuts from is not stitched to
+    anything.
+    """
+
+    if str(director_strategy or "").strip() == BOUNDED_START_END:
+        return True  # H3's bounded strategy stitches its shots, and always has
+    architecture = str((model_def or {}).get("architecture") or "").strip().lower()
+    return architecture.startswith(_END_FRAME_ARCHITECTURES)
+
+
+def duplicate_image_prompts(
+    clip_plans: Any, threshold: float = _DUPLICATE_PROMPT_RATIO, announce: bool = True,
+) -> list[dict[str, Any]]:
+    """Consecutive shots whose image prompts are alike enough to render the same frame.
+
+    The plan is what is read, and nothing is rewritten here: a prompt is the planner's decision and
+    the reviewer's. What this does is say so *before* the renders are spent -- in the terminal, and
+    in the project's own state for the control that shows it -- so the pair can be corrected at the
+    review instead of after paying for two identical clips.
+
+    Returns one entry per pair: the shot, the shot before it, and how alike the two read. A caller
+    that only wants the answer (the control, which asks on every poll) passes ``announce=False``
+    and gets it without a line per poll in the log.
+    """
+
+    plans = [plan for plan in (clip_plans or []) if isinstance(plan, Mapping)]
+    findings: list[dict[str, Any]] = []
+    for index in range(1, len(plans)):
+        before = str(plans[index - 1].get("image_prompt") or "")
+        after = str(plans[index].get("image_prompt") or "")
+        if not before or not after:
+            continue
+        ratio = difflib.SequenceMatcher(None, before, after).ratio()
+        if ratio < threshold:
+            continue
+        findings.append({
+            "shot": index + 1,
+            "after_shot": index,
+            "similarity": round(ratio, 3),
+        })
+        if announce:
+            print(
+                f"[Continuity] Shots {index} and {index + 1} carry {ratio * 100:.0f}% the same image "
+                "prompt, so they will render as the same frame. Correct one of them before rendering."
+            )
+    return findings
+
+
+def restale_neighbours(state: Mapping[str, Any], clip_index: int) -> list[int]:
+    """The shots whose rendered video stops matching once ``clip_index``'s image is replaced.
+
+    A stitched shot ends on the image of the shot after it, so replacing that image leaves the shot
+    before ending somewhere else: a visible jump the reviewer did not ask for, and one that only
+    re-rendering removes. The shot whose image changed is marked by its own caller; this names the
+    neighbour that has to be marked with it, and names none when the project does not stitch.
+    """
+
+    if clip_index <= 0:
+        return []
+    profile = state.get("video_execution_profile")
+    if not isinstance(profile, Mapping):
+        return []
+    if not stitches_shots(
+        profile.get("video_strategy"), {"architecture": profile.get("architecture")},
+    ):
+        return []
+    clips = state.get("clips")
+    if not isinstance(clips, list) or len(clips) <= clip_index:
+        return []
+    before, after = clips[clip_index - 1], clips[clip_index]
+    if not isinstance(before, Mapping) or not isinstance(after, Mapping):
+        return []
+    # The declaration is filed on the planned clip and, for a live plan, on the clip itself; read
+    # both so a resumed project and a running one answer the same way.
+    carried = continuity_run([
+        {**(before.get("planned_clip") or {}), **before},
+        {**(after.get("planned_clip") or {}), **after},
+    ])
+    return [clip_index - 1] if len(carried) == 2 and carried[1] else []

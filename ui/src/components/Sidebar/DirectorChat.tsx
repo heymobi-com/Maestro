@@ -7,6 +7,7 @@ import { fetchModelOptions, getFileUrl } from '../../api/client'
 import { DirectorLoraSelector } from '../SettingsDrawer/DirectorLoraSelector'
 import { DirectorSongSetup } from './DirectorSongSetup'
 import { DirectorH3Optimizations } from './DirectorH3Optimizations'
+import { ReviewGateControl } from './ReviewGateControl'
 import { OmniReferenceSection } from './OmniReferenceSection'
 import { GalleryInput } from '../shared/GalleryInput'
 import { InfoTooltip } from './InfoTooltip'
@@ -353,8 +354,7 @@ function LlmThinkingStream({ stage }: { stage: string }) {
   useEffect(() => {
     const el = streamScrollRef.current
     if (!el) return
-    // Text that no longer extends the previous chunk belongs to a new stream,
-    // which renders from the top and should be followed again.
+    // Text that no longer extends the previous chunk is a new stream: follow it from the top.
     if (!streamText.startsWith(previousStreamRef.current)) {
       streamFollowRef.current = true
     }
@@ -543,8 +543,7 @@ export function DirectorChat() {
   const setScriptText = useStore(s => s.setDirectorScriptText)
   // Only the two skills whose planners read a written transcript offer the script source.
   const scriptCapable = skill === 'podcast' || skill === 'viral_video'
-  // A script supplies the words, not the faces: the references below are still what
-  // anchors identity in every shot.
+  // A script supplies the words, not the faces: the references below still anchor every shot.
   const scriptMode = scriptCapable && scriptSource === 'script'
   const scriptSummary = useMemo(() => {
     const parsed = parseDirectorScript(scriptText)
@@ -692,9 +691,8 @@ export function DirectorChat() {
     // ancestor surfaces, which can move the drawer or the gallery behind it.
     const messages = messagesRef.current
     if (!messages || !followBottomRef.current) return
-    // 'auto', not 'smooth': the next progress update interrupts the animation,
-    // and an animation's intermediate scrollTop reads as "the reader scrolled
-    // away", which would switch the follow off by itself.
+  // 'auto', not 'smooth': the next progress update interrupts the animation, and an animation's
+  // intermediate scrollTop reads as "the reader scrolled away", which would switch the follow off.
     messages.scrollTo({ top: messages.scrollHeight, left: 0, behavior: 'auto' })
   }, [step, loading, loadingMessage, error, clipPlans.length, clipImages.length, skill])
 
@@ -880,6 +878,8 @@ export function DirectorChat() {
             <DirectorSetupPanel locked={directorSetupLocked} />
           </SystemBubble>
         )}
+
+        {directorPathReady && <ReviewGateControl />}
 
         {pipelineActive && step === 'review_video' && (
           <div className="space-y-1 rounded-lg border border-accent-blue/25 bg-accent-blue/10 px-3 py-2 text-[10px] leading-relaxed text-text-secondary">

@@ -275,7 +275,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from services.access_log_filter import install_quiet_access_filter
 from services.http_runtime import configure_http_runtime
-from services import checkpoint_health, llm_writer_supervision, prompt_audit_api
+from services import checkpoint_health, director_review_gate, llm_writer_supervision, prompt_audit_api
 
 # Uvicorn's logging configuration replaces handlers but retains logger-level
 # filters. Install early, then idempotently confirm it again before startup.
@@ -286,6 +286,7 @@ api.add_event_handler("startup", configure_http_runtime)
 api.include_router(checkpoint_health.router)
 api.include_router(prompt_audit_api.router)
 api.include_router(llm_writer_supervision.router)
+api.include_router(director_review_gate.router)
 
 # Upload size caps — enforced in upload handlers. Tuned for real-world
 # media the app actually ingests; anything larger is almost certainly
@@ -10668,8 +10669,7 @@ async def director_v2_plan(request: Request):
     }
     skill_type = skill_map.get(skill_type, skill_type)
 
-    # A long timeline is planned in batches that can take ten minutes, and this endpoint never passed
-    # the planner's batch counters: no progress, and no way to stop it.
+    # Timeline planning runs in ten-minute batches, and this endpoint passed no batch counters.
     from services.director import plan_operation
     operation = plan_operation.begin(
         "plan",

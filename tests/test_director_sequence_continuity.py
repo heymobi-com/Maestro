@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _APP_DIR = os.path.abspath(os.path.join(_HERE, "..", "app"))
@@ -31,10 +32,51 @@ from services.director.sequence_continuity import (  # noqa: E402
     MAX_RUN,
     OPTION,
     continuity_run,
+    duplicate_image_prompts,
+    restale_neighbours,
     sequence_continuity_flags,
+    stitches_shots,
+)
+from services.director_video_strategy import (  # noqa: E402
+    BOUNDED_START_END,
+    ROLLING_WINDOW,
 )
 
 OMNI_REFERENCE = "omni_reference"
+
+ROOT = os.path.abspath(os.path.join(_HERE, ".."))
+
+# The two pairs this behaviour was measured on. The first came back as the same frame twice; the
+# second rendered differently, which is where the threshold sits between them.
+DUPLICATE_A = (
+    "create new scene, warehouse interior at night. A woman in red sits on a piano bench, legs "
+    "crossed, holding dark glasses at her chest. The man in black leather stands before her holding "
+    "his belt. Stark spotlight illuminates the contact area."
+)
+DUPLICATE_B = (
+    "create new scene, warehouse interior at night. A woman in red sits on a piano bench, legs "
+    "crossed, holding dark glasses at her chest. The man in black leather stands before her holding "
+    "his belt buckle. Stark spotlight illuminates the contact area."
+)
+DIFFERENT_A = (
+    "a glass greenhouse filled with tropical plants, misty air and dappled light, a botanist in a "
+    "linen coat"
+)
+DIFFERENT_B = "a glass greenhouse at dawn, misty air, rows of orchids, a gardener kneeling with a trowel"
+
+
+def _pipeline_source() -> str:
+    with open(
+        os.path.join(ROOT, "app", "services", "director_pipeline.py"), encoding="utf-8",
+    ) as handle:
+        return handle.read()
+
+
+def _image_shot(prompt, strategy=None):
+    shot = {"image_prompt": prompt}
+    if strategy:
+        shot["_director_continuity_strategy"] = strategy
+    return shot
 
 
 def _shot(environment, section="verse"):
@@ -402,6 +444,156 @@ class ThePlannerCanDeclareItTests(unittest.TestCase):
         source = inspect.getsource(music_video.MusicVideoPlanner)
 
         self.assertIn('raw.get("continuity_strategy")', source)
+
+
+class TheShotImageChainTests(unittest.TestCase):
+    """A shot that carries the one before it is drawn from it, not from the character anchor.
+
+    Reported from use: "tres de las 5 son exactamente iguales... esas imagenes no sirven ya que deben
+    tener una secuencia logica en las escenas del video no repetirse iguales". Every start image was
+    regenerated from the same anchor, so consecutive shots re-invented the same frame and the scene
+    started over at every clip.
+    """
+
+    def test_a_continuous_shot_carries_the_image_before_it(self):
+        plans = [_image_shot("first"), _image_shot("second", "continuous")]
+        self.assertEqual(continuity_run(plans), [False, True])
+
+    def test_an_independent_shot_is_drawn_from_the_anchor(self):
+        plans = [_image_shot("first"), _image_shot("second", "independent")]
+        self.assertEqual(continuity_run(plans), [False, False])
+
+    def test_the_image_stage_asks_instead_of_trusting_the_plans_own_field(self):
+        # The planner wrote image_source "original" on every shot of the reported project while also
+        # declaring them continuous: the declaration is the one that knows the story continues.
+        source = _pipeline_source()
+
+        self.assertIn("chains = sequence_continuity.continuity_run(clip_plans)", source)
+        self.assertIn(
+            'image_source = "previous" if (i < len(chains) and chains[i]) '
+            'else plan.get("image_source", "original")',
+            source,
+        )
+
+
+class TheStitchTests(unittest.TestCase):
+    """Where a shot has to end, so the shot after it starts on that same frame.
+
+    "de otro modo genera siempre un primer cuadro en cada clip que se regresa el video al punto
+    inicial perdiendo la coherencia con la imagen del final del clip anterior".
+    """
+
+    def test_h3s_bounded_strategy_still_stitches(self):
+        self.assertTrue(stitches_shots(BOUNDED_START_END, {}))
+
+    def test_ltx2_stitches_because_its_engine_reads_an_end_frame(self):
+        # models/ltx2/ltx2.py carries image_end into its conditioning entries, so the stitch is a
+        # frame the model is actually asked to land on rather than one it ignores.
+        self.assertTrue(stitches_shots(ROLLING_WINDOW, {"architecture": "ltx2_22B"}))
+
+    def test_a_family_whose_engine_was_not_verified_is_left_alone(self):
+        self.assertFalse(stitches_shots(ROLLING_WINDOW, {"architecture": "wan2_2"}))
+        self.assertFalse(stitches_shots(ROLLING_WINDOW, {}))
+        self.assertFalse(stitches_shots(ROLLING_WINDOW, None))
+
+    def test_the_video_stage_asks_for_the_stitch_by_name(self):
+        source = _pipeline_source()
+
+        self.assertIn(
+            "and sequence_continuity.stitches_shots(director_strategy, model_def)", source,
+        )
+
+
+class TheDuplicatePromptNoticeTests(unittest.TestCase):
+    """Two shots that would render one frame are named before both renders are paid for."""
+
+    def test_the_measured_duplicate_is_reported(self):
+        findings = duplicate_image_prompts(
+            [{"image_prompt": DUPLICATE_A}, {"image_prompt": DUPLICATE_B}], announce=False,
+        )
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["shot"], 2)
+        self.assertEqual(findings[0]["after_shot"], 1)
+        self.assertGreaterEqual(findings[0]["similarity"], 0.85)
+
+    def test_the_measured_pair_that_rendered_differently_is_not_reported(self):
+        findings = duplicate_image_prompts(
+            [{"image_prompt": DIFFERENT_A}, {"image_prompt": DIFFERENT_B}], announce=False,
+        )
+
+        self.assertEqual(findings, [])
+
+    def test_it_says_so_in_the_log_when_the_pipeline_asks(self):
+        with patch("builtins.print") as printed:
+            duplicate_image_prompts(
+                [{"image_prompt": DUPLICATE_A}, {"image_prompt": DUPLICATE_B}],
+            )
+
+        line = " ".join(str(call.args[0]) for call in printed.call_args_list)
+        self.assertIn("Shots 1 and 2 carry", line)
+        self.assertIn("the same image prompt", line)
+
+    def test_the_control_asks_without_a_line_per_poll(self):
+        with patch("builtins.print") as printed:
+            duplicate_image_prompts(
+                [{"image_prompt": DUPLICATE_A}, {"image_prompt": DUPLICATE_B}], announce=False,
+            )
+
+        self.assertEqual(printed.call_args_list, [])
+
+    def test_nothing_to_compare_is_no_finding(self):
+        self.assertEqual(duplicate_image_prompts([]), [])
+        self.assertEqual(duplicate_image_prompts(None), [])
+        self.assertEqual(duplicate_image_prompts([{"image_prompt": ""}, {"image_prompt": "x"}]), [])
+        self.assertEqual(duplicate_image_prompts(["not a shot", {}]), [])
+
+    def test_the_image_stage_asks_once_before_rendering(self):
+        source = _pipeline_source()
+
+        self.assertIn("sequence_continuity.duplicate_image_prompts(clip_plans)", source)
+
+
+class TheNeighbourGoesStaleTests(unittest.TestCase):
+    """Replacing a stitched shot's image leaves the shot that ended on it out of date."""
+
+    @staticmethod
+    def _project(strategy="continuous", architecture="ltx2_22B"):
+        return {
+            "video_execution_profile": {
+                "video_strategy": ROLLING_WINDOW, "architecture": architecture,
+            },
+            "clips": [
+                {"planned_clip": {"_director_continuity_strategy": "independent"}},
+                {"planned_clip": {"_director_continuity_strategy": strategy}},
+            ],
+        }
+
+    def test_the_shot_that_ended_on_it_is_marked(self):
+        self.assertEqual(restale_neighbours(self._project(), 1), [0])
+
+    def test_a_cut_is_not_marked(self):
+        self.assertEqual(restale_neighbours(self._project(strategy="independent"), 1), [])
+
+    def test_the_first_shot_has_no_neighbour(self):
+        self.assertEqual(restale_neighbours(self._project(), 0), [])
+
+    def test_a_project_that_does_not_stitch_marks_nothing(self):
+        self.assertEqual(restale_neighbours(self._project(architecture="wan2_2"), 1), [])
+
+    def test_a_state_that_says_nothing_is_left_alone(self):
+        self.assertEqual(restale_neighbours({}, 1), [])
+        self.assertEqual(restale_neighbours({"clips": []}, 1), [])
+        self.assertEqual(
+            restale_neighbours({"video_execution_profile": {}, "clips": [{}]}, 1), [],
+        )
+
+    def test_the_rerun_marks_it_alongside_its_own_shot(self):
+        source = _pipeline_source()
+
+        self.assertIn(
+            "for neighbour in sequence_continuity.restale_neighbours(s, clip_index)", source,
+        )
 
 
 if __name__ == "__main__":

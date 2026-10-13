@@ -55,9 +55,9 @@ from services.director_video_strategy import (
     video_strategy,
 )
 from services.h3_window_planner import compute_h3_window_boundaries
-from services import revision_llm
+from services import director_review_gate, revision_llm
 from services.director.reference_intents import default_untyped_reference_intents
-from services.director.sequence_continuity import sequence_continuity_flags
+from services.director import sequence_continuity
 from services.text_integrity import repair_payload
 from models.minimax_h3.reference_manifest import (
     split_exact_drive_audio_reference,
@@ -1053,15 +1053,17 @@ def _director_native_window_frames(
 
 def _claim_pipeline_operation_locked(pid: str) -> bool:
     """Reserve a terminal pipeline while ``_pipeline_lock`` is held."""
+    # A pipeline parked at a review is not active for the corrections that pause exists for.
+    reviewing = director_review_gate.parked(_pipelines.get(pid) or {})
     if (
-        pid in _pipeline_threads
+        (pid in _pipeline_threads and not reviewing)
         or bool(_pipeline_child_jobs.get(pid))
         or pid in _pipeline_starting
         or pid in _pipeline_operations
         or pid in _pipeline_deleting
-        or _pipelines.get(pid, {}).get("status") in {
+        or (not reviewing and _pipelines.get(pid, {}).get("status") in {
             "queued", "planning", "running", "paused",
-        }
+        })
     ):
         return False
     _pipeline_operations.add(pid)
@@ -2525,6 +2527,9 @@ def _rerun_clip_image_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
         s["clips"][clip_index]["video_stale"] = bool(
             s["clips"][clip_index].get("video_filename")
         )
+        # A stitched shot ends on this image, so its own video stops matching too.
+        for neighbour in sequence_continuity.restale_neighbours(s, clip_index):
+            s["clips"][neighbour]["video_stale"] = bool(s["clips"][neighbour].get("video_filename"))
         if prompt_override:
             s["clips"][clip_index]["image_prompt"] = prompt_override
         if anchor_to_persist:
@@ -2926,19 +2931,16 @@ EDITS are also checked word for word, which is what keeps the spoken lines intac
 
 
 # A model writes "FIXED_PROMPT:", "**FIXED_PROMPT:**", "## FIXED_PROMPT:" or "- **FIXED_PROMPT**:"
-# for the same thing, so the decoration is part of the pattern on BOTH sides of the colon: bold
-# around the colon and bold around the name are both common, and only the first matched an earlier
-# version. A marker that is not recognized is not "no marker": the whole answer -- analysis, quoted
-# fields and the prompt -- was then read as ONE prompt, and the gate refused it for having five
-# subject_definitions fields, three overall_soundscape fields and twelve spoken lines (measured in
-# the logs of a real session).
+# for the same thing, so the decoration is part of the pattern on BOTH sides of the colon. A marker
+# that is not recognized is not "no marker": the whole answer -- analysis, quoted fields and the
+# prompt -- was read as ONE prompt, and the gate refused it for five subject_definitions fields,
+# three overall_soundscape fields and twelve spoken lines (measured in a real session's logs).
 _REVISION_MARKER_RE = re.compile(
     r"(?mi)^[ \t]*(?:[-*+][ \t]+)?(?:#{1,6}[ \t]*)?[*_`]{0,2}[ \t]*"
     r"(ANALYSIS|QUESTION|FIXES|FIXED_PROMPT|EDITS|OPTIONS)[ \t]*[*_`]{0,2}[ \t]*:[ \t]*[*_`]{0,2}[ \t]*"
 )
 
-# One edit is a FIND line followed by a SET line, so a sentence full of colons and commas
-# never has to be escaped into a delimited one-liner.
+# An edit is a FIND line and a SET line, so a sentence full of colons and commas needs no escaping.
 _EDIT_FIND_RE = re.compile(r"(?i)^[ \t]*(?:\d+[.)][ \t]*)?(?:[-*+][ \t]*)?FIND[ \t]*:[ \t]*(.*)$")
 _EDIT_SET_RE = re.compile(
     r"(?i)^[ \t]*(?:\d+[.)][ \t]*)?(?:[-*+][ \t]*)?(?:SET|REPLACE(?:[ \t]+WITH)?|TO)[ \t]*:[ \t]*(.*)$"
@@ -2970,8 +2972,8 @@ def _parse_revision_edits(value: str) -> list[dict]:
     return [edit for edit in edits if edit["find"]]
 
 
-# A FIND read loosely is only accepted when it is this long: punctuation, spacing and case are
-# ignored to place it, so a short one could land on the wrong sentence.
+# A FIND read loosely is only accepted when it is this long: punctuation, spacing and case are ignored
+# to place it, so a short one could land on the wrong sentence.
 _LOOSE_FIND_MIN_CHARS = 24
 _LOOSE_FIND_MIN_WORDS = 4
 
@@ -3117,8 +3119,7 @@ _H3_FIELD_HEAD_RE = re.compile(
     r"integrated_multimodal_description|overall_soundscape|non_diegetic_music)[ \t]*:"
 )
 
-# A short single line that ends in a colon is a label ("Opcion A:", "Here it is:"),
-# not part of a prompt.
+# A short single line that ends in a colon is a label ("Opcion A:", "Here it is:"), not a prompt.
 _LABEL_LINE_RE = re.compile(r"(?s)^[^\n]{0,40}:[ \t]*$")
 
 
@@ -3248,14 +3249,11 @@ def _parse_revision_envelope(text: str, current: str = "") -> dict:
     return parts
 
 
-# A rewrite that moves fewer words than this is a reshuffle rather than a
-# correction. Three notes on clip 13 of a real project -- "the woman must
-# faithfully lip-sync the dialogue assigned to S1" -- came back as 2, 55 and 1
-# changed characters while the render stayed wrong: the assistant explained the
-# problem and handed the same prompt back, and the loop offered it as a fix.
-#
-# Words, not characters: the gesture such a note has to rewrite is a handful of
-# words, and a comma moved is none.
+# A rewrite that moves fewer words than this is a reshuffle rather than a correction. Three notes on
+# clip 13 of a real project -- "the woman must faithfully lip-sync the dialogue assigned to S1" --
+# came back as 2, 55 and 1 changed characters while the render stayed wrong: the assistant explained
+# the problem and handed the same prompt back, and the loop offered it as a fix. Words, not
+# characters: the gesture such a note has to rewrite is a handful of words, and a comma moved is none.
 _NO_OP_CHANGE_CHARS = 40
 _NO_OP_CHANGE_WORDS = 3
 
@@ -3324,9 +3322,8 @@ def _clip_scoped_rewrite(
     current = "".join(text[start:end] for start, end in spans)
     if not current:
         return None
-    # An answer that carries the project's text is a whole prompt, not a clip: leave it
-    # to the caller. Measured, the clip is a quarter of a prompt, so an answer that is
-    # 90% its own text is answering at the clip's scale.
+    # An answer that carries the project's text is a whole prompt, not a clip: leave it to the caller.
+    # Measured, the clip is a quarter of a prompt, so an answer that is 90% its own text is that scale.
     own_text = sum(
         end - start for start, end in h3_clip_spans(candidate, frozen)
     )
@@ -3337,8 +3334,8 @@ def _clip_scoped_rewrite(
     ).get_opcodes()
     kept = sum(i2 - i1 for tag, i1, i2, _, _ in opcodes if tag == "equal")
     if kept < 0.5 * len(current):
-        # Less than half of the clip survived: this is not a correction of the same
-        # text, and piecing it together piecewise would be inventing a prompt.
+        # Less than half of the clip survived: this is not a correction of the same text, and piecing it
+        # together piecewise would be inventing a prompt.
         return None
     pieces: list[str] = []
     cursor = 0
@@ -3362,9 +3359,8 @@ def _clip_scoped_rewrite(
                 continue
             if right <= left:
                 continue
-            # replace and delete, cut to this span. The answer's text is taken in the
-            # same proportion, which is exact for a replacement of equal length and a
-            # rounding choice otherwise.
+            # replace and delete, cut to this span. The answer's text is taken in the same proportion, which is
+            # exact for a replacement of equal length and a rounding choice otherwise.
             if tag != "replace" or j2 <= j1 or i2 <= i1:
                 continue
             factor = (j2 - j1) / (i2 - i1)
@@ -3373,17 +3369,15 @@ def _clip_scoped_rewrite(
             original = text[start + (left - low):start + (right - low)]
             replacement = candidate[ja:jb]
             if tag == "delete":
-                # A deletion that only removes whitespace keeps the prompt's layout: the
-                # answer may drop a blank line, and losing the newline between two fields
-                # glues their heads together.
+                # A deletion that only removes whitespace keeps the prompt's layout: the answer may drop a blank
+                # line, and losing the newline between two fields glues their heads together.
                 if not original.strip():
                     pieces.append(original)
                 continue
-            # A difference that is only whitespace keeps the prompt's own layout, in both
-            # directions. Measured with an answer the model had reflowed onto one line: the
-            # newlines between the six fields became single spaces and the prompt came back
-            # with one field instead of six. Whitespace carries no meaning here and the
-            # prompt's structure does.
+            # A difference that is only whitespace keeps the prompt's own layout, in both directions.
+            # Measured with an answer the model had reflowed onto one line: the newlines between the six
+            # fields became single spaces and the prompt came back with one field instead of six. Whitespace
+            # carries no meaning here and the prompt's structure does.
             if not replacement.strip() and original:
                 pieces.append(original)
             else:
@@ -3391,11 +3385,11 @@ def _clip_scoped_rewrite(
         clip_position = high
     pieces.append(text[cursor:])
     placed = "".join(pieces)
-    # Two invariants, checked on the result rather than trusted to the assembly: the
-    # prompt's own field structure and the project's text are both things a correction is
-    # never allowed to lose. Measured on a fixture whose newline sat against a frozen
-    # seam, the assembly dropped one and glued two field heads together; refusing is the
-    # honest answer there, and the caller then judges the answer as a whole prompt.
+    # Two invariants, checked on the result rather than trusted to the assembly: the prompt's own
+    # field structure and the project's text are both things a correction is never allowed to lose.
+    # Measured on a fixture whose newline sat against a frozen seam, the assembly dropped one and
+    # glued two field heads together; refusing is the honest answer, and the caller then judges the
+    # answer as a whole prompt.
     field_head = re.compile(
         r"(?mi)^[ \t]*(?:subject_definitions|summary|retention_analysis|"
         r"detailed_description|integrated_multimodal_description|overall_soundscape|"
@@ -3429,9 +3423,9 @@ def _revise_problem_nudge(problems: list[str], expected_lines: list[str] | None 
             f"  {index + 1}. {line}" for index, line in enumerate(expected_lines)
         )
         expected = f"\nThe lines to copy exactly, in order:\n{numbered}\n"
-    # An unappliable EDITS is the most common dead end: the assistant paraphrases a
-    # sentence it can see in THIS SHOT'S TEXT, and the whole turn ends as an error.
-    # Telling it what to do instead is worth more than repeating the rule.
+    # An unappliable EDITS is the most common dead end: the assistant paraphrases a sentence it can see
+    # in THIS SHOT'S TEXT, and the whole turn ends as an error. Telling it what to do instead is worth
+    # more than repeating the rule.
     edits_note = ""
     if any("not in the current prompt" in problem for problem in problems):
         edits_note = (
@@ -3565,12 +3559,11 @@ def revise_clip_prompt(
         review_h3_revision,
     )
 
-    # The text every clip of this project shares: the project ledger itself (authoritative,
-    # held once in the state) plus the sentences a quarter of the clips carry -- the rules,
-    # the subject lock, the wardrobe, the lighting arc, the specs. Measured on a real
-    # project, that is 2,770 of one clip's 6,184 characters, and it is where every case of
-    # damage was found. No single shot may edit it, so the gate is given the list, and only
-    # what is left is shown to the assistant and to the director.
+    # The text every clip of this project shares: the project ledger itself (authoritative, held once
+    # in the state) plus the sentences a quarter of the clips carry -- the rules, the subject lock,
+    # the wardrobe, the lighting arc, the specs. Measured on a real project, that is 2,770 of one
+    # clip's 6,184 characters, and it is where every case of damage was found. No single shot may edit
+    # it, so the gate is given the list and only what is left reaches the assistant and the director.
     frozen = [
         text for text in [str(clip.get("_director_project_context") or "").strip()]
         if text
@@ -3634,11 +3627,10 @@ def revise_clip_prompt(
         task.extend(["", "MEASUREMENT ACROSS THE NEIGHBOURING SHOTS:"])
         task.extend(f"- {finding}" for finding in crossed)
     if anchors:
-        # The system prompt asks the assistant to keep the anchors "the measurement
-        # lists", and the measurement listed none: the instruction pointed at
-        # nothing, so the exact sentences were never in front of it. Which of them
-        # the prompt already carries decides whether losing one is a change to
-        # refuse, so state it rather than leave it to be guessed.
+        # The system prompt asks the assistant to keep the anchors "the measurement lists", and the
+        # measurement listed none: the instruction pointed at nothing, so the exact sentences were
+        # never in front of it. Which of them the prompt already carries decides whether losing one
+        # is a change to refuse, so state it rather than leave it to be guessed.
         task.append(
             "- Canonical identity and world anchors, spelled verbatim: "
             + " | ".join(anchors)
@@ -3823,9 +3815,8 @@ def revise_clip_prompt(
                 "before rewriting."
             )
         elif parts["options"]:
-            # Explaining why the prompt cannot fix this, and offering the ways it
-            # can be fixed, is an answer: the director decides, which is what an
-            # assistant is for. A bare error here was the whole reply.
+            # Explaining why the prompt cannot fix this, and offering the ways it can be fixed, is
+            # an answer: the director decides, which is what an assistant is for.
             result["note"] = (
                 "La nota no se resuelve dentro de este prompt. Elige una opción "
                 "de abajo (se pone en la nota) o responde a lo que pregunta."
@@ -4020,10 +4011,9 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
             "" if prompt_override is not None
             else clip.get("_director_h3_compiled_prompt") or prompt
         ),
-        # A rerun of an edited shot used to reach preflight with no beats at
-        # all, which is the one input this compiler needs to rebuild the
-        # shot's speech contract. Retain instead, against the text that is
-        # actually being rendered.
+        # A rerun of an edited shot used to reach preflight with no beats at all, which is the one
+        # input this compiler needs to rebuild the shot's speech contract. Retain instead, against
+        # the text that is actually being rendered.
         "_director_dialogue_beats": _retained_h3_beats(clip, prompt),
         "_director_subjects_on_screen": (
             clip.get("_director_subjects_on_screen", []) or []
@@ -4288,10 +4278,9 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
             m.split(";")[0] for m in (video_loras.get("loras_multipliers", "") or "").split(" ") if m
         ),
         "_director_pipeline_id": pid,
-        # A one-clip rerun is not a multi-clip batch, so the job exposes no
-        # clip_output_files map for the sidecar writer to read the position
-        # from. Without this the regenerated clip's sidecar lost
-        # director_clip_index and could no longer be placed in the film.
+        # A one-clip rerun is not a multi-clip batch, so the job exposes no clip_output_files map
+        # for the sidecar writer to read the position from. Without this the regenerated clip's
+        # sidecar lost director_clip_index and could no longer be placed in the film.
         "_director_clip_index": clip_index,
         "_director_supersedes": previous_video_filename,
         "_director_detached_operation": True,
@@ -6213,12 +6202,10 @@ def _submit_and_wait(
         if activity != last_activity:
             last_activity = activity
             deadline = time.monotonic() + timeout_s
-            # A long multi-clip job must leave a resumable record behind even
-            # when the machine dies mid-batch, not only when the job reports
-            # completion or cancellation. Only the main batch writes here: a
-            # single-clip rerun is a detached operation that records its own
-            # slot when it finishes, and mirroring its batch index would file
-            # the regenerated clip under slot 0 whenever that slot was still
+            # A long multi-clip job must leave a resumable record behind even when the machine dies
+            # mid-batch, not only when the job reports completion or cancellation. Only the main
+            # batch writes here: a single-clip rerun records its own slot when it finishes, and
+            # mirroring its batch index filed the regenerated clip under slot 0 whenever the slot
             # empty — which is how a rerun ended up at the start of the film.
             if not _detached_operation:
                 _persist_finished_clips(_dir_pid, j)
@@ -6307,9 +6294,8 @@ def _submit_and_wait(
                         if key not in j:
                             continue
                         if key == "current_clip":
-                            # A resumed run submits only the tail, so the job
-                            # numbers its clips from one. Without the offset the
-                            # first regenerated shot is reported as "clip 1".
+                            # A resumed run submits only the tail, so the job numbers its clips from
+                            # one. Without the offset the first regenerated shot is reported as "clip 1".
                             value = j.get(key)
                             p["progress"][key] = (
                                 int(value) + offset
@@ -7322,12 +7308,17 @@ def _run_pipeline(pid: str, resume: bool = False):
             )
 
         # In non-auto mode, pause for image review
-        if not auto_mode and requires_shot_images and not _prepared_imgs_ok:
+        if director_review_gate.should_pause(auto_mode) and requires_shot_images and not _prepared_imgs_ok:
             _update_pipeline(pid, status="paused", pause_reason="review_images",
                              progress={"current": 2, "total": 3, "message": "Review images", "step": 0, "total_steps": 0})
+            _save_pipeline_state(pid)  # Save paused state so Dashboard shows it
             _wait_for_resume(pid)
             if _pipelines[pid]["status"] == "cancelled":
                 return
+
+            # A correction made while it waited lives in the saved state, not in this list.
+            clip_images = director_review_gate.reviewed_images(pid, clip_images, pipeline_out_dir)
+            _update_pipeline(pid, clip_images=list(clip_images))
 
             # Review can be open for hours; a gallery cleanup or manual rename
             # during that pause must not silently turn a planned I2V shot into
@@ -7363,10 +7354,9 @@ def _run_pipeline(pid: str, resume: bool = False):
             completed_clip_videos = _clip_video_slots(
                 output_files or [], len(clip_plans),
             )
-        # A resumed tail batch defers its own join, because that join would
-        # cover the tail only. Compile the whole film here instead, now that
-        # every shot exists, so a resumed long run still finishes with the
-        # joined video the uninterrupted run would have produced.
+        # A resumed tail batch defers its own join, because that join would cover the tail only.
+        # Compile the whole film here instead, now that every shot exists, so a resumed long run
+        # still finishes with the joined video the uninterrupted run would have produced.
         if int(getattr(output_files, "resumed_from", 0) or 0):
             _save_pipeline_state(pid)
             try:
@@ -8087,12 +8077,11 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
         if index < len(planned_clips):
             planned_clips[index].update(shot_state)
 
-    # The planner is not a reliable source of per-line speaker identity: one
-    # real 150-clip project arrived with 367 of 422 dialogue beats missing
-    # ``speaker_id``. The diarized transcript already knows which host owns
-    # each line, so bind it deterministically before the H3 vocal contract is
-    # compiled. Without this every (S1)/(S2) label is re-derived from subject
-    # list order, which puts the wrong face on the wrong voice.
+    # The planner is not a reliable source of per-line speaker identity: one real 150-clip project
+    # arrived with 367 of 422 dialogue beats missing ``speaker_id``. The diarized transcript already
+    # knows which host owns each line, so bind it deterministically before the H3 vocal contract is
+    # compiled. Without this every (S1)/(S2) label is re-derived from subject list order, which puts
+    # the wrong face on the wrong voice.
     lyric_rows = params.get("lyrics")
     if isinstance(lyric_rows, list) and lyric_rows:
         try:
@@ -8110,9 +8099,9 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
                     if isinstance(fallback, dict):
                         candidate = fallback
                 binding_windows.append(candidate if isinstance(candidate, dict) else {})
-            # Split fused turns BEFORE binding. A split creates new beats, and
-            # any created after the binding would keep the planner's inline
-            # label without ever being checked against the diarized audio.
+            # Split fused turns BEFORE binding. A split creates new beats, and any created after the
+            # binding would keep the planner's inline label without ever being checked against the
+            # diarized audio.
             from services.director.h3_dialogue import _split_multi_speaker_beats
 
             _split_multi_speaker_beats(clip_plans)
@@ -8582,12 +8571,16 @@ def _run_image_generation(pid: str, params: dict, clip_plans: list[dict], out_di
         )
         print(f"[Pipeline {pid}] Adopted establishing image as shared reference: {anchor_file}")
 
+    # Whether each shot carries the one before it, and the notice when two would render one frame.
+    chains = sequence_continuity.continuity_run(clip_plans)
+    sequence_continuity.duplicate_image_prompts(clip_plans)
+
     for i, plan in enumerate(clip_plans):
         if _pipelines[pid]["status"] == "cancelled":
             return clip_images, clip_keyframes
 
         # ── Determine image source: original reference or previous scene's output ──
-        image_source = plan.get("image_source", "original")
+        image_source = "previous" if (i < len(chains) and chains[i]) else plan.get("image_source", "original")
         source_ref = ref_image_path  # default: user's original reference
 
         if image_source == "previous" and i > 0 and clip_images[i - 1]:
@@ -9218,7 +9211,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
             end_path = ""
             if (
                 uses_shot_images
-                and director_strategy == BOUNDED_START_END
+                and sequence_continuity.stitches_shots(director_strategy, model_def)
                 and i + 1 < len(clip_plans)
                 and pc.get("music_timing_version") != 1
             ):
@@ -9757,7 +9750,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
     if clip_offset:
         gen_params["multi_clip_defer_concat"] = True
     # Per-project option, off by default: see director/sequence_continuity.py.
-    gen_params.update(sequence_continuity_flags(params, director_strategy,
+    gen_params.update(sequence_continuity.sequence_continuity_flags(params, director_strategy,
         omni_reference=OMNI_REFERENCE, clip_plans=clip_plans))
     _apply_director_h3_optimizations(
         gen_params,
