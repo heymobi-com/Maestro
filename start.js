@@ -2,6 +2,7 @@ const {
   isRtx50,
   legacyRuntimeProfile,
   runtimeProfile,
+  rtx50Profile,
 } = require("./launcher_profile")
 
 const appControlFailureEvent = "/(?:smart app control|application control|app control|device guard|wdac).*\\b(?:block(?:ed|ing)?|deny|denied|denial|prevent(?:ed|ing)?|restrict(?:ed|ion)?|unsigned|untrusted|reject(?:ed|ion)?|not allowed|not permitted)\\b|\\b(?:block(?:ed|ing)?|deny|denied|denial|prevent(?:ed|ing)?|restrict(?:ed|ion)?|unsigned|untrusted|reject(?:ed|ion)?|not allowed|not permitted)\\b.*(?:smart app control|application control|app control|device guard|wdac)|this app has been blocked by (?:your )?system administrator|blocked by group policy/i"
@@ -18,13 +19,19 @@ module.exports = async (kernel) => {
   const port = `{{local.remote_access && local.remote_access.enabled && local.remote_access.pinokio_port_lock && local.remote_access.target_port ? local.remote_access.target_port : ${fallbackPort}}}`
   const runtime = runtimeProfile(kernel)
   const legacyRuntime = legacyRuntimeProfile(kernel)
+  // A launch script can run before Pinokio's hardware inventory is populated, and then both profiles
+  // answer "env" -- the legacy environment, whose mmgp is older than requirements.txt requires, so
+  // the app stops on its own version check. The RTX 50 environment's marker is proof of the machine
+  // when nothing was reported, so prefer it. Everything else keeps the profile's own answer.
+  const rtx50 = rtx50Profile()
+  const unprobed = `exists('${rtx50.marker}') ? '${rtx50.env}' : '${legacyRuntime.env}'`
   const hasRecoveryRuntime = runtime.env !== legacyRuntime.env
   const selectedEnv = hasRecoveryRuntime
     ? `{{exists('${runtime.marker}') ? '${runtime.env}' : '${legacyRuntime.env}'}}`
-    : runtime.env
+    : (kernel.gpu ? runtime.env : `{{${unprobed}}}`)
   const selectedPython = hasRecoveryRuntime
     ? `{{exists('${runtime.marker}') ? '${runtime.python}' : '${legacyRuntime.python}'}}`
-    : runtime.python
+    : (kernel.gpu ? runtime.python : `{{exists('${rtx50.marker}') ? '${rtx50.python}' : '${legacyRuntime.python}'}}`)
   const runtimeGuard = isRtx50(kernel) ? [{
     when: `{{!exists('${runtime.marker}')}}`,
     method: "input",

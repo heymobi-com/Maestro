@@ -79,6 +79,14 @@ const solRuntimeProfile = (kernel = {}) => {
   }
 }
 
+// The RTX 50 profile, asked for without the kernel's help. Pinokio's hardware inventory can be empty
+// when a launch script runs -- two launches of the same app five minutes apart picked different
+// runtimes -- and the fallback is not neutral: app/env carries the legacy CUDA 12.8 stack, whose
+// mmgp (3.7.12) is older than requirements.txt now requires (3.8.2), so the app stops on its own
+// version check. This environment's install marker is direct evidence that the machine is an RTX 50,
+// so it is what a launch with no GPU reported should use.
+const rtx50Profile = () => legacyRuntimeProfile({ gpu: "nvidia", gpu_target: "sm_120" })
+
 // The tested CUDA 13 / Python 3.11 environment is now Maestro's preferred
 // runtime on GPUs supported by H3 Sol Engine. Existing RTX 40 installations
 // retain app/env as a recovery path; start.js falls back to it automatically
@@ -96,5 +104,6 @@ module.exports = {
   needsCuda13DriverUpdate,
   legacyRuntimeProfile,
   runtimeProfile,
+  rtx50Profile,
   solRuntimeProfile,
 }
