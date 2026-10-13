@@ -44,13 +44,15 @@ from __future__ import annotations
 import difflib
 from typing import Any, Mapping
 
-from services.director_video_strategy import BOUNDED_START_END
+from services.director_video_strategy import BOUNDED_START_END, OMNI_REFERENCE
 
 __all__ = [
     "continuity_run",
     "duplicate_image_prompts",
+    "hands_over_the_frame",
     "restale_neighbours",
     "sequence_continuity_flags",
+    "starts_to_keep",
     "stitches_shots",
 ]
 
@@ -249,6 +251,54 @@ def stitches_shots(director_strategy: Any, model_def: Mapping[str, Any] | None) 
         return True  # H3's bounded strategy stitches its shots, and always has
     architecture = str((model_def or {}).get("architecture") or "").strip().lower()
     return architecture.startswith(_END_FRAME_ARCHITECTURES)
+
+
+def hands_over_the_frame(
+    director_strategy: Any, model_def: Mapping[str, Any] | None,
+) -> bool:
+    """Whether the engine itself starts a shot from the frame the shot before it really ended on.
+
+    Read from the queue rather than guessed. In a rolling-window multi-clip batch, a clip that
+    carries no start image of its own is given one extracted from the video the clip before it
+    produced -- skipping the eight tail frames LTX distorts -- and its prompt type gains an ``S``.
+    That is the exact hand-off rather than a similar-looking one, and it costs no image generation.
+
+    MiniMax H3's bounded strategy opts in per clip through its own flag, and its planned-start
+    contract is upstream's tested path, so it keeps the start it has always used.
+    """
+
+    strategy = str(director_strategy or "").strip()
+    if strategy in {BOUNDED_START_END, OMNI_REFERENCE}:
+        return False
+    return bool((model_def or {}).get("sliding_window"))
+
+
+def starts_to_keep(
+    clip_plans: Any, director_strategy: Any, model_def: Mapping[str, Any] | None,
+) -> list[bool]:
+    """For each shot, whether its planned image is still the first frame it renders from.
+
+    A shot the plan declares continuous does not keep it: the shot before it hands over the frame it
+    really ended on. Reported from use: "no la secuencia que se supone deberia existir para que el
+    video tenga una continuidad logica de la ultima escena del clip anterior" -- generating every
+    start image up front can only approximate that, because shot N+1's image is drawn from shot N's
+    *initial* frame rather than from the frame it ended on.
+
+    The planned image is still used, as the shot before this one's last frame: the storyboard becomes
+    each clip's destination, and every planned frame appears in the film exactly once. Returns one
+    flag per shot, all true when the family does not hand frames over -- and an unreadable plan keeps
+    its image, because a cut is the honest answer where the plan said nothing.
+    """
+
+    plans = list(clip_plans or [])
+    flags = [True] * len(plans)
+    if not hands_over_the_frame(director_strategy, model_def):
+        return flags
+    aligned = [plan if isinstance(plan, Mapping) else {} for plan in plans]
+    for index, carried in enumerate(continuity_run(aligned)):
+        if index < len(flags):
+            flags[index] = not carried
+    return flags
 
 
 def duplicate_image_prompts(

@@ -81,7 +81,58 @@ The Director computes that type itself — `"SE" if has_any_start and has_any_en
 end paths is enough for the engine to receive `SE`. The first row is why this table is here: a stitch
 whose type is never set is a stitch that renders as if there were none, and nothing says so.
 
-## Two shots that would render one frame
+## The frame hand-over, instead of a similar-looking one
+
+Reported from use: "no la secuencia que se supone deberia existir para que el video tenga una
+continuidad logica de la ultima escena del clip anterior... no tiene sentido generar todas imagenes
+desde el principio sino generar un clip y de ahi tomar la ultima imagen como referencia para el
+siguiente".
+
+That is the exact hand-off, and the queue already implements it. In a rolling-window multi-clip
+batch, a clip that carries **no start image of its own** is given one extracted from the video the
+clip before it produced:
+
+```
+  [Continuation] Extracted last frame for clip 3
+```
+
+The extraction skips the eight tail frames LTX distorts, and the clip's prompt type gains an `S` so
+the frame is actually conditioned on. What was missing was only the trigger: the Director sent a
+start image for every shot, so the hand-off never fired.
+
+So for a shot the plan declares continuous, the Director no longer sends that shot's planned image as
+its first frame, and the shot before it hands over the frame it really ended on. What does **not**
+change is where each shot must end: the planned image is still the *destination* of the clip before
+it. The storyboard becomes the landing point of every clip rather than the opening of one:
+
+| | first frame | last frame |
+|---|---|---|
+| clip 1 | the planned image of shot 1 (the film opens there) | the planned image of shot 2 |
+| clip 2 | **the frame clip 1 really ended on** | the planned image of shot 3 |
+| clip 3 | **the frame clip 2 really ended on** | the planned image of shot 4 |
+| last clip | the frame the clip before it really ended on | free, this is the ending |
+
+Every planned image is still used exactly once, the review gate still shows all of them before any
+render starts, and drift cannot accumulate: each clip starts from what was really produced and is
+pulled back toward the planned frame by its end anchor.
+
+`hands_over_the_frame()` decides which families may be asked. MiniMax H3's bounded strategy keeps the
+planned start it has always used: its hand-over is opt-in per clip through its own flag and its
+shot-image contract is upstream's tested path. A plan that declares nothing keeps its image too —
+nothing is inferred from silence.
+
+### What was verified, and what the next run confirms
+
+Verified by reading the three code paths this depends on: the queue's hand-off above, the per-clip
+trigger (`_continuation` is set for a clip with no start image in any non-bounded batch), and that a
+Director run on this machine really is a multi-clip batch (its log shows `[Task 1/4]` … `[Task 4/4]`
+for a four-shot project).
+
+Not yet observed on a live Director run: an HTTP probe could not reproduce a multi-clip batch — it
+always rendered one task — so the hand-over itself has not been seen firing here. The next Director
+run confirms it in one line, `[Continuation] Extracted last frame for clip N`, and by comparing clip
+N's first frame with clip N-1's last frame.
+
 
 Consecutive shots whose image prompts are at least **85% the same text** are named before the renders
 are spent — in the terminal and in the Director panel, from the saved plan rather than from memory:

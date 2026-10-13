@@ -33,12 +33,15 @@ from services.director.sequence_continuity import (  # noqa: E402
     OPTION,
     continuity_run,
     duplicate_image_prompts,
+    hands_over_the_frame,
     restale_neighbours,
     sequence_continuity_flags,
+    starts_to_keep,
     stitches_shots,
 )
 from services.director_video_strategy import (  # noqa: E402
     BOUNDED_START_END,
+    OMNI_REFERENCE,
     ROLLING_WINDOW,
 )
 
@@ -63,6 +66,10 @@ DIFFERENT_A = (
     "linen coat"
 )
 DIFFERENT_B = "a glass greenhouse at dawn, misty air, rows of orchids, a gardener kneeling with a trowel"
+
+# The family whose engine hands the frame over itself: LTX 2 renders a multi-clip batch as windows
+# and starts a clip from the previous one's real last frame when the clip carries none of its own.
+LTX = {"architecture": "ltx2_22B", "sliding_window": True}
 
 
 def _pipeline_source() -> str:
@@ -552,6 +559,74 @@ class TheDuplicatePromptNoticeTests(unittest.TestCase):
         source = _pipeline_source()
 
         self.assertIn("sequence_continuity.duplicate_image_prompts(clip_plans)", source)
+
+
+class TheFrameHandoverTests(unittest.TestCase):
+    """The shot before hands over the frame it really ended on, rather than a similar one.
+
+    Reported from use: "no la secuencia que se supone deberia existir para que el video tenga una
+    continuidad logica de la ultima escena del clip anterior... no tiene sentido generar todas
+    imagenes desde el principio sino generar un clip y de ahi tomar la ultima imagen como referencia
+    para el siguiente". The queue already does exactly that; the Director was the reason it never
+    fired, because it sent a start image for every shot.
+    """
+
+    def test_a_windowed_family_hands_the_frame_over(self):
+        self.assertTrue(hands_over_the_frame(ROLLING_WINDOW, LTX))
+
+    def test_a_bounded_family_keeps_its_planned_start(self):
+        self.assertFalse(hands_over_the_frame(BOUNDED_START_END, LTX))
+        self.assertFalse(hands_over_the_frame(OMNI_REFERENCE, LTX))
+
+    def test_a_family_that_cannot_window_keeps_it_too(self):
+        self.assertFalse(hands_over_the_frame(ROLLING_WINDOW, {"architecture": "ltx2_22B"}))
+        self.assertFalse(hands_over_the_frame(ROLLING_WINDOW, None))
+
+    def test_the_first_shot_keeps_its_image(self):
+        flags = starts_to_keep(
+            [_image_shot("a"), _image_shot("b", "continuous")], ROLLING_WINDOW, LTX,
+        )
+
+        self.assertEqual(flags, [True, False])
+
+    def test_an_ordinary_cut_keeps_its_image(self):
+        flags = starts_to_keep(
+            [_image_shot("a"), _image_shot("b", "independent")], ROLLING_WINDOW, LTX,
+        )
+
+        self.assertEqual(flags, [True, True])
+
+    def test_a_bounded_family_keeps_every_image(self):
+        flags = starts_to_keep(
+            [_image_shot("a"), _image_shot("b", "continuous")], BOUNDED_START_END, LTX,
+        )
+
+        self.assertEqual(flags, [True, True])
+
+    def test_there_is_one_flag_per_shot_even_when_a_plan_is_unreadable(self):
+        # A plan that says nothing is a cut, which keeps its image: nothing is inferred from silence.
+        flags = starts_to_keep(
+            [_image_shot("a"), "not a plan", _image_shot("c", "continuous")], ROLLING_WINDOW, LTX,
+        )
+
+        self.assertEqual(flags, [True, True, False])
+
+    def test_no_plans_is_no_flags(self):
+        self.assertEqual(starts_to_keep([], ROLLING_WINDOW, LTX), [])
+        self.assertEqual(starts_to_keep(None, ROLLING_WINDOW, LTX), [])
+
+    def test_the_video_stage_asks_instead_of_deciding_it_itself(self):
+        source = _pipeline_source()
+
+        self.assertIn(
+            "keep_start = sequence_continuity.starts_to_keep(", source,
+        )
+        self.assertIn("and keep_start[i]", source)
+        # The scheduled frames it is arranged around must still exist by the time it is read.
+        self.assertLess(
+            source.index("keep_start = sequence_continuity.starts_to_keep("),
+            source.index("and keep_start[i]"),
+        )
 
 
 class TheNeighbourGoesStaleTests(unittest.TestCase):

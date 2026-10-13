@@ -2972,8 +2972,7 @@ def _parse_revision_edits(value: str) -> list[dict]:
     return [edit for edit in edits if edit["find"]]
 
 
-# A FIND read loosely is only accepted when it is this long: punctuation, spacing and case are ignored
-# to place it, so a short one could land on the wrong sentence.
+# A FIND is only accepted when it is this long: punctuation, spacing and case are ignored to place it.
 _LOOSE_FIND_MIN_CHARS = 24
 _LOOSE_FIND_MIN_WORDS = 4
 
@@ -3334,8 +3333,7 @@ def _clip_scoped_rewrite(
     ).get_opcodes()
     kept = sum(i2 - i1 for tag, i1, i2, _, _ in opcodes if tag == "equal")
     if kept < 0.5 * len(current):
-        # Less than half of the clip survived: this is not a correction of the same text, and piecing it
-        # together piecewise would be inventing a prompt.
+        # Less than half of the clip survived: piecing it together piecewise would be inventing a prompt.
         return None
     pieces: list[str] = []
     cursor = 0
@@ -3713,8 +3711,7 @@ def revise_clip_prompt(
             pipeline=lambda text: llm_service.enhance_prompt(
                 prompt=text,
                 mode="video",
-                # A compiled H3 Context-IR prompt is several thousand characters, and
-                # the default 200-token budget truncated the answer mid-field.
+                # A compiled H3 Context-IR prompt is thousands of characters and 200 tokens truncated it mid-field.
                 max_new_tokens=4096,
                 temperature=0.3,
                 nsfw=nsfw,
@@ -3815,8 +3812,7 @@ def revise_clip_prompt(
                 "before rewriting."
             )
         elif parts["options"]:
-            # Explaining why the prompt cannot fix this, and offering the ways it can be fixed, is
-            # an answer: the director decides, which is what an assistant is for.
+            # Explaining why the prompt cannot fix this, and offering the ways it can be, is an answer.
             result["note"] = (
                 "La nota no se resuelve dentro de este prompt. Elige una opción "
                 "de abajo (se pone en la nota) o responde a lo que pregunta."
@@ -3826,8 +3822,7 @@ def revise_clip_prompt(
                 f"{len(parts['options'])} option(s) instead of a rewrite."
             )
         else:
-            # An answer with no rewrite, no edits, no question and no options is a
-            # dead end: it used to look like a completed turn with nothing to show.
+            # An answer with no rewrite, no edits, no question and no options is a dead end, not a turn.
             result["errors"] = [
                 "The assistant explained the prompt without rewriting it, so "
                 "nothing changed. Repeat the note and name what should change.",
@@ -9180,6 +9175,9 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
         if music_cap is not None:
             bounded_maximum = music_cap
         bounded_step = int(model_def.get("frames_steps") or _fs or 1)
+        keep_start = sequence_continuity.starts_to_keep(
+            clip_plans, director_strategy, model_def,
+        )
 
         for i, plan in enumerate(clip_plans):
             wp = plan.get("window_prompts") or []
@@ -9196,9 +9194,11 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                 prompts.append(vp)
                 per_clip_prompt_modes.append(0)
 
+            # A shot that carries the one before it renders from the frame that shot really ended on,
+            # which the queue extracts; its own planned image becomes the previous shot's last frame.
             img_file = (
                 clip_images[i]
-                if uses_shot_images and i < len(clip_images)
+                if uses_shot_images and i < len(clip_images) and keep_start[i]
                 else ""
             )
             if img_file:
