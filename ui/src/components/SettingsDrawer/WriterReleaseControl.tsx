@@ -171,6 +171,12 @@ export function WriterReleaseControl({ url, onStarted }: { url: string; onStarte
         </button>
       </div>
 
+      {memory?.arena?.short && (
+        <div className="mt-1.5 rounded-lg border border-chip-orange/30 bg-orange-500/10 px-2 py-1 text-[10px] leading-relaxed text-chip-orange">
+          {memory.arena.warning}
+        </div>
+      )}
+
       {showCommand && (
         <div className="flex items-center gap-2 mt-1.5">
           <input

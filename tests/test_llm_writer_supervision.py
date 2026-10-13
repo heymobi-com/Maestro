@@ -486,5 +486,146 @@ class WiringTests(unittest.TestCase):
         self.assertLess(hand_over, source.index("_apply_per_job_coefficient(job)", generation))
 
 
+class TheArenaForecastTests(unittest.TestCase):
+    """What a writer started right now will be able to hold resident.
+
+    Reported from use: "me llama la atencion que varie tanto, cuando lo pare estaba generando solo 5
+    o 6 tok/sec". The engine's own log explains it: it sizes its page-locked expert cache from the RAM
+    it finds, and when only 14.70 GiB were free it capped the cache at 10.45 GiB and read the rest of
+    the 27.41 GiB of experts from disk -- 4.9-16.5 tok/s against 31-60 for the full 24 GiB.
+    """
+
+    def test_the_arithmetic_matches_the_engines_own_reading(self):
+        # Its line: "--resident-budget-gib 24.00 exceeds available RAM (14.70 GiB minus 4 GiB headroom
+        # and a 0.25 GiB margin): 10.45 GiB"
+        forecast = llm_writer_supervision.arena_forecast(14.70)
+
+        self.assertAlmostEqual(forecast["arena_gib"], 10.45, places=2)
+        self.assertTrue(forecast["short"])
+        self.assertIn("10.4 GiB", forecast["warning"])
+
+    def test_a_free_machine_is_not_a_warning(self):
+        forecast = llm_writer_supervision.arena_forecast(30.0)
+
+        self.assertEqual(forecast["short"], False)
+        self.assertEqual(forecast["warning"], "")
+
+    def test_the_warning_carries_the_measured_comparison(self):
+        forecast = llm_writer_supervision.arena_forecast(14.70)
+
+        self.assertIn("31-60 tok/s", forecast["warning"])
+        self.assertIn("4.9-16.5 tok/s", forecast["warning"])
+
+    def test_a_machine_that_cannot_report_is_not_warned_about(self):
+        with patch.object(llm_writer_supervision, "available_ram_gib", return_value=0.0):
+            forecast = llm_writer_supervision.arena_forecast()
+
+        self.assertFalse(forecast["known"])
+        self.assertFalse(forecast["short"])
+        self.assertEqual(forecast["warning"], "")
+
+    def test_it_reads_the_machine_when_asked_for_nothing(self):
+        with patch.object(llm_writer_supervision, "available_ram_gib", return_value=30.0):
+            forecast = llm_writer_supervision.arena_forecast()
+
+        self.assertTrue(forecast["known"])
+        self.assertAlmostEqual(forecast["free_gib"], 30.0, places=2)
+
+    def test_the_reading_is_taken_from_the_operating_system(self):
+        # Not a stub: on this machine the figure has to be a plausible amount of free RAM.
+        free = llm_writer_supervision.available_ram_gib()
+
+        self.assertGreater(free, 0.0)
+        self.assertLess(free, 4096.0)
+
+
+class TheForecastReachesTheOperatorTests(unittest.TestCase):
+    """The warning is useless if it only exists when someone reads the engine's log."""
+
+    def setUp(self):
+        llm_writer_health.forget()
+        llm_writer_supervision._forget_notes()
+        llm_writer_supervision._last_attempt = 0.0
+        llm_writer_supervision._starting = False
+        self.config = Path(tempfile.mkdtemp()) / "writer_supervision.json"
+        self.path = patch.object(llm_writer_supervision, "_config_path", return_value=str(self.config))
+        self.path.start()
+        self.addCleanup(self.path.stop)
+        llm_writer_supervision.set_autostart("start-strata")
+
+    def test_starting_a_writer_that_would_be_capped_says_so(self):
+        with patch.object(llm_writer_supervision, "_in_application", return_value=True), \
+             patch.object(llm_writer_supervision, "_answers", return_value=False), \
+             patch.object(llm_writer_supervision, "arena_forecast",
+                          return_value={"known": True, "free_gib": 14.7, "arena_gib": 10.45,
+                                        "short": True, "warning": "CAPPED AT TEN"}), \
+             patch.object(llm_writer_supervision, "_free_local_writer", return_value=""), \
+             patch("subprocess.Popen"), patch("builtins.print") as printed:
+            llm_writer_supervision.start(wait_seconds=1)
+
+        line = " ".join(str(call.args[0]) for call in printed.call_args_list)
+        self.assertIn("CAPPED AT TEN", line)
+
+    def test_a_local_writer_is_unloaded_before_the_one_being_started(self):
+        # The mirror of the hand-over the render path does: a local llama-server holds host RAM too.
+        freed = []
+        with patch.object(llm_writer_supervision, "_in_application", return_value=True), \
+             patch.object(llm_writer_supervision, "_answers", return_value=False), \
+             patch.object(llm_writer_supervision, "arena_forecast",
+                          return_value={"known": True, "free_gib": 14.7, "arena_gib": 10.45,
+                                        "short": True, "warning": "CAPPED"}), \
+             patch.object(llm_writer_supervision, "_free_local_writer",
+                          side_effect=lambda: freed.append(True) or "unloaded the local writer first"), \
+             patch("subprocess.Popen"), patch("builtins.print") as printed:
+            llm_writer_supervision.start(wait_seconds=1)
+
+        self.assertEqual(freed, [True])
+        self.assertIn("unloaded the local writer first",
+                      " ".join(str(call.args[0]) for call in printed.call_args_list))
+
+    def test_a_healthy_forecast_does_not_touch_the_local_writer(self):
+        with patch.object(llm_writer_supervision, "_in_application", return_value=True), \
+             patch.object(llm_writer_supervision, "_answers", return_value=False), \
+             patch.object(llm_writer_supervision, "arena_forecast",
+                          return_value={"known": True, "free_gib": 30.0, "arena_gib": 25.75,
+                                        "short": False, "warning": ""}), \
+             patch.object(llm_writer_supervision, "_free_local_writer") as free, \
+             patch("subprocess.Popen"):
+            llm_writer_supervision.start(wait_seconds=1)
+
+        free.assert_not_called()
+
+    def test_a_test_never_unloads_the_operators_writer(self):
+        # The same isolation the start command keeps: outside the running application, this must not
+        # touch a real local writer. Measured cost of getting this wrong was thirty broken tests the
+        # first time; this one would unload the operator's own server instead.
+        with patch.object(llm_writer_supervision, "_in_application", return_value=False), \
+             patch("services.llm_service.unload_model") as unload:
+            self.assertEqual(llm_writer_supervision._free_local_writer(), "")
+
+        unload.assert_not_called()
+
+    def test_the_panel_sees_it_only_while_the_writer_is_down(self):
+        # A writer that answers has already built its cache: warning about a start that is not going to
+        # happen is what made this a false alarm the first time it was tried, on a running writer.
+        down = patch.object(llm_writer_supervision, "_state", side_effect=OSError("refused"))
+        with patch.object(llm_writer_supervision, "_ours", return_value=STRATA), down, \
+             patch.object(llm_writer_supervision, "arena_forecast",
+                          return_value={"known": True, "free_gib": 14.7, "arena_gib": 10.45,
+                                        "short": True, "warning": "CAPPED"}):
+            self.assertTrue(llm_writer_supervision.memory()["arena"]["short"])
+
+        with patch.object(llm_writer_supervision, "_ours", return_value=STRATA), \
+             patch.object(llm_writer_supervision, "_state", return_value="loaded"), \
+             patch.object(llm_writer_supervision, "arena_forecast",
+                          return_value={"known": True, "free_gib": 14.7, "arena_gib": 10.45,
+                                        "short": True, "warning": "CAPPED"}):
+            answer = llm_writer_supervision.memory()
+
+        self.assertFalse(answer["arena"]["short"])
+        self.assertEqual(answer["arena"]["warning"], "")
+        self.assertAlmostEqual(answer["arena"]["free_gib"], 14.7, places=2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,10 +1,21 @@
 // The writer's memory, in its own module for the same reason the Director additions have one:
 // upstream edits client.ts every release.
 
+export interface ArenaForecast {
+  known: boolean
+  free_gib: number
+  arena_gib: number
+  /** True only when the writer is down and starting it now would cap its cache. */
+  short: boolean
+  warning: string
+}
+
 export interface WriterMemory {
   state: 'loaded' | 'unloaded' | 'unknown'
   address: string
   detail?: string
+  /** What a writer started right now would be able to hold resident. */
+  arena?: ArenaForecast
 }
 
 /** What the writer is holding right now. */

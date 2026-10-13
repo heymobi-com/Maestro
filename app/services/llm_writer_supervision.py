@@ -42,7 +42,9 @@ import time
 from fastapi import APIRouter
 
 __all__ = [
+    "arena_forecast",
     "autostart",
+    "available_ram_gib",
     "load",
     "memory",
     "release",
@@ -134,6 +136,111 @@ def _answers(address: str) -> bool:
         return False
 
 
+# The writer sizes its page-locked expert cache from the RAM it finds when it starts. Measured on
+# this machine, from the engine's own log:
+#
+#   FileExpertSource: --resident-budget-gib 24.00 exceeds available RAM (14.70 GiB minus 4 GiB
+#   headroom and a 0.25 GiB margin): 10.45 GiB
+#   FileExpertSource: RAM budget 10.45 GiB: 7802 of the 27.41 GiB of experts the GPU cache does not
+#   hold, by profile rank; the rest are read from the files
+#
+# And those two budgets are two different machines in one: 24 GiB of resident experts answered at
+# 31-60 tok/s, while 10.45 GiB read the rest from disk and answered at 4.9-16.5 tok/s. It is silent
+# about it, the setting in its own config still says 24, and because the idle unload is off that
+# state lasts until the writer is restarted.
+_WRITER_RAM_HEADROOM_GIB = 4.25
+# Under this the missing experts stop being an edge case: 27.4 GiB is the whole resident set here.
+_WRITER_ARENA_FLOOR_GIB = 20.0
+
+
+def available_ram_gib() -> float:
+    """Free physical RAM in GiB, or 0.0 when this machine cannot report it."""
+
+    try:
+        import ctypes
+
+        if hasattr(ctypes, "windll"):  # Windows
+
+            class _Memory(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = _Memory()
+            status.dwLength = ctypes.sizeof(_Memory)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return float(status.ullAvailPhys) / (1024.0 ** 3)
+            return 0.0
+        with open("/proc/meminfo", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    return float(line.split()[1]) / (1024.0 ** 2)
+            return 0.0
+    except Exception:
+        return 0.0  # an unreadable figure is not a reason to guess at one
+
+
+def arena_forecast(free_gib: float = 0.0) -> dict:
+    """What the writer will be able to hold resident, from the RAM that is free right now.
+
+    The arithmetic is the engine's own, so the forecast matches what it will decide; see the constants
+    above for the measurement behind the floor. A reading this machine cannot take is reported as
+    unknown rather than assumed, and never as a warning.
+    """
+
+    free = float(free_gib or 0.0) or available_ram_gib()
+    if free <= 0:
+        return {"known": False, "free_gib": 0.0, "arena_gib": 0.0, "short": False, "warning": ""}
+    arena = max(0.0, free - _WRITER_RAM_HEADROOM_GIB)
+    short = arena < _WRITER_ARENA_FLOOR_GIB
+    warning = ""
+    if short:
+        warning = (
+            f"starting the writer with {free:.1f} GiB of RAM free: its page-locked expert cache will "
+            f"be capped at about {arena:.1f} GiB (it keeps {_WRITER_RAM_HEADROOM_GIB:.2f} GiB of "
+            "headroom), and the experts past that are read from disk. Measured here: 24 GiB resident "
+            "answered at 31-60 tok/s and 10.45 GiB at 4.9-16.5 tok/s. Close what holds memory, or "
+            "restart the writer when the machine is free."
+        )
+    return {
+        "known": True,
+        "free_gib": round(free, 2),
+        "arena_gib": round(arena, 2),
+        "short": short,
+        "warning": warning,
+    }
+
+
+def _free_local_writer() -> str:
+    """Give back a local writer's memory before starting a remote one, when that is cheap.
+
+    The mirror of the hand-over the render path does: a local llama-server holds host RAM as well, and
+    the arena the writer is about to build is capped by what is free when it starts. Never raises --
+    a writer that cannot start leaves the pipeline's own honest error -- and it never acts outside the
+    running application, or a test suite run would unload the operator's own writer.
+    """
+
+    if not _in_application():
+        return ""
+    try:
+        from services import llm_service
+
+        if llm_service.is_loaded():
+            llm_service.unload_model()
+            return "unloaded the local writer first, so the writer being started gets the memory"
+    except Exception as exc:
+        return f"the local writer could not be unloaded first: {exc}"
+    return ""
+
+
 def start(address: str = "", wait_seconds: float = 0.0) -> bool:
     """Run the configured start command and wait for the writer to answer.
 
@@ -164,6 +271,15 @@ def start(address: str = "", wait_seconds: float = 0.0) -> bool:
         import subprocess
         import sys
 
+        # What the writer will be able to keep resident, before it is started: its cache is capped by
+        # the RAM that is free at that moment, and the difference was measured at 6-10x the speed.
+        forecast = arena_forecast()
+        if forecast["short"]:
+            freed = _free_local_writer()
+            if freed:
+                print(f"[LLM] {freed}")
+                forecast = arena_forecast()
+            print(f"[LLM] {forecast['warning']}")
         print(f"[LLM] starting the writer at {address}: {setting['start']}")
         creation = 0
         if sys.platform == "win32":
@@ -321,13 +437,22 @@ def memory() -> dict:
         from services import llm_writer_health
 
         # A refused connection is the ordinary "it is not running", and the panel should say that
-        # rather than show the pool's stack of retries.
+        # rather than show the pool's stack of retries. This is also when the forecast matters: a
+        # writer that is down is one about to be started, and the RAM free now is what it will get.
         detail = "not running" if llm_writer_health.is_connection_failure(exc) else str(exc)
-        return {"state": "unknown", "address": address, "detail": detail}
+        return {
+            "state": "unknown", "address": address, "detail": detail, "arena": arena_forecast(),
+        }
+    # A writer that answers has already built its cache, so the reading is a remark rather than a
+    # warning: nothing about it can change by starting something that is already up.
+    forecast = arena_forecast()
+    if state:
+        forecast = {**forecast, "short": False, "warning": ""}
     return {
         "state": state or "unknown",
         "address": address,
         "detail": "released: the next request loads it back" if state == "unloaded" else "",
+        "arena": forecast,
     }
 
 
