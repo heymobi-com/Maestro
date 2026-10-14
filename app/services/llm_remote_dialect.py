@@ -18,13 +18,17 @@ against Strata (``qwen3.8-flash-next-iq2_xs`` on ``127.0.0.1:8081``):
   "schema"}}`` -- returned JSON that conformed to the schema exactly;
 - that form obeys OpenAI's rule about the schema **root**: it "must accept only JSON objects at its
   root (type object, or anyOf/oneOf of object schemas)". llama.cpp compiles an array root happily, so
-  a shot list or a table read -- which constrain an array -- came back as an immediate 400, before a
-  token was generated, and the whole call was lost. Measured consequence of that fallback: a
-  request for 16-22 shots, sent unconstrained, came back as **37 shots** and was cut off at the
-  32000-token ceiling (`finish=length`), so the plan failed with the last shot empty. An array
-  schema now travels as an object holding it under "shots" (``ENVELOPE_KEY``), a shape the
-  planner's own parser already unwraps, so the endpoint states the real schema -- ``maxItems``
-  included -- and validates the answer against it.
+  a shot list or a table read -- which constrain an array -- has always crossed the local path and
+  never crossed this one: the endpoint answers an array root with an immediate 400, before a token is
+  generated, and the call is lost.
+
+Wrapping the array under an object root was measured too, and is worse than not sending it. The
+endpoint's own directive says "Return exactly one JSON object matching the JSON Schema below", so a
+request for 16-22 shots came back as **one shot** (2533 characters, then 3919 on the repair pass,
+`finish=stop`) and the plan failed with "returned 1 shots; expected 16-30". The text of a schema is
+the only lever this endpoint has on the shape of an answer, and that lever pulls every answer toward
+a single object. An array schema therefore keeps the unconstrained request it has always had, which
+is also what every hosted API gets.
 
 So the two fields Maestro needs are the ones it already knows how to send; it just had no reason to
 believe the endpoint could use them. This module supplies that reason: a server says what it is on
@@ -213,13 +217,17 @@ def _object_rooted(schema: Mapping[str, Any]) -> bool:
 
 
 # The envelope the planner's own parser already unwraps: every branch of ``_parse_json_response``
-# reads the list under "shots", so an array schema can travel inside an object and the caller still
-# receives the list it asked for.
+# reads the list under "shots". Kept named here because the wrapper was measured and rejected, and
+# the reason belongs next to the key it turned on.
 ENVELOPE_KEY = "shots"
 
 
 def _object_root(schema: Mapping[str, Any]) -> dict:
-    """An array schema moved under the object root this endpoint insists on."""
+    """An array schema moved under the object root this endpoint insists on.
+
+    Measured and unused: the endpoint then asks for "exactly one JSON object", and the model answers
+    with one shot. Undo the wrapping in ``finalize`` only with a new measurement in hand.
+    """
 
     return {
         "type": "object",
@@ -229,16 +237,20 @@ def _object_root(schema: Mapping[str, Any]) -> dict:
     }
 
 
-def _say_root_once(url: str) -> None:
+def _say_root_once(url: str, wrapped: bool) -> None:
     key = str(url or "").strip()
     if key in _root_notice:
         return
     _root_notice.add(key)
+    if wrapped:
+        print(
+            f"[LLM] {key} requires an object at the root of a JSON schema and this request constrains "
+            f'an array, so it is sent as an object with one "{ENVELOPE_KEY}" field.'
+        )
+        return
     print(
         f"[LLM] {key} requires an object at the root of a JSON schema and this request constrains an "
-        f'array (a shot list or a table read), so it travels as an object with one "{ENVELOPE_KEY}" '
-        "field. The endpoint then states the schema to the model, and its answer comes back under "
-        "that field, which the planner's parser already unwraps."
+        "array (a shot list or a table read). Sending it unconstrained, as it has always been here."
     )
 
 
@@ -271,15 +283,16 @@ def finalize(
     out = dict(prepared)
     if has_grammar:
         schema = grammar["schema"]
-        if not _object_rooted(schema):
-            # An array root is refused before a token is generated -- measured: an immediate 400,
-            # "response_format schema must accept only JSON objects at its root", and the whole call
-            # is lost. An object root carrying the array is accepted, and it is what stops a
-            # 16-22-shot request from coming back as 37: the endpoint states the schema, maxItems
-            # included, to the model, and checks the answer against it.
-            schema = _object_root(schema)
-            _say_root_once(url)
-        out["response_format"] = _openai_schema(schema)
+        if _object_rooted(schema):
+            out["response_format"] = _openai_schema(schema)
+        else:
+            # Measured, twice. Sending it as an array root is an immediate 400 ("must accept only
+            # JSON objects at its root") and the call is lost. Wrapping the array under an object
+            # root is accepted, but the endpoint then states "return exactly one JSON object" to the
+            # model, and a 16-22 shot request came back as ONE shot (2533 characters). Neither is
+            # usable, so an array schema keeps the unconstrained request it has always had here.
+            out.pop("response_format", None)
+            _say_root_once(url, wrapped=False)
     if _thinking_was_refused(raw):
         # The reasoning is billed against the same allowance as the answer, and a
         # structured caller only asked for the JSON.

@@ -153,33 +153,33 @@ class FinalizeTests(unittest.TestCase):
             "json_schema": {"name": "maestro_response", "strict": True, "schema": SCHEMA},
         })
 
-    def test_an_array_root_travels_inside_an_object(self):
-        # Measured: Strata refuses an array root outright -- "response_format schema must accept only
-        # JSON objects at its root" -- before it generates a token, and the whole call is lost. Left
-        # unconstrained, a request for 16-22 shots came back as 37 and was cut at the token ceiling.
-        # Moving the array under an object root is what lets the endpoint state the schema, maxItems
-        # included, and check the answer against it.
+    def test_an_array_root_is_never_sent(self):
+        # Measured twice. As an array root the endpoint answers an immediate 400 -- "response_format
+        # schema must accept only JSON objects at its root" -- before it generates a token. Wrapped
+        # under an object root it is accepted, but the endpoint then asks the model for "exactly one
+        # JSON object" and a 16-22 shot request came back as ONE shot. So the schema is dropped.
         array_schema = {"type": "array", "items": {"type": "object"}, "minItems": 16, "maxItems": 22}
         raw = {"response_format": {"type": "json_object", "schema": array_schema}}
         prepared = {"messages": [], "response_format": dict(raw["response_format"])}
         with patch("builtins.print"):
             out = self.finalize(raw=raw, prepared=prepared)
-        enviado = out["response_format"]["json_schema"]["schema"]
-        self.assertEqual(enviado["type"], "object")
-        self.assertEqual(enviado["required"], [dialect.ENVELOPE_KEY])
-        self.assertEqual(enviado["properties"][dialect.ENVELOPE_KEY], array_schema)
-        self.assertTrue(
-            dialect._object_rooted(enviado), "what is sent must be what the endpoint accepts"
-        )
+        self.assertNotIn("response_format", out, "the endpoint would refuse this request")
+        self.assertNotIn("schema", json.dumps(out))
 
-    def test_the_envelope_key_is_the_one_the_parser_unwraps(self):
-        # The whole trick rests on this name: every branch of the planner's _parse_json_response
-        # reads the list under "shots", so the caller still receives the array it asked for.
-        self.assertEqual(dialect.ENVELOPE_KEY, "shots")
+    def test_the_rejected_envelope_is_not_wired_back_in(self):
+        # The wrapper exists, is documented as measured-and-unused, and must stay unused: shipping it
+        # again is what turned a 37-shot plan into a 1-shot plan.
+        array_schema = {"type": "array", "items": {"type": "object"}}
+        self.assertEqual(dialect._object_root(array_schema)["type"], "object")
+        raw = {"response_format": {"type": "json_object", "schema": array_schema}}
+        prepared = {"messages": [], "response_format": dict(raw["response_format"])}
+        with patch("builtins.print"):
+            out = self.finalize(raw=raw, prepared=prepared)
+        self.assertNotIn("response_format", out)
 
-    def test_a_wrapped_schema_still_asks_for_no_reasoning(self):
-        # Wrapping must not cost the other half of the dialect: reasoning off is what made this
-        # endpoint answer at all.
+    def test_dropping_the_schema_does_not_drop_the_thinking_request(self):
+        # Losing the grammar must not cost the answer too: reasoning off is what made this endpoint
+        # answer at all on a tight allowance.
         raw = {
             "enable_thinking": False,
             "response_format": {"type": "json_object", "schema": {"type": "array", "items": {}}},
@@ -197,16 +197,6 @@ class FinalizeTests(unittest.TestCase):
             self.finalize(raw=raw, prepared=prepared)
         avisos = [c for c in said.call_args_list if "array" in str(c)]
         self.assertEqual(len(avisos), 1, "a plan makes many of these calls")
-
-    def test_forgetting_an_endpoint_lets_the_notice_be_said_again(self):
-        raw = {"response_format": {"type": "json_object", "schema": {"type": "array", "items": {}}}}
-        prepared = {"messages": [], "response_format": {"type": "json_object", "schema": {"type": "array", "items": {}}}}
-        with patch("builtins.print") as said:
-            self.finalize(raw=raw, prepared=prepared)
-            dialect.forget(STRATA_URL)
-            self.finalize(raw=raw, prepared=prepared)
-        avisos = [c for c in said.call_args_list if "array" in str(c)]
-        self.assertEqual(len(avisos), 2)
 
     def test_a_refused_thinking_request_silences_the_reasoning(self):
         raw = {"enable_thinking": False, "chat_template_kwargs": {"enable_thinking": False}}
