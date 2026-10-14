@@ -331,3 +331,41 @@ Two costs compound here rather than adding, and both were paid at once on the sa
 reply that thinks for 24,605 tokens (see the thinking cap above) takes **51 minutes**; at 64 tok/s the
 same reply is six. A writer that starts with too little room turns every other inefficiency into a
 coffee break, which is why the warning is worth reading instead of dismissing.
+
+## A Stop did not reach the writer
+
+Reported after the speed was fixed: "cuando hago stop o detengo un job o hago start over se queda algo
+pendiente quiza usando recursos y strata empieza mas lento".
+
+The writer's own counter said it first: of the **109** requests it finished, **one** carried
+`cancel=True`. So a stop almost never reached it.
+
+`stop_pipeline` writes `cancelled` and aborts the generation jobs, but a plan in flight is a blocking
+HTTP stream that nothing interrupts. The pipeline thread is parked inside that request and only reads
+the flag when it returns, so the abandoned generation runs to its last token — and because the engine
+serves requests in order, the next call queues behind work nobody is waiting for. That is the whole of
+"it feels slower after a stop".
+
+The machinery was already there, for prompt enhancement:
+
+- `studio_enhancement.enhancement_context(settings, cancelled)` puts a context on the calling thread;
+- `cancellable_lines` reads the socket in a daemon thread and checks cancellation every 100 ms;
+- on the way out it calls `sock.shutdown(SHUT_RDWR)`, so the server sees the client leave and ends its
+  own work.
+
+What was missing is that nothing set that context on the Director's planning thread, so
+`is_cancellable()` answered False and every check inside the stream did nothing.
+
+`director_plan_cancel.bind(pid)` sets it, one line in `_run_pipeline`, and it reads the pipeline's own
+status rather than being told: `stop_pipeline` already writes `cancelled`, so there is one source of
+truth and no second caller to keep in step. Three properties make it safe to switch on:
+
+- `generate_streaming` checks cancellation **before** it sends anything, so the planner's
+  retry-after-failure path raises there instead of quietly starting a second generation;
+- the raise is `InterruptedError`, and `_run_pipeline` already treats a pipeline whose status is
+  `cancelled` as a clean stop — "Cancelled during a bounded planning or generation unit; its latest
+  checkpoint was preserved" — so a stopped run is not recorded as a failure;
+- the binding is per thread and entered once, so a second pipeline thread is untouched.
+
+To check on the next live stop: the writer should start reporting `cancel=True` (it was 1 of 109), and
+the call started right after should not wait for the abandoned one.

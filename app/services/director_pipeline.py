@@ -55,7 +55,7 @@ from services.director_video_strategy import (
     video_strategy,
 )
 from services.h3_window_planner import compute_h3_window_boundaries
-from services import director_review_gate, revision_llm
+from services import director_plan_cancel, director_review_gate, revision_llm
 from services.director.reference_intents import default_untyped_reference_intents
 from services.director import sequence_continuity
 from services.text_integrity import repair_payload
@@ -6856,6 +6856,7 @@ def _run_pipeline(pid: str, resume: bool = False):
             p = _pipelines.get(pid)
             if not p or p.get("status") == "cancelled":
                 return
+        director_plan_cancel.bind(pid)
         params = p["params"]
         pipeline_out_dir = p.get("out_dir") or _wgp.save_path
         pipeline_workspace = p.get("workspace")
