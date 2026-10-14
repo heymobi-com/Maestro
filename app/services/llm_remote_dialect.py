@@ -15,7 +15,16 @@ against Strata (``qwen3.8-flash-next-iq2_xs`` on ``127.0.0.1:8081``):
   and Strata accepts the first, which is already an OpenAI field;
 - a requested schema sent in llama.cpp's form is misread (the schema came back as the answer), while
   the **OpenAI standard** form -- ``{"type": "json_schema", "json_schema": {"name", "strict",
-  "schema"}}`` -- returned JSON that conformed to the schema exactly.
+  "schema"}}`` -- returned JSON that conformed to the schema exactly;
+- that form obeys OpenAI's rule about the schema **root**: it "must accept only JSON objects at its
+  root (type object, or anyOf/oneOf of object schemas)". llama.cpp compiles an array root happily, so
+  a shot list or a table read -- which constrain an array -- came back as an immediate 400, before a
+  token was generated, and the whole call was lost. Measured consequence of that fallback: a
+  request for 16-22 shots, sent unconstrained, came back as **37 shots** and was cut off at the
+  32000-token ceiling (`finish=length`), so the plan failed with the last shot empty. An array
+  schema now travels as an object holding it under "shots" (``ENVELOPE_KEY``), a shape the
+  planner's own parser already unwraps, so the endpoint states the real schema -- ``maxItems``
+  included -- and validates the answer against it.
 
 So the two fields Maestro needs are the ones it already knows how to send; it just had no reason to
 believe the endpoint could use them. This module supplies that reason: a server says what it is on
@@ -63,6 +72,10 @@ _probe_cache: dict[str, tuple[float, bool]] = {}
 # different fields and a server may answer one and not the other.
 _images_cache: dict[str, tuple[float, bool]] = {}
 
+# endpoints already told that their schema rule and a batch of shots disagree, so the
+# notice names the cause once instead of once per call.
+_root_notice: set[str] = set()
+
 
 def _probe(url: str) -> bool:
     import requests
@@ -100,9 +113,11 @@ def forget(url: str = "") -> None:
     if url:
         _probe_cache.pop(str(url).strip(), None)
         _images_cache.pop(str(url).strip(), None)
+        _root_notice.discard(str(url).strip())
     else:
         _probe_cache.clear()
         _images_cache.clear()
+        _root_notice.clear()
 
 
 def _probe_images(url: str) -> Optional[bool]:
@@ -180,6 +195,53 @@ def _openai_schema(json_schema: Mapping[str, Any]) -> dict:
     }
 
 
+def _object_rooted(schema: Mapping[str, Any]) -> bool:
+    """Whether an endpoint that follows OpenAI's rule would accept this schema.
+
+    The rule is the root's: "type object, or anyOf/oneOf of object schemas". A union is accepted only
+    when every branch is an object, because one branch the server cannot hold a root for is a 400.
+    """
+
+    if schema.get("type") == "object":
+        return True
+    for key in ("anyOf", "oneOf"):
+        branches = schema.get(key)
+        if isinstance(branches, list) and branches:
+            if all(isinstance(branch, Mapping) and branch.get("type") == "object" for branch in branches):
+                return True
+    return False
+
+
+# The envelope the planner's own parser already unwraps: every branch of ``_parse_json_response``
+# reads the list under "shots", so an array schema can travel inside an object and the caller still
+# receives the list it asked for.
+ENVELOPE_KEY = "shots"
+
+
+def _object_root(schema: Mapping[str, Any]) -> dict:
+    """An array schema moved under the object root this endpoint insists on."""
+
+    return {
+        "type": "object",
+        "properties": {ENVELOPE_KEY: dict(schema)},
+        "required": [ENVELOPE_KEY],
+        "additionalProperties": False,
+    }
+
+
+def _say_root_once(url: str) -> None:
+    key = str(url or "").strip()
+    if key in _root_notice:
+        return
+    _root_notice.add(key)
+    print(
+        f"[LLM] {key} requires an object at the root of a JSON schema and this request constrains an "
+        f'array (a shot list or a table read), so it travels as an object with one "{ENVELOPE_KEY}" '
+        "field. The endpoint then states the schema to the model, and its answer comes back under "
+        "that field, which the planner's parser already unwraps."
+    )
+
+
 def finalize(
     provider: str,
     url: str,
@@ -208,7 +270,16 @@ def finalize(
 
     out = dict(prepared)
     if has_grammar:
-        out["response_format"] = _openai_schema(grammar["schema"])
+        schema = grammar["schema"]
+        if not _object_rooted(schema):
+            # An array root is refused before a token is generated -- measured: an immediate 400,
+            # "response_format schema must accept only JSON objects at its root", and the whole call
+            # is lost. An object root carrying the array is accepted, and it is what stops a
+            # 16-22-shot request from coming back as 37: the endpoint states the schema, maxItems
+            # included, to the model, and checks the answer against it.
+            schema = _object_root(schema)
+            _say_root_once(url)
+        out["response_format"] = _openai_schema(schema)
     if _thinking_was_refused(raw):
         # The reasoning is billed against the same allowance as the answer, and a
         # structured caller only asked for the JSON.

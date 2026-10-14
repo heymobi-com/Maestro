@@ -244,3 +244,27 @@ The architecture, the VAE, the text encoder, the reference and the recipe are al
 reach the compute path is the GGUF container: only `krea2` ships a GGUF mapping
 (`shared/utils/gguf_mapping.py` plus its own name map), while the qwen family hands the `.gguf` to the
 generic loader with a fused-qkv split map and nothing else. Use the fp8 entry, not the GGUF one.
+
+## A schema that never reached the writer
+
+Reported as "I tried to generate prompts for H3 Omni with Director and it is giving me errors", and
+then, importantly, "I tried Gemma and Strata, so this is more systemic than just Strata".
+
+| Where | What was found |
+|---|---|
+| The log | Four `400` per run: `response_format schema must accept only JSON objects at its root (type object, or anyOf/oneOf of object schemas)`. The H3 shot list, the H3 table read, the H3 voice bible and the generic retry schema all constrain an **array**, and llama.cpp compiles an array root happily, so the grammar had always crossed the local path and never crossed this one. |
+| The consequence | The call fell back to unconstrained, and the plan came back as **37 shots where 16-22 were asked for**. 37 x ~865 tokens reached the 32000-token ceiling exactly: `reasoning=0 tokens, answer=32000 tokens, finish=length`, 148,599 characters. The last shot was cut mid-object, so `json_repair` salvaged it as an empty 37th item and completeness failed. |
+| Gemma is not exempt | Older logs show the same truncation with `budget=4096` (thinking on: `answer=25347 finish=length`, `answer=23910 finish=length`). The grammar is deliberately skipped when a model thinks, so **both writers planned without one**. The token ceiling was raised once before for this same symptom (200 -> 300 tokens/second); raising it again would not fix a model writing 37 shots instead of 22. |
+| What Strata actually is | Its own `serve/structured.py` says it: "The native engine has no grammar decoder. Failed generations are errors, never silently retried." It cannot *constrain* an answer at all; it **states the schema to the model** and validates what comes back. So for this endpoint the schema text is the only lever on the shot count, and dropping the schema removed it. |
+
+The fix keeps the shape the callers expect: an array schema now travels as an object holding it under
+`shots`, which is the envelope every branch of the planner's `_parse_json_response` already unwraps
+(verified against the real parser, including a truncated answer). The endpoint accepts it, states the
+real schema -- `maxItems` and the required fields included -- to the model, and checks the answer
+against it. `jsonschema` is optional on that endpoint and only broadens the checking: without it, the
+answer is verified to be one JSON object.
+
+The other half is upstream's own decision, left alone deliberately: the local path applies the grammar
+on the first attempt **only when that model's thinking is off**, and Gemma's thinking is on by default
+with a 4096-token budget. Turning Gemma's thinking off for this pass is what would give the local
+writer the same ceiling the grammar gives it elsewhere.

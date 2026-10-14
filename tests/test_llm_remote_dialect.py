@@ -153,6 +153,61 @@ class FinalizeTests(unittest.TestCase):
             "json_schema": {"name": "maestro_response", "strict": True, "schema": SCHEMA},
         })
 
+    def test_an_array_root_travels_inside_an_object(self):
+        # Measured: Strata refuses an array root outright -- "response_format schema must accept only
+        # JSON objects at its root" -- before it generates a token, and the whole call is lost. Left
+        # unconstrained, a request for 16-22 shots came back as 37 and was cut at the token ceiling.
+        # Moving the array under an object root is what lets the endpoint state the schema, maxItems
+        # included, and check the answer against it.
+        array_schema = {"type": "array", "items": {"type": "object"}, "minItems": 16, "maxItems": 22}
+        raw = {"response_format": {"type": "json_object", "schema": array_schema}}
+        prepared = {"messages": [], "response_format": dict(raw["response_format"])}
+        with patch("builtins.print"):
+            out = self.finalize(raw=raw, prepared=prepared)
+        enviado = out["response_format"]["json_schema"]["schema"]
+        self.assertEqual(enviado["type"], "object")
+        self.assertEqual(enviado["required"], [dialect.ENVELOPE_KEY])
+        self.assertEqual(enviado["properties"][dialect.ENVELOPE_KEY], array_schema)
+        self.assertTrue(
+            dialect._object_rooted(enviado), "what is sent must be what the endpoint accepts"
+        )
+
+    def test_the_envelope_key_is_the_one_the_parser_unwraps(self):
+        # The whole trick rests on this name: every branch of the planner's _parse_json_response
+        # reads the list under "shots", so the caller still receives the array it asked for.
+        self.assertEqual(dialect.ENVELOPE_KEY, "shots")
+
+    def test_a_wrapped_schema_still_asks_for_no_reasoning(self):
+        # Wrapping must not cost the other half of the dialect: reasoning off is what made this
+        # endpoint answer at all.
+        raw = {
+            "enable_thinking": False,
+            "response_format": {"type": "json_object", "schema": {"type": "array", "items": {}}},
+        }
+        prepared = {"messages": [], "response_format": {"type": "json_object", "schema": {"type": "array", "items": {}}}}
+        with patch("builtins.print"):
+            out = self.finalize(raw=raw, prepared=prepared)
+        self.assertEqual(out["reasoning_effort"], "none")
+
+    def test_an_array_root_is_reported_once_and_not_once_per_call(self):
+        raw = {"response_format": {"type": "json_object", "schema": {"type": "array", "items": {}}}}
+        prepared = {"messages": [], "response_format": {"type": "json_object", "schema": {"type": "array", "items": {}}}}
+        with patch("builtins.print") as said:
+            self.finalize(raw=raw, prepared=prepared)
+            self.finalize(raw=raw, prepared=prepared)
+        avisos = [c for c in said.call_args_list if "array" in str(c)]
+        self.assertEqual(len(avisos), 1, "a plan makes many of these calls")
+
+    def test_forgetting_an_endpoint_lets_the_notice_be_said_again(self):
+        raw = {"response_format": {"type": "json_object", "schema": {"type": "array", "items": {}}}}
+        prepared = {"messages": [], "response_format": {"type": "json_object", "schema": {"type": "array", "items": {}}}}
+        with patch("builtins.print") as said:
+            self.finalize(raw=raw, prepared=prepared)
+            dialect.forget(STRATA_URL)
+            self.finalize(raw=raw, prepared=prepared)
+        avisos = [c for c in said.call_args_list if "array" in str(c)]
+        self.assertEqual(len(avisos), 2)
+
     def test_a_refused_thinking_request_silences_the_reasoning(self):
         raw = {"enable_thinking": False, "chat_template_kwargs": {"enable_thinking": False}}
         self.assertEqual(self.finalize(raw=raw)["reasoning_effort"], "none")
@@ -174,6 +229,40 @@ class FinalizeTests(unittest.TestCase):
         before = json.dumps([raw, prepared], sort_keys=True)
         self.finalize(raw=raw, prepared=prepared)
         self.assertEqual(json.dumps([raw, prepared], sort_keys=True), before)
+
+
+class SchemaRootTests(unittest.TestCase):
+    """The classification that decides whether a grammar crosses over, on its own."""
+
+    def test_an_object_is_a_root_this_endpoint_accepts(self):
+        self.assertTrue(dialect._object_rooted({"type": "object", "properties": {}}))
+
+    def test_an_array_is_not(self):
+        self.assertFalse(dialect._object_rooted({"type": "array", "items": {"type": "object"}}))
+
+    def test_a_union_of_objects_is(self):
+        schema = {"anyOf": [{"type": "object"}, {"type": "object"}]}
+        self.assertTrue(dialect._object_rooted(schema))
+        self.assertTrue(dialect._object_rooted({"oneOf": [{"type": "object"}]}))
+
+    def test_a_union_that_admits_an_array_is_not(self):
+        # One branch the server cannot hold a root for is still a 400, so all of them must qualify.
+        schema = {"anyOf": [{"type": "object"}, {"type": "array"}]}
+        self.assertFalse(dialect._object_rooted(schema))
+
+    def test_a_schema_without_a_root_type_is_not(self):
+        self.assertFalse(dialect._object_rooted({"items": {"type": "object"}}))
+        self.assertFalse(dialect._object_rooted({"anyOf": []}))
+
+    def test_a_real_shot_list_root_is_an_array(self):
+        # The shape the planner really asks for, so the rule cannot drift away from it.
+        shot_list = {
+            "type": "array",
+            "items": {"type": "object", "properties": {"shot_number": {"type": "integer"}}},
+            "minItems": 5,
+            "maxItems": 9,
+        }
+        self.assertFalse(dialect._object_rooted(shot_list))
 
 
 class EngineSeamTests(unittest.TestCase):
@@ -212,6 +301,15 @@ class EngineSeamTests(unittest.TestCase):
         self.assertNotIn("reasoning_effort", out)
         self.assertEqual(out["model"], "m")
         self.assertEqual(out["max_tokens"], 256)
+
+    def test_a_local_writer_keeps_its_array_grammar(self):
+        # llama.cpp compiles an array root happily, so the refusal is the remote endpoint's alone:
+        # a shot list still constrains the bundled writer, which is what it always did.
+        array_schema = {"type": "array", "items": {"type": "object"}, "minItems": 5}
+        llm_service._provider, llm_service._model_id, llm_service._remote_url = "local", "m", ""
+        grammar = {"type": "json_object", "schema": array_schema}
+        out = llm_service._finalize_payload({"messages": [], "response_format": grammar})
+        self.assertEqual(out["response_format"], grammar)
 
 
 class ImageCapabilityTests(unittest.TestCase):
