@@ -369,3 +369,32 @@ truth and no second caller to keep in step. Three properties make it safe to swi
 
 To check on the next live stop: the writer should start reporting `cancel=True` (it was 1 of 109), and
 the call started right after should not wait for the abandoned one.
+
+## A line names its speaker beside itself
+
+Next build after that, and past planning, the run stopped before any render:
+
+    MiniMax H3 Omni would refuse these spoken lines: no cue names the character who speaks them...
+    shot 3: The line "[English] Ready to start?" is introduced by "s are deep, chest-based, and
+    controlled. Facial expressions show concentration and strain:", which names no character.
+
+The lines were written; nothing beside them said who speaks them. The compiled prompt carries the
+attribution **twice, in two different fields**: DIALOGUE AND VOCAL PERFORMANCE lists
+"Name (S1) speaks: <words>", while the `<d>` blocks are inserted into `detailed_description`. A cue is
+read clipped to the field it sits in, so the renderer's check -- which looks beside the line -- never
+sees the first one. Whoever writes that description therefore decides whether the shot can be rendered
+at all: a planner held to a grammar ends it by naming the speaker, and one free of a grammar ends it
+with the voice itself. That is a Strata-shaped failure, and it is why every shot in the reported run
+had two voices and no attribution.
+
+`h3_speaker_cues.compile_blocks` puts the tag where the check looks, and only where the check refuses
+the line. Two details earn their place in the code:
+
+- the judgement is the renderer's own `h3_unresolved_speaker_cue_problems`, not a copy of its rules:
+  a second implementation would drift, and one that accepted a line the renderer refuses would leave
+  the same broken build behind;
+- the function also returns the text, with its own tags taken out. The tag sits **outside** the
+  `<d>...</d>` span, and that span is all the compiler strips, so without the cleanup a second compile
+  would find the first pass's tag stranded in the prose, judge the lines against it, decide they were
+  fine, and drop them -- which is exactly what the compiler's own "compiling a repaired prompt returns
+  it unchanged" test caught while this was being written.

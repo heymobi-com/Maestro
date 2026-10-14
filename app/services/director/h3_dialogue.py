@@ -21,6 +21,7 @@ from services.dialogue_timing import (
 from services.director import audio_driven_transcript as _transcript
 from services.director import performance_expression as _expression
 from services.director.h3_single_shot_times import strip_loose_cut_times
+from services.director import h3_speaker_cues
 from services.director.project_brief import clip_project_context as _clip_context
 from services.h3_prompt_budget import (
     H3_ENHANCED_TEXT_TOKEN_TARGET as _H3_DIRECTOR_TEXT_TOKEN_BUDGET,
@@ -1130,9 +1131,8 @@ def compile_h3_vocal_contract(
                 instruction += f" While speaking, {physical_cue}"
             instructions.append(instruction)
 
-        prompt = _append_canonical_dialogue_blocks(
-            prompt, dialogue_beats, default_language,
-        )
+        cleaned, dialogue_blocks = h3_speaker_cues.compile_blocks(prompt, dialogue_beats, subjects, default_language)
+        prompt = _insert_dialogue_blocks(cleaned, dialogue_blocks)
         prompt = _sanitize_scripted_ambience(prompt)
         guard = (
             "Only these explicitly tagged lines are spoken, once each and in "
