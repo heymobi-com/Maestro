@@ -202,16 +202,48 @@ class FinalizeTests(unittest.TestCase):
         raw = {"enable_thinking": False, "chat_template_kwargs": {"enable_thinking": False}}
         self.assertEqual(self.finalize(raw=raw)["reasoning_effort"], "none")
 
+    def test_a_refused_thinking_request_is_also_capped(self):
+        # Measured on a planning call: with only the level set, the model thought for 24,605 tokens
+        # over 700 seconds and answered with 2,911 characters of a plan that was then rejected. The
+        # endpoint's level is an instruction it may ignore; the budget is a hard cap.
+        raw = {"enable_thinking": False, "chat_template_kwargs": {"enable_thinking": False}}
+        out = self.finalize(raw=raw)
+        self.assertEqual(out["reasoning_budget_tokens"], dialect._THINKING_CAP_TOKENS)
+
+    def test_the_cap_is_positive_because_zero_means_no_cap_there(self):
+        # The endpoint returns None for 0 or less -- "0 (or less) means no budget" -- so a zero here
+        # would read as "think as long as you like", which is the behaviour being fixed.
+        self.assertGreater(dialect._THINKING_CAP_TOKENS, 0)
+
+    def test_thinking_that_was_asked_for_gets_no_cap(self):
+        # A caller that wants the reasoning keeps it whole: this is not a quality knob.
+        raw = {"enable_thinking": True, "reasoning_effort": "medium"}
+        self.assertNotIn("reasoning_budget_tokens", self.finalize(raw=raw, prepared=dict(raw)))
+
+    def test_the_cap_is_never_sent_to_an_endpoint_that_is_not_this_dialect(self):
+        raw = {"enable_thinking": False, "chat_template_kwargs": {"enable_thinking": False}}
+        prepared = {"messages": [], "enable_thinking": False}
+        with patch("requests.get", return_value=health(service="llama.cpp")):
+            out = dialect.finalize("remote", STRATA_URL, raw, prepared)
+        self.assertNotIn("reasoning_budget_tokens", out)
+        self.assertNotIn("reasoning_effort", out)
+
     def test_thinking_that_was_asked_for_is_left_alone(self):
         raw = {"enable_thinking": True, "reasoning_effort": "medium"}
         self.assertEqual(self.finalize(raw=raw, prepared=raw), raw)
 
     def test_every_added_field_is_one_an_openai_endpoint_accepts(self):
-        # The dialect must not smuggle a llama.cpp-only field back into the payload.
+        # The dialect must not smuggle a llama.cpp-only field back into the payload. It does add one
+        # field of its own, and only this endpoint's: the documented thinking cap.
         raw = {"enable_thinking": False, "response_format": {"type": "json_object", "schema": SCHEMA}}
         prepared = {"messages": [], "response_format": dict(raw["response_format"])}
         out = self.finalize(raw=raw, prepared=prepared)
-        self.assertTrue(set(out).issubset(llm_service._OPENAI_CHAT_FIELDS))
+        self.assertTrue(
+            set(out).issubset(llm_service._OPENAI_CHAT_FIELDS | dialect._DIALECT_ONLY_FIELDS)
+        )
+        self.assertTrue(dialect._DIALECT_ONLY_FIELDS.isdisjoint(llm_service._OPENAI_CHAT_FIELDS))
+        self.assertNotIn("cache_prompt", out)
+        self.assertNotIn("chat_template_kwargs", out)
 
     def test_the_caller_is_never_mutated(self):
         raw = {"enable_thinking": False, "response_format": {"type": "json_object", "schema": SCHEMA}}

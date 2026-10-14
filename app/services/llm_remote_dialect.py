@@ -12,7 +12,14 @@ against Strata (``qwen3.8-flash-next-iq2_xs`` on ``127.0.0.1:8081``):
   ``reasoning_content`` and ``content`` came back empty -- 80 tokens generated, 337 characters of
   reasoning, nothing to show;
 - ``reasoning_effort: "none"`` and ``chat_template_kwargs.enable_thinking=false`` both silence that,
-  and Strata accepts the first, which is already an OpenAI field;
+  and Strata accepts the first, which is already an OpenAI field. But ``none`` is only the level the
+  model was trained to obey, not a limit: measured on a planning call, the model thought for
+  **24,605 tokens in 700 seconds** and answered with 2,911 characters of a plan that was then
+  rejected -- 11.7 minutes for one call, paid again by the repair pass. Strata's own log says it
+  seventeen times: "the reply reached max tokens while still thinking, so it has no answer", and
+  names the field that fixes it. A positive ``reasoning_budget_tokens`` is a **hard** cap (the
+  server closes the thinking and answers from what it holds, without re-reading), so a caller that
+  refused thinking now sends one. Zero is not the value: for this endpoint ``0`` means *no cap*;
 - a requested schema sent in llama.cpp's form is misread (the schema came back as the answer), while
   the **OpenAI standard** form -- ``{"type": "json_schema", "json_schema": {"name", "strict",
   "schema"}}`` -- returned JSON that conformed to the schema exactly;
@@ -68,6 +75,18 @@ _HEALTH_PATH = "/health"
 _MODELS_PATH = "/v1/models"
 _PROBE_TIMEOUT = 2.0
 _PROBE_TTL = 60.0
+
+# A caller that refused thinking still gets a short allowance: the endpoint's own `none` level is an
+# instruction the model may ignore, and when it does, it thinks until the budget is gone (measured:
+# 24,605 tokens, 11.7 minutes, a rejected plan). This is a hard cap -- the server closes the thinking
+# there and answers from what it holds. Zero must not be used here: for this endpoint 0 means no cap.
+_THINKING_CAP_TOKENS = 512
+
+# The one field this module adds that is not in OpenAI's chat schema. It is documented by the
+# endpoint (`reasoning_budget_tokens`, DETAILS.md "A hard thinking budget"), it is what that
+# endpoint's own error message asks for, and it is never sent to an endpoint that did not name
+# itself as this dialect.
+_DIALECT_ONLY_FIELDS = frozenset({"reasoning_budget_tokens"})
 
 # url -> (monotonic reading, answer)
 _probe_cache: dict[str, tuple[float, bool]] = {}
@@ -295,6 +314,8 @@ def finalize(
             _say_root_once(url, wrapped=False)
     if _thinking_was_refused(raw):
         # The reasoning is billed against the same allowance as the answer, and a
-        # structured caller only asked for the JSON.
+        # structured caller only asked for the JSON. The level alone is not enough,
+        # so it is capped: see _THINKING_CAP_TOKENS.
         out["reasoning_effort"] = "none"
+        out["reasoning_budget_tokens"] = _THINKING_CAP_TOKENS
     return out
