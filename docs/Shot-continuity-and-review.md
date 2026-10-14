@@ -276,3 +276,58 @@ What this cannot fix is a writer with no grammar decoder. An endpoint that only 
 (Strata) has no way to hold a 16-22 shot window, and stating the schema as text pulls the answer
 toward the single object its directive asks for. The native H3 plan therefore needs a writer that can
 compile the schema -- the bundled llama.cpp writer does, from token 0.
+
+## Why the writer went from 80 to 8 tokens a second
+
+Reported while planning: "de 80 que generaba antes ahora baja a 7 - 8 no se puede trabajar asi", and
+"unas veces bien y otra demasiado lento". The writer is a mixture-of-experts model served by Strata,
+with its experts mapped from the model files and **not** loaded into RAM.
+
+| ruled out | measurement |
+|---|---|
+| Paging | 0.2 GB of the page file in use; 0-11 disk pages read per second; free list at 0.03 GB. |
+| Disk | 0.81-4.11 ms per read, queue length 1, ~860 reads/s. |
+| GPU throttling | 2,940 of 3,090 MHz, 47 °C, 69 W of a 360 W limit, and `clocks_event_reasons` reporting none. |
+| What is open while it generates | The operator's own observation: it ran at 80 with a loaded machine, so this is not the cause. Our first hypothesis was memory pressure from other applications, and that observation refutes it. |
+
+What tracks the speed exactly is the writer's own decode line:
+
+```
+strata serve: decode expert cache hit rate: 36.0% (...)   -> 8 tok/s
+strata serve: decode expert cache hit rate: 67.3% (...)   -> 54 tok/s
+strata serve: decode expert cache hit rate: 82.7% (...)   -> 67 tok/s
+strata serve: decode expert cache hit rate: 92.1% (...)   -> 84 tok/s
+```
+
+The experts live in two tiers -- RAM resident and the GPU's expert cache (7.42 GiB) -- and everything
+that is in neither is read from the file, 13.1% of the routed experts over PCIe at the slow end
+against 5.5% at the fast end. So the hit rate *is* the speed, and the hit rate is set by how much RAM
+the writer managed to claim.
+
+That is decided once, at startup, and never revisited:
+
+```
+--resident-budget-gib 24 in the config
+    started with the machine busy  ->  resident RAM: 12.00 GiB of experts in RAM   ->  8 tok/s
+    restarted with the machine free ->  strata.exe holding 27.15 GB                ->  64 tok/s
+```
+
+So the answer to "sometimes fine, sometimes unusable" is not what is open during a run but **when the
+writer was started**. Half a budget covers half of ~40 GB of experts, and a third of the lookups then
+come from the file. The config now asks for 30 GiB, which is a request the machine has to be able to
+answer at startup: the number the writer prints is the truth, and asking for more than is free buys
+nothing.
+
+To check after a restart, two lines:
+
+- `resident RAM: <N> GiB of experts in RAM` -- if N is short of the request, that start is a slow one.
+- `decode expert cache hit rate:` -- above 90% is the healthy band.
+
+`llm_writer_supervision.arena_forecast()` exists for the moment before it happens: it reproduces the
+engine's arithmetic from the free RAM it can see and says so in the log and in Settings, which is the
+point at which closing the machine and restarting the writer is cheap.
+
+Two costs compound here rather than adding, and both were paid at once on the same run. At 8 tok/s a
+reply that thinks for 24,605 tokens (see the thinking cap above) takes **51 minutes**; at 64 tok/s the
+same reply is six. A writer that starts with too little room turns every other inefficiency into a
+coffee break, which is why the warning is worth reading instead of dismissing.
