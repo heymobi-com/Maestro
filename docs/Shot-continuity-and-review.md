@@ -450,3 +450,26 @@ swapped speaker. It is not: the prompt declares both mappings in its own `subjec
 `<Subject N>` is frame order (`_speaker_map`, so the first row on screen is 1), while `(S N)` is the
 stable label the registry and the project subject lock assign. On the operator's three-character
 project every line compiles with both, and all three characters resolve.
+
+## Confirmed in use
+
+The repairs above and the writer's RAM budget were confirmed together, on the operator's machine, after
+one restart:
+
+- **the plan that used to die before any render queued**: `_director_pipeline_f1a81be8.json` reached
+  `preparing_video` with 21 clips and `error: None`;
+- **the writer's resident tier is what was asked for**: `resident RAM: 27.06 GiB of experts in RAM`
+  against a 30 GiB budget, `decode expert cache hit rate: 81.2%`, 14.5% of 11,190,240 routed experts
+  read over PCIe;
+- the rate read at the terminal afterwards was above 100 tok/s.
+
+Two caveats, for whoever reads this next:
+
+- the `done: N tokens in Xs (Y tok/s)` line that reports the rate is printed to the console and is
+  **not** written to `C:\Strata\strata-iq2_xs.log`, so that rate is taken in use rather than from the
+  log. That log -- not the `strata-iq2_xs.fast.log` the earlier sections quote, which stops on October
+  11 -- is the file the current build writes to;
+- `cancel=True` appears zero times in that session, so Stop has still not been seen interrupting a live
+  generation. The resident tier is also not the only thing that moves the rate: the same ~27 GiB was
+  measured at 64 tok/s before the stop and thinking repairs, an abandoned generation that keeps
+  decoding holds the expert cache, and a thinking reply bills the answer's own allowance.
