@@ -73,7 +73,13 @@ def spoken_sentence(beat: Mapping[str, Any]) -> str:
 
 
 def _bounded(delivery: str, room: int) -> str:
-    """A delivery short enough that the speaker stays beside the line."""
+    """A delivery short enough that the speaker stays beside the line.
+
+    The cut lands on a word boundary rather than on the longest word that fits: this text is read as
+    the voice that delivers the line, so half a word in front of it would be worse than a short one.
+    A cut that prefers to close the sentence was tried and reverted: it is measured against the room,
+    and a bound that ignores the room stops answering to the name's real length.
+    """
 
     if room <= 0:
         return ""

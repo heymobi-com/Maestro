@@ -398,3 +398,55 @@ the line. Two details earn their place in the code:
   would find the first pass's tag stranded in the prose, judge the lines against it, decide they were
   fine, and drop them -- which is exactly what the compiler's own "compiling a repaired prompt returns
   it unchanged" test caught while this was being written.
+
+## The speaker stays beside the line
+
+The first repair was not enough on the operator's own project, and the retest that produced the same
+error message is what pointed at the real path. Two things were measured before touching anything:
+
+- an H3 native plan is compiled by **two** different functions. `compile_h3_vocal_contract` is the one
+  the first repair went through; the plans the pipeline actually queues go through
+  `_compile_official_dialogue`, called by `compile_h3_clip_plans`;
+- the renderer's check reads back a fixed window (`window=160` in `h3_unresolved_speaker_cue_problems`)
+  and the sentence it judges is `"{name} {stable_id} speaks {delivery}: {tag}"`. The name *is* in the
+  sentence -- it was simply further than 160 characters from the line.
+
+Measured both ways on a synthetic cue: a 48-character delivery produced no problem, a 251-character one
+produced a problem, and the bounded form produced none. The reported cue starts mid-word
+("rises. Vocalizations are low-register..."), which is the signature of that cut.
+
+`h3_speaker_cues.spoken_sentence` now measures the room against the real prefix and bounds the delivery
+to what fits. A delivery that already fits is returned verbatim.
+
+### What the delivery actually is on a real project
+
+Reproduced on the operator's saved plan (`outputs/prueba-2/_director_pipeline_6e33723d.json`), which is
+the failing run itself:
+
+- `_params_snapshot.planned_clips[n]._director_dialogue_beats[0].delivery` is not a short delivery at
+  all: it is the character profile's `performance_direction`, 256 characters of it, written by the
+  enrichment pass. The 3-7 character values visible in the base plan belong to an earlier plan.
+- Compiling those 16 saved clips with the app's own `compile_h3_clip_plans`:
+
+  | | cue problems |
+  |---|---|
+  | without the bound | 22 |
+  | with the bound | 0 |
+
+  and the cue text inside those 22 is the operator's error message verbatim.
+
+The bound stays on a word boundary: a cut that preferred to close the sentence was tried and reverted,
+because it stopped answering to the name's real length -- a longer name no longer shortened what was
+kept, and the test that measures the room against the real prefix caught it (1408 tests, 1 failure,
+reverted to green).
+
+### Two numbering systems, both printed correctly
+
+Reading the compiled prompt, a `<Subject 2>` beside a line whose contract says `(S1)` looks like a
+swapped speaker. It is not: the prompt declares both mappings in its own `subject_definitions` field --
+
+    <Subject 1> is Aria (S2): ... <Subject 2> is Roman (S1): ... <Subject 3> is Hector (S3): ...
+
+`<Subject N>` is frame order (`_speaker_map`, so the first row on screen is 1), while `(S N)` is the
+stable label the registry and the project subject lock assign. On the operator's three-character
+project every line compiles with both, and all three characters resolve.
