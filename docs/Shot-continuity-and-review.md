@@ -264,7 +264,15 @@ real schema -- `maxItems` and the required fields included -- to the model, and 
 against it. `jsonschema` is optional on that endpoint and only broadens the checking: without it, the
 answer is verified to be one JSON object.
 
-The other half is upstream's own decision, left alone deliberately: the local path applies the grammar
-on the first attempt **only when that model's thinking is off**, and Gemma's thinking is on by default
-with a 4096-token budget. Turning Gemma's thinking off for this pass is what would give the local
-writer the same ceiling the grammar gives it elsewhere.
+The other half was the local path's own rule: the grammar is attached on the first attempt just for
+`thinking_budget == 0`, and a gemma-style writer resolves `None` to 4096. So the H3 native shot-plan
+call asked for `None` and its first attempt went out unconstrained, while the repair pass two hundred
+lines below already asked for `0`. That is now `0` as well, which is the one-line change here: the
+grammar holds the window, and the window is what the validator then checks. It is an argument, so it
+cannot be extracted into a module; the line belongs to us and the seam budget records it with this
+reason.
+
+What this cannot fix is a writer with no grammar decoder. An endpoint that only *states* a schema
+(Strata) has no way to hold a 16-22 shot window, and stating the schema as text pulls the answer
+toward the single object its directive asks for. The native H3 plan therefore needs a writer that can
+compile the schema -- the bundled llama.cpp writer does, from token 0.

@@ -10455,7 +10455,7 @@ SCREENPLAY:
             user_prompt=pass2_user,
             system_prompt=pass2_system,
             max_tokens=planner_token_budget,
-            thinking_budget=None,
+            thinking_budget=0,
             temperature=0.4,
             image_paths=image_paths,
             json_schema=schema,
