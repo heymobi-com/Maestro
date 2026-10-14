@@ -98,5 +98,52 @@ class SpeakerTagTests(unittest.TestCase):
         self.assertEqual(_compiled(OFFENDING, beats=[{"speaker_id": "valeria", "spoken_text": " "}]).count("<d"), 0)
 
 
+LONG_DELIVERY = (
+    "rises. Vocalizations are low-register, guttural, and rhythmic. Movements are smooth, not jerky, "
+    "with deliberate pacing and sustained eye contact throughout the whole action while the body "
+    "answers every touch without any hesitation at all in the moment"
+)
+
+
+class SpokenSentenceTests(unittest.TestCase):
+    """The sentence the compiler builds around a line, and the cue window it has to fit."""
+
+    BEAT = {
+        "speaker_name": "Valeria",
+        "stable_id": "(S1)",
+        "delivery": LONG_DELIVERY,
+        "tag": "<d>[English] Hold still.</d>",
+    }
+
+    def _prompt(self, sentence):
+        return f"detailed_description: They move together. {sentence} overall_soundscape: a room"
+
+    def test_a_long_delivery_keeps_the_speaker_beside_the_line(self):
+        # Measured: 251 characters of delivery put "Valeria (S1) speaks" outside the 160 the check
+        # reads back, and the shot was refused for naming nobody.
+        sentence = h3_speaker_cues.spoken_sentence(dict(self.BEAT))
+        self.assertNotIn(LONG_DELIVERY, sentence, "the delivery was bounded to fit the window")
+        self.assertEqual(h3_unresolved_speaker_cue_problems(self._prompt(sentence)), [])
+
+    def test_a_delivery_that_fits_is_left_verbatim(self):
+        # Nothing changes for the ordinary case: the sentence is what it always was.
+        sentence = h3_speaker_cues.spoken_sentence(dict(self.BEAT, delivery="low and deliberate"))
+        self.assertEqual(
+            sentence,
+            "Valeria (S1) speaks low and deliberate: <d>[English] Hold still.</d>.",
+        )
+
+    def test_a_beat_with_no_delivery_keeps_its_shape(self):
+        sentence = h3_speaker_cues.spoken_sentence(dict(self.BEAT, delivery=""))
+        self.assertEqual(sentence, "Valeria (S1) speaks: <d>[English] Hold still.</d>.")
+
+    def test_a_longer_speaker_name_shortens_the_delivery(self):
+        # The room is measured against the real prefix, so a long name cannot push the line away.
+        largo = h3_speaker_cues.spoken_sentence(dict(self.BEAT, speaker_name="Valeria Mariana"))
+        corto = h3_speaker_cues.spoken_sentence(dict(self.BEAT))
+        self.assertLess(len(largo), len(corto) + len(" Mariana"))
+        self.assertEqual(h3_unresolved_speaker_cue_problems(self._prompt(largo)), [])
+
+
 if __name__ == "__main__":
     unittest.main()

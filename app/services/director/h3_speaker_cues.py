@@ -26,12 +26,17 @@ from __future__ import annotations
 import re
 from typing import Any, Iterable, Mapping, Sequence
 
-__all__ = ["compile_blocks", "subject_tag"]
+__all__ = ["compile_blocks", "spoken_sentence", "subject_tag"]
 
 # The prefixes this module adds, so a later compile starts from the text it started from last time.
 # The compiler's own strip removes only the <d>...</d> span, so without this the first pass's tag
 # would be left stranded in the prose and the lines would be judged against it.
 _OWN_PREFIX_RE = re.compile(r"<Subject\s*\d+>\s*says:\s*", re.IGNORECASE)
+
+# The window the renderer's check reads before a line: what has to fit between the speaker's name and
+# the line is bounded by it.
+CUE_WINDOW = 160
+CUE_MARGIN = 12
 
 
 def _h3():
@@ -40,6 +45,45 @@ def _h3():
     from services.director import h3_dialogue
 
     return h3_dialogue
+
+
+def spoken_sentence(beat: Mapping[str, Any]) -> str:
+    """One beat as the compiler states it: who speaks, how, and the exact tagged line.
+
+    The line has to name its speaker **beside itself**, and the description the planner put between
+    the two is unbounded. Measured: with a 251-character delivery the check reported "no cue names
+    the character who speaks them" for a sentence that opens with "Valeria (S1) speaks" -- the
+    attribution was right there, just further than the 160 characters the check reads back. A writer
+    free of a grammar produces exactly that shape, so the delivery is bounded to what fits instead of
+    being trusted. A delivery that already fits is returned untouched.
+    """
+
+    h3_dialogue = _h3()
+    name = h3_dialogue._normalized_space(beat.get("speaker_name", ""))
+    name_text = f"{name} " if name else ""
+    # The label is rendered once, by Maestro: a planner-authored label left in the name produced
+    # "(S1) (S1) speaks ...".
+    prefix = f"{name_text}{beat.get('stable_id', '')} speaks"
+    delivery = h3_dialogue._compact_h3_line_delivery(beat.get("delivery", ""))
+    # What has to fit before the line is the prefix, the delivery and the ": " that closes it.
+    room = CUE_WINDOW - len(prefix) - len(": ") - CUE_MARGIN
+    delivery = _bounded(delivery, room)
+    delivery_text = f" {delivery}" if delivery else ""
+    return f"{prefix}{delivery_text}: {beat['tag']}."
+
+
+def _bounded(delivery: str, room: int) -> str:
+    """A delivery short enough that the speaker stays beside the line."""
+
+    if room <= 0:
+        return ""
+    text = str(delivery or "").strip()
+    if len(text) <= room:
+        return text
+    cut = text[:room].rstrip()
+    if " " in cut:
+        cut = cut[: cut.rindex(" ")]
+    return cut.rstrip(" ,;.:-")
 
 
 def subject_tag(speakers: Mapping[str, Any], beat: Any) -> str:

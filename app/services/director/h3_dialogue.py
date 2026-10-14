@@ -4021,16 +4021,7 @@ def _compile_official_dialogue(
         body = _replace_spans(body, spans, [""] * len(spans))
         dialogue_parts: list[str] = []
         for beat in valid_beats:
-            delivery = _compact_h3_line_delivery(beat["delivery"])
-            delivery_text = f" {delivery}" if delivery else ""
-            # The label is rendered once, by Maestro. A planner-authored label
-            # left in the name produced "(S1) (S1) speaks ...".
-            name = _normalized_space(beat.get("speaker_name", ""))
-            name_text = f"{name} " if name else ""
-            sentence = (
-                f"{name_text}{beat['stable_id']} speaks"
-                f"{delivery_text}: {beat['tag']}."
-            )
+            sentence = h3_speaker_cues.spoken_sentence(beat)
             if beat["physical_cue"]:
                 cue = _normalized_space(beat["physical_cue"])
                 if cue:
