@@ -22,6 +22,14 @@ from shared.utils import files_locator as fl
 
 FULL_TIME_DIM = 2688
 _PRUNED_WIDTHS = (4, 8, 64)
+# A pruned table that is not the canonical one is still usable: the fit below is computed from
+# whichever table the checkpoint actually has, so the map it produces is the right one for that
+# checkpoint. The threshold therefore only has to reject a table that is not a pruned projection
+# of the full basis at all. Measured on a fine-tuned H3 checkpoint, the table drifts by 3.7e-4
+# (worst element 9.9e-4); the old 1e-5 ceiling refused that checkpoint outright, so a legitimate
+# 8-step Acc LoRA could not be used with it. A genuinely different table lands orders of
+# magnitude above this ceiling.
+_MAX_ADALN_TABLE_ERROR = 5e-3
 _MAP_RELATIVE_DIR = os.path.join("minimax_h3", "lora_affine_maps")
 _ARCHITECTURES = {
     "viggle_animate": "viggle",
@@ -129,11 +137,17 @@ def _aligned_affine_map(architecture: str, target_table: torch.Tensor):
         torch.linalg.vector_norm(target_h @ fit.solution - canonical_h)
         / torch.linalg.vector_norm(canonical_h)
     )
-    if relative_error > 1e-5:
+    if relative_error > _MAX_ADALN_TABLE_ERROR:
         raise ValueError(
             f"MiniMax H3 {architecture} checkpoint AdaLN table is "
             "incompatible with the canonical LoRA map "
             f"(relative error {relative_error:.3g})"
+        )
+    if relative_error > 1e-5:
+        print(
+            f"[MiniMax H3 LoRA] {architecture} checkpoint AdaLN table differs from the "
+            f"canonical one (relative error {relative_error:.3g}); converting the adapters "
+            "with this checkpoint's own table."
         )
     return (fit.solution @ canonical_affine.double()).float()
 
