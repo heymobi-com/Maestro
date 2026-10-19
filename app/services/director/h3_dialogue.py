@@ -1243,6 +1243,12 @@ def _extract_h3_fields(text: str) -> dict[str, str]:
         ) + r")\s*:",
         text,
     ))
+    # A compiled field starts its own line, which is how the contract counts it; an inline
+    # mention of a label in the prose must not win over the field it names.
+    on_line = [m for m in matches if not text[text.rfind("\n", 0, m.start()) + 1:m.start()].strip()]
+    declared = {m.group(1).lower(): m for m in reversed(on_line)}
+    chosen = (declared.get(m.group(1).lower(), m) for m in matches)
+    matches = sorted({m.start(): m for m in chosen}.values(), key=lambda match: match.start())
     fields: dict[str, str] = {}
     for index, match in enumerate(matches):
         name = match.group(1).lower()
@@ -4889,7 +4895,23 @@ def compile_h3_official_prompt(
             "Preserve the explicitly described identities, wardrobe, setting, action, and audio roles."
         )
         body = _label_ref2va_subjects_in_body(body, subjects or [])
-        summary_body = re.sub(r"^\[Shot\s+1\]\s*", "", body, flags=re.IGNORECASE)
+        # Prefer the structured action, not the preceding-frame handoff or the
+        # film-wide contract that is added to detailed_description.
+        action_summary = re.search(
+            r"\bAction:\s*(.+?)(?=\s+(?:Lighting|Mood|Final beat|"
+            r"overall_soundscape|non_diegetic_music)\s*:|$)",
+            prompt,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if action_summary:
+            summary_body = action_summary.group(1)
+        else:
+            summary_body, _, _, _ = _source_prompt_parts(
+                prompt,
+                opening_blocking=opening_blocking,
+                closing_blocking=closing_blocking,
+            )
+        summary_body = re.sub(r"^\[Shot\s+1\]\s*", "", summary_body, flags=re.IGNORECASE)
         summary_body = _H3_STRICT_DIALOGUE_RE.sub(
             "scripted dialogue",
             summary_body,
@@ -5451,6 +5473,8 @@ def compile_h3_clip_plans(
             context_anchors=context_anchors,
         )
         if errors:
+            from services.director.h3_prompt_shape import describe
+            print(describe(_extract_h3_fields(prompt)))
             raise H3DialogueContractError(
                 f"Shot {index + 1}: " + "; ".join(errors)
             )
