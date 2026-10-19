@@ -31,6 +31,40 @@ import os
 from typing import Any, Iterable, Optional
 
 
+def director_clip_offset(params: Any) -> int:
+    """The film position a resumed batch starts at; zero when it states none.
+
+    A stopped run is resumed as a batch that numbers its clips from zero again, so this offset
+    is what turns a batch position into a film position -- the number the gallery sorts on and
+    the number the sidecar records. It travels as a job parameter and a saved project's JSON can
+    hold it as text.
+    """
+
+    try:
+        return int((params or {}).get("_director_clip_offset") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def publish_position(params: Any) -> tuple[Any, Any, int]:
+    """Where a finished clip sits in its film, and which take it replaces.
+
+    Three readings the batch needs when it writes a sidecar: a single-clip rerun publishes one
+    output and no ``clip_output_files`` map, so it states its own position; a rerun names the
+    take it supersedes, which the gallery stacks the new one above; and a resumed batch numbers
+    from zero again, so the offset is the film position. They travel together because they answer
+    one question -- where does this render belong -- and reading them apart is how a rerun lands
+    in the wrong slot.
+    """
+
+    values = params or {}
+    return (
+        values.get("_director_clip_index"),
+        values.get("_director_supersedes"),
+        director_clip_offset(values),
+    )
+
+
 def _state_clip_videos(state: dict[str, Any]) -> list[str]:
     """The clip videos a saved state names, in film order."""
 

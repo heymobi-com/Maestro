@@ -275,7 +275,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from services.access_log_filter import install_quiet_access_filter
 from services.http_runtime import configure_http_runtime
-from services import checkpoint_health, director_review_gate, llm_writer_supervision, prompt_audit_api
+from services import checkpoint_health, chat_api, director_review_gate, llm_writer_supervision, prompt_audit_api
 
 # Uvicorn's logging configuration replaces handlers but retains logger-level
 # filters. Install early, then idempotently confirm it again before startup.
@@ -285,6 +285,7 @@ api = FastAPI(title="Maestro API", version="1.0.0")
 api.add_event_handler("startup", configure_http_runtime)
 api.include_router(checkpoint_health.router)
 api.include_router(prompt_audit_api.router)
+api.include_router(chat_api.router)
 api.include_router(llm_writer_supervision.router)
 api.include_router(director_review_gate.router)
 
@@ -7678,6 +7679,7 @@ async def update_services_config(request: Request):
     ALLOWED_KEYS = {
         "llm_model_id", "llm_device", "llm_provider", "llm_remote_url",
         "enhance_llm_model_id", "enhance_llm_device", "revision_llm_model_id", "revision_llm_provider",
+        "chat_llm_provider", "chat_llm_model_id", "chat_llm_remote_url", "chat_llm_api_key", "chat_llm_max_tokens",
         "enhance_fidelity_retries", "enhance_fidelity_auto_continue",
         "google_api_key", "llm_remote_api_key", "openai_api_key", "anthropic_api_key",
         "use_director_v2", "nsfw_mode", "nsfw_accepted_at", "director_prompt_polish",
@@ -10462,28 +10464,22 @@ async def revise_pipeline_clip_prompt(pid: str, clip_index: int, request: Reques
     continuous with the rest of the sequence.
     """
     from services.director_pipeline import revise_clip_prompt
+    from services.director_prompt_revision import revision_request_payload
+
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "Request body must be valid JSON"}, status_code=400)
-    if not isinstance(body, dict):
-        return JSONResponse({"error": "Request body must be a JSON object"}, status_code=400)
-    instruction = body.get("instruction")
-    if not isinstance(instruction, str):
-        return JSONResponse({"error": "instruction must be text"}, status_code=400)
-    current = body.get("prompt")
-    if current is not None and not isinstance(current, str):
-        return JSONResponse({"error": "prompt must be text"}, status_code=400)
-    history = body.get("history")
-    if history is not None and not isinstance(history, list):
-        return JSONResponse({"error": "history must be a list of turns"}, status_code=400)
+    turn, refusal = revision_request_payload(body)
+    if turn is None:
+        return JSONResponse({"error": refusal}, status_code=400)
     base = wgp.server_config.get("save_path", "outputs")
     try:
         result = await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: revise_clip_prompt(
-                base, pid, clip_index, instruction, current or "",
-                history or [],
+                base, pid, clip_index, turn["instruction"], turn["prompt"],
+                turn["history"],
             ),
         )
     except ValueError as exc:
@@ -10822,14 +10818,8 @@ async def director_plan_operation_cancel(request: Request):
     is still running — which is what makes a Stop button reachable at all.
     """
     from services.director import plan_operation
-    body: dict = {}
-    if request.headers.get("content-length", "0") != "0":
-        try:
-            parsed = await request.json()
-        except Exception:
-            parsed = None
-        if isinstance(parsed, dict):
-            body = parsed
+    from services.request_bodies import optional_json_object
+    body = await optional_json_object(request)
     operation_id = str(body.get("operation_id") or "")
     if not plan_operation.request_cancel(operation_id):
         raise HTTPException(
@@ -26010,6 +26000,7 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 # A resumed batch defers the join: a tail join would publish a partial film.
                 multi_clip_defer_concat = bool(raw_params.pop("multi_clip_defer_concat", False))
                 omni_sequence_continuity = raw_params.pop("_omni_sequence_continuity", False)
+                omni_sequence_carry_from = raw_params.pop("_omni_sequence_carry_from", None)
                 try:
                     omni_sequence_target_frames = max(
                         0,
@@ -26194,6 +26185,9 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                         "omni_sequence_continuity": bool(omni_sequence_continuity[i])
                         if isinstance(omni_sequence_continuity, (list, tuple))
                         else bool(omni_sequence_continuity),
+                        "carry_from": omni_sequence_carry_from[i]
+                        if isinstance(omni_sequence_carry_from, (list, tuple))
+                        and i < len(omni_sequence_carry_from) else None,
                         "target_total_frames": omni_sequence_target_frames,
                         "defer_concat": multi_clip_defer_concat,
                     }
@@ -26569,17 +26563,8 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 dpid = job["params"].get("_director_pipeline_id")
                 if dpid:
                     sidecar["director_pipeline_id"] = dpid
-                # A single-clip rerun publishes one output and no clip_output_files map, so it states its own position.
-                detached_clip_index = job["params"].get("_director_clip_index")
-                # The clip this rerun replaces: the gallery stacks the new take above it, and the older take can be deleted once accepted.
-                supersedes = job["params"].get("_director_supersedes")
-                # A resumed batch numbers from zero: the offset is the film position.
-                try:
-                    clip_index_offset = int(
-                        job["params"].get("_director_clip_offset") or 0
-                    )
-                except (TypeError, ValueError):
-                    clip_index_offset = 0
+                from services.director.resume_prefix import publish_position
+                detached_clip_index, supersedes, clip_index_offset = publish_position(job["params"])
                 clip_index_by_filename = {
                     filename: index + clip_index_offset
                     for index, filename in clip_output_files.items()
@@ -27174,10 +27159,6 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                             for output_path in reversed(task_files):
                                 if os.path.splitext(output_path)[1].lower() in video_exts:
                                     latest_video = output_path
-                                    if not os.path.isabs(latest_video):
-                                        latest_video = os.path.join(
-                                            out_dir, latest_video,
-                                        )
                                     latest_video = os.path.realpath(latest_video)
                                     if (
                                         os.path.normcase(os.path.dirname(latest_video))
@@ -27212,12 +27193,6 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                                 except Exception as e:
                                     print(f"  [Continuation] Failed to extract frame: {e}")
 
-                    # H3 Omni Reference Sequence: keep canonical user media
-                    # first, then add at most two generated, composition-only
-                    # images. Clip 2 receives one readable late frame from
-                    # clip 1. Clip 3+ may also receive one persistent look
-                    # frame selected from clip 1. The rolling image is replaced
-                    # every clip instead of accumulating drift.
                     sequence_info = (
                         (task.get("params") or {}).get("multi_clip_info")
                         or {}
@@ -27234,8 +27209,6 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                             }:
                                 continue
                             candidate = output_path
-                            if not os.path.isabs(candidate):
-                                candidate = os.path.join(out_dir, candidate)
                             candidate = os.path.realpath(candidate)
                             if (
                                 os.path.normcase(os.path.dirname(candidate))
@@ -27244,7 +27217,9 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                             ):
                                 latest_video = candidate
                                 break
-                        if latest_video:
+                        # The clip about to be generated owns this decision.
+                        next_info = (queue[task_idx + 1].get("params") or {}).get("multi_clip_info") or {}
+                        if latest_video and next_info.get("omni_sequence_continuity"):
                             try:
                                 from services.h3_sequence_continuity import (
                                     append_generated_reference,
@@ -27301,16 +27276,18 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                                     next_params.get("minimax_h3_references") or []
                                 )
                                 if reference_capacity(next_refs, 1):
-                                    continuity_image = select_reference_frame(
-                                        latest_video,
-                                        kind="continuity",
-                                        fps=float(_mc_model_def.get("fps") or 24),
-                                    )
+                                    # A shot that returns to an earlier shot's setup resumes from
+                                    # that shot's frame rather than the one just generated.
+                                    resume = next_info.get("carry_from") or task_no
                                     continuity_path = os.path.join(
                                         out_dir,
-                                        f"_omni_sequence_continuity_{job_id}_{task_no}.png",
+                                        f"_omni_sequence_continuity_{job_id}_{resume}.png",
                                     )
-                                    continuity_image.save(continuity_path)
+                                    if not os.path.isfile(continuity_path):
+                                        select_reference_frame(
+                                            latest_video, kind="continuity",
+                                            fps=float(_mc_model_def.get("fps") or 24),
+                                        ).save(continuity_path)
                                     omni_sequence_temp_files.append(continuity_path)
                                     next_refs, picture_number = append_generated_reference(
                                         next_refs,

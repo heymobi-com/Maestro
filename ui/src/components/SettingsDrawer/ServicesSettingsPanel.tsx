@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { RefreshCw, ShieldAlert, ShieldCheck, Lock } from 'lucide-react'
 import { CorrectionLlmSettings } from './CorrectionLlmSettings'
+import { AssistantLlmSettings } from './AssistantLlmSettings'
 import { useStore } from '../../stores/useStore'
 import { ApiKeyField } from '../shared/ApiKeyField'
 import { RemoteModelMemoryControls } from './RemoteModelMemoryControls'
@@ -386,6 +387,8 @@ export function ServicesSettingsPanel() {
           updateConfig={updateConfig}
           llmModels={llmModels}
         />
+
+        <AssistantLlmSettings />
         {isRemote && (isStrata ? <WriterReleaseControl url={servicesConfig.llm_remote_url} onStarted={loadLlmModels} /> :
           <RemoteModelMemoryControls key={servicesConfig.llm_remote_url} modelId={servicesConfig.llm_model_id} />)}
 

@@ -6,6 +6,7 @@ import { SettingsDrawer } from './components/SettingsDrawer/SettingsDrawer'
 import { LoraBrowser } from './components/LoraBrowser/LoraBrowser'
 import { DirectorDashboard } from './components/DirectorDashboard/DirectorDashboard'
 import { StorageDashboard } from './components/StorageDashboard/StorageDashboard'
+import { AssistantWidget } from './components/Assistant/AssistantWidget'
 import { RetakeDialog } from './components/RetakeDialog'
 import { OomRecoveryBanner } from './components/OomRecoveryBanner'
 import { DownloadStatusBanner } from './components/DownloadStatusBanner'
@@ -97,6 +98,7 @@ function App() {
       <StorageDashboard />
       <RecipesOverlay />
       <RetakeDialog />
+      <AssistantWidget />
       {/* OomRecoveryBanner is a fixed-position overlay — renders nothing
           unless the latest job/pipeline failure has oom_info attached.
           Lives at the App root so it floats above whichever screen the
