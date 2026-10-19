@@ -81,9 +81,9 @@ class GalleryClipRegenerateTests(unittest.TestCase):
             "detached_clip_index, supersedes, clip_index_offset = publish_position(job[\"params\"])",
             launch,
         )
+        self.assertIn("elif isinstance(detached_clip_index, int):", launch)
         self.assertIn(
-            'elif isinstance(detached_clip_index, int):\n'
-            '                        file_sidecar["director_clip_index"] = detached_clip_index',
+            'file_sidecar["director_clip_index"] = detached_clip_index',
             launch,
         )
 

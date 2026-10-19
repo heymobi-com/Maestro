@@ -32,6 +32,8 @@ export interface BlockedDeleteHost extends BlockedDeleteState {
   selectedOutputMeta: OutputMetadata | null
   filteredOutputs: () => OutputFile[]
   loadOutputMetadata: (name: string, workspace?: string) => void
+  /** Re-read the gallery when a deleted file changes what a Director group reports. */
+  refreshOutputs: () => Promise<unknown>
   _forgetDeletedOutput: (output: OutputFile) => void
 }
 
@@ -65,6 +67,8 @@ export function forgetDeletedOutput<T extends BlockedDeleteHost>(
   } else {
     set({ selectedOutputMeta: null })
   }
+  // A Director clip's removal changes what its pipeline reports, so the group is re-read.
+  if (output.director_group) void get().refreshOutputs()
 }
 
 /** The three actions the store spreads in: the question and its two answers. */

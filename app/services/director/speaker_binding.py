@@ -453,6 +453,47 @@ SPEAKER_LABEL_RULES = """CANONICAL SPEAKER LABELS — BINDING, NEVER DEVIATE:
 - Never write notes, reasoning, alternatives, or commentary inside any field. Every field contains only the requested value."""
 
 
+def cast_section_for_prompt(
+    story_description: Any,
+    vocabulary: Mapping[str, str] | None,
+) -> str:
+    """The closed cast block a plan is written against, or "" when there is no cast.
+
+    The genders are declared from the story rather than guessed from names, so the block a
+    planner reads and the voice chosen for a label come from the same statement.
+    """
+
+    from ..voice_gender import declared_gender_for_labels
+
+    vocabulary = dict(vocabulary or {})
+    if not vocabulary:
+        return ""
+    genders = declared_gender_for_labels(
+        story_description,
+        [{"speakerId": label, "name": name} for label, name in vocabulary.items()],
+        sorted(vocabulary),
+    )
+    return (
+        "CANONICAL SPEAKER CAST — the complete and closed set of speakers "
+        f"for this project:\n{speaker_cast_block(vocabulary, genders)}\n\n"
+        f"{SPEAKER_LABEL_RULES}\n\n"
+    )
+
+
+def displayed_speaker(
+    raw_speaker: Any,
+    raw_to_label: Mapping[str, str] | None,
+    vocabulary: Mapping[str, str] | None,
+    names: Mapping[str, Any] | None = None,
+) -> str:
+    """Render one transcript speaker as ``(Sx) Name``, consistently everywhere."""
+
+    label = (raw_to_label or {}).get(str(raw_speaker or "").strip().upper(), "")
+    if label:
+        return format_speaker(label, (vocabulary or {}).get(label))
+    return str((names or {}).get(raw_speaker) or raw_speaker or "")
+
+
 def describe_cast(
     vocabulary: Mapping[str, str] | None,
     lyrics: Iterable[Any] | None = None,

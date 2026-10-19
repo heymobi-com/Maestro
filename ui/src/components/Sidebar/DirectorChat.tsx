@@ -1,8 +1,9 @@
+import { isModelEnabledInScope } from '../../lib/modelVisibility'
 import { DirectorMusicClipLength } from './DirectorMusicClipLength'
 import { DirectorGpuClipLimit } from './DirectorGpuClipLimit'
 import { useState, useCallback, useRef, useMemo, useEffect } from 'react'
 import { Upload, Loader2, Music, RotateCcw, Check, X, ChevronRight, ChevronDown, ImageIcon, Play, Film, Mic, Sparkles, Send, Users, FileText, ListVideo } from 'lucide-react'
-import { useStore, directorModelUsesFixedMediaStrength, getFamiliesForMode, getModelsForFamily, resolveResolution } from '../../stores/useStore'
+import { DEFAULT_DIRECTOR_VIDEO_MODEL, useStore, directorModelUsesFixedMediaStrength, getFamiliesForMode, getModelsForFamily, resolveResolution } from '../../stores/useStore'
 import { fetchModelOptions, getFileUrl } from '../../api/client'
 import { DirectorLoraSelector } from '../SettingsDrawer/DirectorLoraSelector'
 import { DirectorSongSetup } from './DirectorSongSetup'
@@ -18,6 +19,13 @@ import { DurationPresetControl } from './DurationPresetControl'
 import { LONG_FORM_MAX_SECONDS, formatDuration } from '../../lib/durationPlanning'
 import { formatEstimatedClock, formatEtaDuration } from '../../lib/format'
 import { parseDirectorScript } from '../../lib/directorScript'
+import {
+  H3_VAE_UPSAMPLER,
+  H3_VAE_UPSAMPLER_LABEL,
+  h3VaeUpsamplingHelp,
+  modelOptionsForSelectedModel,
+  supportsH3VaeUpsampling,
+} from '../../lib/h3VaeUpsampling'
 import type { DirectorPipelineType, DirectorShotImageGuidance, DirectorSkill, ModelOptions, ShortFilmCharacter, ShortFilmPath } from '../../types'
 
 // AUDIO_ACCEPT lists both audio formats AND video formats. When a video
@@ -34,10 +42,11 @@ function DirectorTargetDurationControl() {
   const setDuration = useStore(s => s.shortFilmSetTargetDuration)
   const prompt = useStore(s => s.directorSceneDescription)
   const references = useStore(s => s.directorH3References)
-  const videoModel = useStore(s => s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1')
+  const videoModel = useStore(s => s.selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL)
   const resolution = useStore(s => s.directorResolution)
   const aspectRatio = useStore(s => s.directorAspectRatio)
   const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
+  const totalRamGb = useStore(s => s.systemStats?.ram?.total_gb ?? 0)
   const [options, setOptions] = useState<ModelOptions | null>(null)
   const [planningMode, setPlanningMode] = useState<'duration' | 'windows' | 'auto'>('auto')
 
@@ -55,6 +64,7 @@ function DirectorTargetDurationControl() {
     options?.director_memory_policy || options?.sliding_window_memory_policy,
     resolvedResolution,
     totalVramGb,
+    totalRamGb,
   )
   const defaults = options?.sliding_window_defaults
   const windowFrames = recommendation?.frames
@@ -475,10 +485,10 @@ export function DirectorChat() {
   const energyBias = useStore(s => s.directorEnergyBias)
   const clipPlans = useStore(s => s.directorClipPlans)
   const selectedDirectorShotImageSupport = useStore(s => s.models.find(
-    model => model.model_type === (s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'),
+    model => model.model_type === (s.selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL),
   )?.director?.shot_image_support)
   const directorUsesOmniManifest = useStore(s => {
-    const selected = s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+    const selected = s.selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL
     return selected.toLowerCase().startsWith('minimax_h3_ref2va')
       || s.models.find(model => model.model_type === selected)
         ?.director?.video_strategy === 'omni_reference'
@@ -493,7 +503,7 @@ export function DirectorChat() {
     || s.directorLocationRefPaths.length
     || (
       s.models.find(model => model.model_type === (
-        s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+        s.selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL
       ))?.director?.video_strategy === 'omni_reference'
       && s.directorH3References.some(
         reference => reference.type === 'image' || reference.type === 'video',
@@ -509,7 +519,7 @@ export function DirectorChat() {
   const uploadAndAnalyze = useStore(s => s.directorUploadAndAnalyze)
   const setEnergyBias = useStore(s => s.directorSetEnergyBias)
   const timelineSettingsKey = useStore(s => {
-    const model = s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+    const model = s.selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL
     return `${model}|${s.directorVideoMaxShotFramesByModel[model] ?? 'auto'}|${s.directorResolution}|${s.directorAspectRatio}`
   })
   const previousTimelineSettings = useRef(timelineSettingsKey)
@@ -598,6 +608,7 @@ export function DirectorChat() {
   const mvGenerateSetup = isMvGenerate && step === 'upload'
 
   const messagesRef = useRef<HTMLDivElement>(null)
+  const referenceSetupRef = useRef<HTMLDivElement>(null)
   const [dragOver, setDragOver] = useState(false)
   const [localBias, setLocalBias] = useState<number | null>(null)
   const [showAnalysisDetails, setShowAnalysisDetails] = useState(false)
@@ -686,13 +697,33 @@ export function DirectorChat() {
       el.scrollHeight - el.scrollTop - el.clientHeight <= 48
   }, [])
 
+  // After audio analysis, bring the optional reference and character controls
+  // back into view. Setup edits and analysis progress stay where the user left
+  // them; later planning and generation continue to follow their progress.
+  const previousStep = useRef(step)
   useEffect(() => {
-    // Keep progress scrolling inside Director. scrollIntoView also scrolls
-    // ancestor surfaces, which can move the drawer or the gallery behind it.
+    const previous = previousStep.current
+    previousStep.current = step
     const messages = messagesRef.current
-    if (!messages || !followBottomRef.current) return
-  // 'auto', not 'smooth': the next progress update interrupts the animation, and an animation's
-  // intermediate scrollTop reads as "the reader scrolled away", which would switch the follow off.
+    if (!messages) return
+
+    if (previous === 'analyze' && (step === 'structure' || step === 'style')) {
+      const referenceSetup = referenceSetupRef.current
+      if (!referenceSetup) return
+      followBottomRef.current = true  // a deliberate reposition: following resumes after it
+      // Scroll only the Director message list so its setup controls are visible
+      // without moving the drawer, page, or gallery behind it.
+      const targetTop = messages.scrollTop
+        + referenceSetup.getBoundingClientRect().top
+        - messages.getBoundingClientRect().top
+        - messages.clientTop
+        - 8
+      messages.scrollTo({ top: Math.max(0, targetTop), left: 0, behavior: 'smooth' })
+      return
+    }
+
+    if (!followBottomRef.current) return
+    // 'auto', not 'smooth': an interrupted animation's intermediate scrollTop reads as scrolled away.
     messages.scrollTo({ top: messages.scrollHeight, left: 0, behavior: 'auto' })
   }, [step, loading, loadingMessage, error, clipPlans.length, clipImages.length, skill])
 
@@ -1064,10 +1095,11 @@ export function DirectorChat() {
               setShowDetails={setShowAnalysisDetails}
               speakerMappings={speakerMappings}
               isShortFilm={isShortFilm}
+              isMusicVideo={skill === 'music_video'}
             />
             {/* Allow adding/changing reference photo after analysis */}
             {!pastStep('style') && (
-              <div className="mt-2 pt-2 border-t border-border/50">
+              <div ref={referenceSetupRef} data-testid="director-reference-setup" className="mt-2 pt-2 border-t border-border/50">
                 <DirectorReferenceInputs
                   referenceImage={referenceImage}
                   refImagePreview={refImagePreview}
@@ -1477,7 +1509,7 @@ function CharacterNaming({
 function DirectorAspectRatioSelector({ disabled = false }: { disabled?: boolean }) {
   const ratio = useStore(s => s.directorAspectRatio)
   const setRatio = useStore(s => s.setDirectorAspectRatio)
-  const videoModel = useStore(s => s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1')
+  const videoModel = useStore(s => s.selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL)
   const supportsUltraWide = videoModel.toLowerCase().startsWith('minimax_h3')
 
   useEffect(() => {
@@ -1522,8 +1554,9 @@ function DirectorResolutionSelector({ disabled = false }: { disabled?: boolean }
   const resolution = useStore(s => s.directorResolution)
   const aspectRatio = useStore(s => s.directorAspectRatio)
   const setResolution = useStore(s => s.setDirectorResolution)
-  const videoModel = useStore(s => s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1')
+  const videoModel = useStore(s => s.selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL)
   const totalVramGb = useStore(s => s.systemStats?.gpu.vram_total_gb ?? 0)
+  const totalRamGb = useStore(s => s.systemStats?.ram?.total_gb ?? 0)
   const [options, setOptions] = useState<ModelOptions | null>(null)
 
   useEffect(() => {
@@ -1550,6 +1583,7 @@ function DirectorResolutionSelector({ disabled = false }: { disabled?: boolean }
     options?.director_memory_policy || options?.sliding_window_memory_policy,
     resolvedResolution,
     totalVramGb,
+    totalRamGb,
   )
   const fps = options?.fps || 24
   const selectedConfig = options?.resolution_presets?.[resolution]
@@ -1599,7 +1633,7 @@ function DirectorSetupPanel({ locked }: { locked: boolean }) {
   const seamless = useStore(s => s.directorSeamless)
   const setSeamless = useStore(s => s.setDirectorSeamless)
   const selectedVideoSupportsSeamless = useStore(s => {
-    const selected = s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+    const selected = s.selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL
     const model = s.models.find(item => item.model_type === selected)
     return model?.director
       ? model.director.video.seamless.compatible === true
@@ -1826,7 +1860,7 @@ function ReferenceImageUpload({
   disabled?: boolean
 }) {
   const fixedMediaStrength = useStore(s => {
-    const selected = s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+    const selected = s.selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL
     const model = s.models.find(item => item.model_type === selected)
     return directorModelUsesFixedMediaStrength(selected, model?.architecture)
   })
@@ -1924,7 +1958,7 @@ function DirectorReferenceInputs({
   disabled?: boolean
 }) {
   const usesOmniManifest = useStore(s => {
-    const selected = s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+    const selected = s.selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL
     return selected.toLowerCase().startsWith('minimax_h3_ref2va')
       || s.models.find(model => model.model_type === selected)
         ?.director?.video_strategy === 'omni_reference'
@@ -2010,7 +2044,7 @@ function AdditionalRefsSection({ disabled = false }: { disabled?: boolean }) {
   const identityScale = useStore(s => s.directorIdentityGuidanceScale)
   const setIdentityScale = useStore(s => s.setDirectorIdentityGuidanceScale)
   const voiceReferenceEnabled = useStore(s => s.servicesConfig?.voice_reference_enabled ?? false)
-  const selectedVideoModel = useStore(s => s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1')
+  const selectedVideoModel = useStore(s => s.selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL)
   const supportsVoiceReference = useStore(s => (
     s.models.find(model => model.model_type === selectedVideoModel)
       ?.director?.supports_voice_reference ?? false
@@ -2160,14 +2194,18 @@ function buildSpeakerLabelOrder(
 }
 
 function AnalysisSummary({
-  analysis, showDetails, setShowDetails, isShortFilm,
+  analysis, showDetails, setShowDetails, isShortFilm, isMusicVideo,
 }: {
   analysis: NonNullable<ReturnType<typeof useStore.getState>['directorAnalysis']>
   showDetails: boolean
   setShowDetails: (v: boolean | ((p: boolean) => boolean)) => void
   speakerMappings: ReturnType<typeof useStore.getState>['directorSpeakerMappings']
   isShortFilm?: boolean
+  isMusicVideo?: boolean
 }) {
+  const useLyricsContext = useStore(s => s.directorUseLyricsContext)
+  const setUseLyricsContext = useStore(s => s.setDirectorUseLyricsContext)
+  const planning = useStore(s => s.directorLoading)
   // Count unique speakers
   const speakerCount = new Set(
     (analysis.lyrics || []).map(l => l.speaker).filter(Boolean)
@@ -2190,6 +2228,29 @@ function AnalysisSummary({
         {!isShortFilm && <span>{analysis.sections.length} sections</span>}
         {analysis.lyrics && <span>{analysis.lyrics.length} {isShortFilm ? 'dialogue lines' : 'lyric segments'}</span>}
       </button>
+
+      {isMusicVideo && analysis.lyrics && analysis.lyrics.length > 0 && (
+        <div className="mt-2 flex items-start gap-2" data-testid="director-lyrics-context">
+          <input
+            id="director-use-lyrics-context"
+            type="checkbox"
+            checked={useLyricsContext}
+            disabled={planning}
+            onChange={event => setUseLyricsContext(event.target.checked)}
+            aria-label="Use lyrics to guide visuals"
+            aria-describedby="director-use-lyrics-context-help"
+            className="mt-0.5"
+          />
+          <div className="space-y-0.5">
+            <label htmlFor="director-use-lyrics-context" className="text-[11px] text-text-secondary">
+              Use lyrics to guide visuals
+            </label>
+            <p id="director-use-lyrics-context-help" className="text-[10px] text-text-muted">
+              Let the lyrics influence scenes and story. Beat timing and lip-sync remain enabled either way.
+            </p>
+          </div>
+        </div>
+      )}
 
       {showDetails && (
         // No inner scroll — chat panel handles scrolling.
@@ -2283,11 +2344,11 @@ function StructureView({
   loading, totalClipDuration, beatDistribution, confirmStructure, isActive, isShortFilm, canAdjust,
 }: {
   plannedClips: ReturnType<typeof useStore.getState>['directorPlannedClips']
-  energyBias: number
+  energyBias: number | null
   localBias: number | null
   setLocalBias: (v: number | null) => void
   sliderRef: React.MutableRefObject<number | null>
-  setEnergyBias: (bias: number) => Promise<void>
+  setEnergyBias: (bias: number | null) => Promise<void>
   loading: boolean
   totalClipDuration: number
   beatDistribution: string
@@ -2296,6 +2357,8 @@ function StructureView({
   isShortFilm?: boolean
   canAdjust?: boolean
 }) {
+  const autoBias = useStore(s => s.selectedModelPerMode.video?.startsWith('minimax_h3') ? -2 : 0)
+  const displayedBias = localBias ?? energyBias ?? (isShortFilm ? 0 : autoBias)
   return (
     <div className="space-y-3">
       <p className="text-xs text-text-secondary">
@@ -2308,8 +2371,11 @@ function StructureView({
         <div>
           <div className="flex items-center justify-between mb-1.5">
             <label className="text-[11px] text-text-muted uppercase tracking-wider">{isShortFilm ? 'Scene Pacing' : 'Cut Speed'}</label>
+            {!isShortFilm && <button type="button" aria-label="Automatic cut speed" aria-pressed={energyBias === null}
+                disabled={loading} onClick={() => { setLocalBias(null); sliderRef.current = null; void setEnergyBias(null) }}
+                className="text-[11px] text-accent-blue disabled:opacity-50">Auto</button>}
             <span className="text-xs text-text-secondary">
-              {(localBias ?? energyBias) > 0 ? '+' : ''}{localBias ?? energyBias}
+              {!isShortFilm && energyBias === null && localBias === null ? 'Auto' : `${displayedBias > 0 ? '+' : ''}${displayedBias}`}
             </span>
           </div>
           <input
@@ -2318,11 +2384,17 @@ function StructureView({
             max={2}
             step={1}
             disabled={loading}
-            value={localBias ?? energyBias}
+            value={displayedBias}
             onChange={e => {
               const v = Number(e.target.value)
               setLocalBias(v)
               sliderRef.current = v
+            }}
+            onKeyUp={event => {
+              if (!['ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) return
+              if (sliderRef.current !== null && sliderRef.current !== energyBias) void setEnergyBias(sliderRef.current)
+              setLocalBias(null)
+              sliderRef.current = null
             }}
             onMouseUp={() => {
               if (sliderRef.current !== null && sliderRef.current !== energyBias) {
@@ -2435,13 +2507,15 @@ function StructureView({
  */
 function DirectorAdvancedAccordion() {
   const [open, setOpen] = useState(false)
-  const videoModel = useStore(s => s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1')
+  const videoModel = useStore(s => s.selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL)
   const videoStepsByModel = useStore(s => s.directorVideoInferenceStepsByModel)
   const setVideoSteps = useStore(s => s.setDirectorVideoInferenceSteps)
   const turboModeByModel = useStore(s => s.directorH3TurboModeByModel)
   const turboPresetByModel = useStore(s => s.directorH3TurboPresetByModel)
   const savedVideoLoras = useStore(s => s.savedLoraPerMode.video)
   const [directorVideoOptions, setDirectorVideoOptions] = useState<ModelOptions | null>(null)
+  const directorResolution = useStore(s => s.directorResolution)
+  const directorAspectRatio = useStore(s => s.directorAspectRatio)
   const shotImageSupport = useStore(s => s.models.find(
     model => model.model_type === videoModel,
   )?.director?.shot_image_support)
@@ -2508,9 +2582,7 @@ function DirectorAdvancedAccordion() {
     return () => { cancelled = true }
   }, [setVideoSteps, videoModel])
 
-  const activeDirectorVideoOptions = directorVideoOptions?.model_type === videoModel
-    ? directorVideoOptions
-    : null
+  const activeDirectorVideoOptions = modelOptionsForSelectedModel(directorVideoOptions, videoModel)
   const videoStepsMin = Math.max(
     1,
     Math.round(Number(activeDirectorVideoOptions?.inference_steps_min ?? 1)),
@@ -2565,6 +2637,23 @@ function DirectorAdvancedAccordion() {
     { value: '', label: 'Off' },
     { value: 'lanczos1.5', label: 'Lanczos 1.5×' },
     { value: 'lanczos2', label: 'Lanczos 2×' },
+  ]
+  const directorVideoVaeSupported = supportsH3VaeUpsampling(activeDirectorVideoOptions, 0)
+  const directorVideoResolution = activeDirectorVideoOptions
+    ? resolveResolution(activeDirectorVideoOptions, directorResolution, directorAspectRatio)
+    : ''
+  const videoUpsamplingOptions = [
+    ...upsamplingOptions,
+    ...(directorVideoVaeSupported
+      ? [{ value: H3_VAE_UPSAMPLER, label: H3_VAE_UPSAMPLER_LABEL }]
+      : vidUpsampling === H3_VAE_UPSAMPLER
+        ? [{
+            value: H3_VAE_UPSAMPLER,
+            label: H3_VAE_UPSAMPLER_LABEL + (activeDirectorVideoOptions
+              ? ' (unavailable for this model)'
+              : ' (checking selected model…)'),
+          }]
+        : []),
   ]
 
   return (
@@ -2729,12 +2818,18 @@ function DirectorAdvancedAccordion() {
                 onChange={e => setVidUpsampling(e.target.value)}
                 className="w-full bg-bg-tertiary border border-border rounded-lg px-2 py-1 text-xs text-text-primary focus:outline-none focus:border-accent-blue"
               >
-                {upsamplingOptions.map(opt => (
-                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                {videoUpsamplingOptions.map(opt => (
+                  <option key={opt.value} value={opt.value} disabled={
+                    opt.value === H3_VAE_UPSAMPLER && !directorVideoVaeSupported
+                  }>{opt.label}</option>
                 ))}
               </select>
               <p className="text-[10px] text-text-muted mt-0.5">
-                Render then upscale the video. Adds time per shot.
+                {directorVideoVaeSupported
+                  ? h3VaeUpsamplingHelp(directorVideoResolution)
+                  : vidUpsampling === H3_VAE_UPSAMPLER
+                    ? 'This saved upsampling method is unavailable for the selected video model and will not be sent.'
+                    : 'Render then upscale the video. Adds time per shot.'}
               </p>
             </div>
 
@@ -2805,6 +2900,7 @@ function DirectorModelPicker({ mode, value, onChange, disabled = false }: {
   const models = useStore(s => s.models)
   const families = useStore(s => s.families)
   const enabledModels = useStore(s => s.enabledModels)
+  const visibilityOverrides = useStore(s => s.modelVisibilityOverrides)
   const nsfwMode = useStore(s => s.servicesConfig?.nsfw_mode ?? false)
   const directorSkill = useStore(s => s.directorSkill)
   const shortFilmPath = useStore(s => s.shortFilmPath)
@@ -2824,14 +2920,16 @@ function DirectorModelPicker({ mode, value, onChange, disabled = false }: {
     getFamiliesForMode(mode, families).map(family => ({
       family,
       models: getModelsForFamily(family.id, models, mode)
-        .filter(m => enabledModels.has(m.model_type))
+        .filter(m => isModelEnabledInScope(m.model_type, enabledModels, visibilityOverrides,
+          mode === 'image' ? 'image:generate' : m.omni_reference || m.director?.video_strategy === 'omni_reference'
+            || m.model_type.startsWith('minimax_h3_ref2va') ? 'video:references' : 'video:frames'))
         .filter(m => !m.nsfw_only || nsfwMode)
         .filter(m => mode === 'image'
           ? m.director?.image.compatible === true
           : m.director?.video[pipelineType].compatible === true
             && (!seamless || m.director?.video.seamless.compatible === true)),
     })).filter(g => g.models.length > 0),
-  [mode, families, models, enabledModels, nsfwMode, pipelineType, seamless])
+  [mode, families, models, enabledModels, visibilityOverrides, nsfwMode, pipelineType, seamless])
 
   const compatibleModels = useMemo(
     () => groups.flatMap(group => group.models),
@@ -2839,7 +2937,7 @@ function DirectorModelPicker({ mode, value, onChange, disabled = false }: {
   )
   const noneSelected = mode === 'image' && value === DIRECTOR_IMAGE_MODEL_NONE
   const known = noneSelected || compatibleModels.some(model => model.model_type === value)
-  const preferredId = mode === 'image' ? 'flux2_klein_9b' : 'ltx2_22B_distilled_1_1'
+  const preferredId = mode === 'image' ? 'flux2_klein_9b' : DEFAULT_DIRECTOR_VIDEO_MODEL
   const fallback = compatibleModels.find(model => model.model_type === preferredId)
     || compatibleModels[0]
   const selectedValue = known ? value : (fallback?.model_type || '')
@@ -2895,7 +2993,7 @@ function DirectorModelPicker({ mode, value, onChange, disabled = false }: {
 
 function DirectorModelSelection({ disabled = false }: { disabled?: boolean }) {
   const imageModel = useStore(s => s.selectedModelPerMode.image || 'flux2_klein_9b')
-  const videoModel = useStore(s => s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1')
+  const videoModel = useStore(s => s.selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL)
   const shotImageSupport = useStore(s => s.models.find(
     model => model.model_type === videoModel,
   )?.director?.shot_image_support)
@@ -2909,7 +3007,7 @@ function DirectorModelSelection({ disabled = false }: { disabled?: boolean }) {
     || s.directorLocationRefPaths.length
     || (
       s.models.find(model => model.model_type === (
-        s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+        s.selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL
       ))?.director?.video_strategy === 'omni_reference'
       && s.directorH3References.some(
         reference => reference.type === 'image' || reference.type === 'video',
@@ -2971,7 +3069,7 @@ function DirectorLoraAccordion() {
   // the image header. Falling back to a known image-class default
   // (flux2_klein_9b) instead of the active Studio model fixes that.
   const imageModel = useStore(s => s.selectedModelPerMode.image || 'flux2_klein_9b')
-  const videoModel = useStore(s => s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1')
+  const videoModel = useStore(s => s.selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL)
   const videoLorasDisabled = useStore(s => s.models.find(
     model => model.model_type === videoModel,
   )?.loras_disabled === true)
@@ -3050,7 +3148,7 @@ function DirectorLoraAccordion() {
 function DirectorGenerationOptions() {
   const audioFile = useStore(s => s.directorAudioFile)
   const fixedMediaStrength = useStore(s => {
-    const selected = s.selectedModelPerMode.video || 'ltx2_22B_distilled_1_1'
+    const selected = s.selectedModelPerMode.video || DEFAULT_DIRECTOR_VIDEO_MODEL
     const model = s.models.find(item => item.model_type === selected)
     return directorModelUsesFixedMediaStrength(selected, model?.architecture)
   })

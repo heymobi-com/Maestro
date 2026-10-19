@@ -44,12 +44,13 @@ from __future__ import annotations
 
 import difflib
 import re
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from services.director_video_strategy import BOUNDED_START_END, OMNI_REFERENCE
 
 __all__ = [
     "carry_from_by_shot",
+    "carry_opening_into_closing",
     "continuity_run",
     "duplicate_image_prompts",
     "hands_over_the_frame",
@@ -321,6 +322,34 @@ def carry_from_by_shot(clip_plans: Any) -> list[int | None]:
         if setup:
             last_seen[setup] = position
     return carries
+
+
+def carry_opening_into_closing(
+    shot_dicts: Any,
+    opening_blocking: Sequence[str],
+) -> None:
+    """Make a blocking change happen on screen before the edit, not after it.
+
+    A continuous next shot opens on the state the previous one ended in. Where a shot has no
+    typed physical ledger, the next shot's own opening is what says which arrangement that is, so
+    it is written back as this shot's ``closing_blocking``. A ledger, where present, owns the
+    closing state and is left alone: a state change then needs a concrete transition instead.
+    """
+
+    shots = list(shot_dicts or [])
+    for index in range(1, len(shots)):
+        previous, current = shots[index - 1], shots[index]
+        if not isinstance(previous, Mapping) or not isinstance(current, Mapping):
+            continue
+        if current.get("continuity_strategy") not in {"continuous", "extend_previous"}:
+            continue
+        if current.get("continuity_group") != previous.get("continuity_group"):
+            continue
+        if previous.get("physical_state"):
+            continue
+        next_opening = opening_blocking[index] if index < len(opening_blocking) else ""
+        if next_opening:
+            previous["closing_blocking"] = next_opening
 
 
 def _normalise_declared(value: Any) -> str:

@@ -185,6 +185,12 @@ class PromptRevisionWiringTests(unittest.TestCase):
     """The panel must expose the box and the button that reach that endpoint."""
 
     def test_the_api_exposes_the_revision_endpoint(self):
+        # The route lives in its own router (services/prompt_revision_api.py) and launch.py
+        # only includes it, which is what keeps launch.py inside its seam budget.
+        with open(
+            os.path.join(_APP_DIR, "services", "prompt_revision_api.py"), encoding="utf-8",
+        ) as handle:
+            route = handle.read()
         with open(
             os.path.join(_APP_DIR, "launch.py"), encoding="utf-8",
         ) as handle:
@@ -192,9 +198,10 @@ class PromptRevisionWiringTests(unittest.TestCase):
 
         self.assertIn(
             '"/api/v1/director/pipelines/{pid}/clips/{clip_index}/revise-prompt"',
-            launch,
+            route,
         )
-        self.assertIn("revise_clip_prompt(", launch)
+        self.assertIn("revise_clip_prompt(", route)
+        self.assertIn("include_router(prompt_revision_api.router)", launch)
 
     def test_the_client_calls_that_endpoint(self):
         client = _read("api", "client.ts")

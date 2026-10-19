@@ -116,10 +116,16 @@ class ReasoningBudgetTests(unittest.TestCase):
 class WholeTimelineContextTests(unittest.TestCase):
     def test_a_batch_is_shown_the_whole_timeline(self):
         music = _read("music_video.py")
-        self.assertIn("THE WHOLE TIMELINE (context only: see where this batch sits ", music)
-        # The batch's own clips are still the ones it plans; the overview is context.
-        self.assertIn("+ \"\\n\".join(clip_contexts)", music)
-        self.assertIn("plan ONLY clips {start + 1}-{end})", music)
+        # The paragraph itself lives in our own module; the planner pays the call.
+        overview = (ROOT / "app/services/director/music_batch_context.py").read_text(
+            encoding="utf-8",
+        )
+        self.assertIn("THE WHOLE TIMELINE (context only: see where this batch sits ", overview)
+        self.assertIn('+ "\\n".join(clip_contexts)', overview)
+        self.assertIn("plan ONLY clips {start + 1}-{end})", overview)
+        self.assertIn(
+            "batch_concept += whole_timeline_context(start, end, clip_contexts)", music,
+        )
 
     def test_the_film_path_builds_its_overview_from_the_clip_timeline(self):
         film = _read("short_film.py")
@@ -129,11 +135,20 @@ class WholeTimelineContextTests(unittest.TestCase):
 
 
 class DeterministicFillTests(unittest.TestCase):
-    def test_a_filled_batch_says_so(self):
+    def test_a_batch_that_cannot_be_completed_says_which_clips_are_missing(self):
+        """v3 replaced the fork's deterministic fill with a bounded repair loop.
+
+        The fork used to fill a short batch with placeholder rows and report them as generic;
+        upstream 3.0 asks the model to repair the tail for a bounded number of attempts and then
+        fails the plan naming the clips and the last issue. Nothing is invented silently, which is
+        what the old message existed to prevent, so the pin follows the loop instead.
+        """
+
         base = _read("base.py")
-        self.assertIn("filled = 0", base)
-        self.assertIn("were filled deterministically because the model's", base)
-        self.assertIn("those clips are generic.", base)
+        self.assertIn("max_repair_attempts", base)
+        self.assertIn("Repairing {progress_label} clips", base)
+        self.assertIn("could not produce usable shot plans for ", base)
+        self.assertNotIn("were filled deterministically because the model's", base)
 
 
 if __name__ == "__main__":

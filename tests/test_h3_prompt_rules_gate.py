@@ -163,11 +163,13 @@ class RuleGate(unittest.TestCase):
                 lambda t: mutate_field(
                     t, "detailed_description",
                     # Every mention, not just the marker: the body also says
-                    # "synchronized to <Audio 1> throughout [Shot 1]", and one
-                    # surviving mention satisfies the rule (see the gap test).
+                    # "synchronized to <Audio 1> throughout [Shot 1]". The sequence
+                    # rule now refuses it as well, so both rules are declared.
                     lambda v: v.replace("[Shot 1]", "[Shot 2]"),
                 ),
-                ["detailed_description is missing [Shot 1]"], 1,
+                ["detailed_description is missing [Shot 1]",
+                 "visual shot numbers must be consecutive within this clip, "
+                 "starting at [Shot 1]"], 2,
             ),
             (
                 "no visual style before the first shot", "ref2va",
@@ -241,22 +243,27 @@ class RuleGate(unittest.TestCase):
         self.assertEqual(1, len(errors), errors)
         self.assertIn("missing canonical identity/world context: Valeria", errors[0])
 
-    def test_known_gap_a_passing_mention_satisfies_the_shot_marker_rule(self):
-        """A recorded weakness, not an endorsement.
+    def test_a_later_marker_alone_no_longer_satisfies_the_shot_rule(self):
+        """The gap this test used to record is closed by the sequence rule.
 
         The body also carries "Visible performance and lip movement remain
         synchronized to <Audio 1> throughout [Shot 1].", so replacing the shot
-        marker alone leaves the rule satisfied by that aside. Tightening the
-        check to the *first* marker in the body would refuse exactly this text
-        and nothing legitimate, but that is a behaviour change to an upstream
-        rule and is deliberately not made here.
+        marker alone left the old rule satisfied by that aside. v3 validates the
+        sequence of markers instead, so a body that opens on [Shot 2] is refused
+        for the sequence and for the missing opening marker both.
         """
 
         marker_only = mutate_field(
             self.base["ref2va"], "detailed_description",
             lambda value: value.replace("[Shot 1]", "[Shot 2]", 1),
         )
-        self.assertEqual([], self.errors("ref2va", marker_only))
+        errors = self.errors("ref2va", marker_only)
+
+        self.assertIn(
+            "visual shot numbers must be consecutive within this clip, starting at [Shot 1]",
+            errors,
+        )
+        self.assertIn("detailed_description is missing [Shot 1]", errors)
 
     def test_compiler_supplies_the_expression_it_requires(self):
         """The rule can never refuse the compiler's own output."""

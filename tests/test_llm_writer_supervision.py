@@ -483,7 +483,7 @@ class WiringTests(unittest.TestCase):
             source.index("_apply_deferred_prompt_enhancement(job, raw_params)", generation),
             hand_over,
         )
-        self.assertLess(hand_over, source.index("_apply_per_job_coefficient(job)", generation))
+        self.assertLess(hand_over, source.index("_apply_per_job_coefficient(job,", generation))
 
 
 class TheArenaForecastTests(unittest.TestCase):

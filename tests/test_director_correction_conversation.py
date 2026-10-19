@@ -400,7 +400,15 @@ class CorrectionConversationWiringTests(unittest.TestCase):
         self.assertIn("][-6:]", self.pipeline)
         # The turn is checked where our code can be, not inline in the upstream route.
         self.assertIn('history = body.get("history")', self.revision)
-        self.assertIn("revision_request_payload", self.launch)
+        self.assertIn("revision_request_payload", self.revision)
+        # The route that calls it is its own module now, included by launch.py.
+        router = os.path.join(
+            _ROOT, "app", "services", "prompt_revision_api.py",
+        )
+        with open(router, encoding="utf-8") as handle:
+            router_source = handle.read()
+        self.assertIn("revision_request_payload(", router_source)
+        self.assertIn("include_router(prompt_revision_api.router)", self.launch)
 
     def test_the_turn_is_validated_before_it_reaches_the_assistant(self):
         """The four refusals are ours, so they live in our module and not in the route."""

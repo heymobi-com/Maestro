@@ -27,13 +27,26 @@ from typing import Any, Iterable
 CLIP_SEPARATOR = "\n---CLIP_BOUNDARY---\n"
 
 
-def clip_prompt_lines(prompt_text: Any, per_clip_references: Iterable[Any] | None) -> list[str]:
-    """The request's prompts, one per clip, for the multi-clip unpacker."""
+def clip_prompt_lines(
+    prompt_text: Any,
+    per_clip_references: Iterable[Any] | None,
+    lines: Iterable[str] | None = None,
+) -> list[str]:
+    """The request's prompts, one per clip, for the multi-clip unpacker.
+
+    ``lines`` is what the caller's own splitter already decided -- upstream's, which reads the
+    per-clip frame metadata. This function adds the one rule that metadata cannot express: when
+    the request carries exactly one H3 reference manifest, that manifest is the clip count, so a
+    multi-line Context-IR prompt is one clip rather than one clip per line.
+    """
 
     text = str(prompt_text or "")
     if CLIP_SEPARATOR in text:
         return [part.strip() for part in text.split(CLIP_SEPARATOR) if part.strip()]
+    resolved = [str(line).strip() for line in lines] if lines is not None else None
     if per_clip_references is not None and len(list(per_clip_references)) == 1:
-        # One manifest is one clip. Splitting this prompt on newlines was the defect.
-        return [text.strip()] if text.strip() else []
+        if resolved is None or len(resolved) > 1:
+            return [text.strip()] if text.strip() else []
+    if resolved is not None:
+        return resolved
     return [line.strip() for line in text.split("\n") if line.strip()]

@@ -49,9 +49,10 @@ class PlanProgressCardTests(unittest.TestCase):
     def test_the_card_sits_on_the_main_screen_beside_the_pipeline_card(self):
         self.assertIn("import { PlanProgressCard } from './PlanProgressCard'", self.main)
         self.assertIn("<PlanProgressCard />", self.main)
+        # 3.0 passes the job into the placeholder, so match the element, not its old bare form.
         self.assertLess(
             self.main.index("<PlanProgressCard />"),
-            self.main.index("<PipelinePlaceholder />"),
+            self.main.index("<PipelinePlaceholder "),
         )
 
     def test_a_reloaded_window_still_finds_a_running_pass(self):

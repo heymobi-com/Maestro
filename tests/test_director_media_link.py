@@ -192,7 +192,10 @@ class TheEndpointUsesIt(unittest.TestCase):
     def test_every_return_path_goes_through_the_helper(self):
         """Sidecar, embedded and none all return through _with_file_details."""
         route = self.launch.index('@api.get("/api/v1/outputs/{name}/metadata")')
-        handler = self.launch[route : route + 3600]
+        # Slice to the next route, not a fixed window: launch.py grows with every update and a
+        # window that was long enough in 2.7 stopped reaching the handler in 3.0.
+        following = self.launch.find("@api.", route + len('@api.get("/api/v1/outputs/{name}/metadata")'))
+        handler = self.launch[route : following if following != -1 else len(self.launch)]
         self.assertEqual(handler.count("_with_file_details("), 4)
         self.assertEqual(handler.count("return enrich_metadata("), 1)
 
