@@ -88,8 +88,23 @@ _SUBJECT_ANY_RE = re.compile(r"<Subject\s*(\d+)>", re.IGNORECASE)
 # The labels that carry the shot's action, in the order the director expects them.
 _ACTION_LABELS = ("Opening composition", "Dialogue:", "Canonical identity and world", "AMBIENTACION")
 
+# The pre-polish draft as the H3-native planner writes it. It is structured, but not with the
+# director's own labels: measured on a real project, every draft carried "Story handoff:",
+# "Visible cast:", "Camera:", "Action:", "Lighting:", "Mood:", "Final beat:", "OPENING
+# CONTINUITY:" and "FINAL BLOCKING:". Reading that as loose prose reported all ten of its shots,
+# which is what a warning nobody can act on costs.
+_NATIVE_DRAFT_LABELS = (
+    "Story handoff:", "Visible cast:", "Camera:", "Action:", "Final beat:",
+    "OPENING CONTINUITY:", "FINAL BLOCKING:",
+)
+_NATIVE_DRAFT_MINIMUM = 3
+
 # Above this, a draft is carrying the project's shared text instead of its own action.
 _DRAFT_PROJECT_TEXT_CHARS = 2000
+# The share of the draft that has to be the project's own text before that is the reason.
+_DRAFT_PROJECT_TEXT_SHARE = 0.25
+# Below this many characters a shared phrase is a coincidence, not copied text.
+_PROJECT_SENTENCE_MINIMUM = 40
 
 
 def project_subject_lock(project_context: str) -> dict[int, str]:
@@ -98,12 +113,37 @@ def project_subject_lock(project_context: str) -> dict[int, str]:
     return _project_subject_lock(project_context)
 
 
+def _carried_project_text(draft: str, project_context: str) -> int:
+    """How many characters of the project's own text the draft repeats verbatim.
+
+    A long draft was read as proof that the project text had been pasted into it, and measured
+    on a real project that is not what a long draft means: the draft that reported 6980
+    characters carried none of the project's text -- no ``SUBJECT LOCK``, no ``CHARACTERS AND
+    BINDINGS``, no ``identity comes from``. It repeated the shot's own cast table three times.
+    A warning that names the wrong cause costs more than the warning is worth, so the project's
+    own sentences are looked for instead of assumed.
+    """
+
+    if not draft or not project_context:
+        return 0
+    haystack = re.sub(r"\s+", " ", str(draft))
+    carried = 0
+    for sentence in re.split(
+        r"(?<=[.!?;:])\s+", re.sub(r"\s+", " ", str(project_context))
+    ):
+        cleaned = sentence.strip()
+        if len(cleaned) >= _PROJECT_SENTENCE_MINIMUM and cleaned in haystack:
+            carried += len(cleaned)
+    return carried
+
+
 def _findings_for_shot(
     clip: Any,
     index: int,
     clips: Sequence[Any],
     lock: dict[int, str],
     action_order: tuple[str, ...],
+    project_context: str = "",
 ) -> list[dict[str, str]]:
     findings: list[dict[str, str]] = []
 
@@ -208,7 +248,8 @@ def _findings_for_shot(
 
     if draft:
         present = tuple(label for label in _ACTION_LABELS if label in draft)
-        if not present:
+        native = sum(1 for label in _NATIVE_DRAFT_LABELS if label in draft) >= _NATIVE_DRAFT_MINIMUM
+        if not present and not native:
             add(
                 "action-section-missing",
                 "warning",
@@ -217,7 +258,7 @@ def _findings_for_shot(
                 "The compiler writes one into the prompt anyway, so this costs editing "
                 "time, not rendering.",
             )
-        elif present != action_order:
+        elif present and present != action_order:
             add(
                 "action-order-differs",
                 "warning",
@@ -225,13 +266,16 @@ def _findings_for_shot(
                 f"project writes them as {list(action_order)}. The same shot is read "
                 "differently from one clip to the next.",
             )
-        if len(draft) > _DRAFT_PROJECT_TEXT_CHARS:
+        carried = _carried_project_text(draft, project_context)
+        if len(draft) > _DRAFT_PROJECT_TEXT_CHARS and carried >= (
+            _DRAFT_PROJECT_TEXT_SHARE * len(draft)
+        ):
             add(
                 "project-text-in-draft",
                 "warning",
-                f"The draft is {len(draft)} characters, so it carries the project's shared "
-                "text as well as the shot. The action is a few hundred characters and is "
-                "lost inside the repetition.",
+                f"The draft is {len(draft)} characters and {carried} of them are the "
+                "project's shared text copied in, so the shot's action is a few hundred "
+                "characters lost inside the repetition.",
             )
 
     # The contradictions inside the shot itself: a second shot in a one-shot body, the brief's
@@ -282,7 +326,7 @@ def audit_project_prompts(
     shots: list[dict[str, Any]] = []
     totals: Counter = Counter()
     for index, clip in enumerate(clips):
-        findings = _findings_for_shot(clip, index, clips, lock, dominant)
+        findings = _findings_for_shot(clip, index, clips, lock, dominant, context)
         if not findings:
             continue
         for finding in findings:

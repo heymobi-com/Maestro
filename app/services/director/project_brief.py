@@ -34,7 +34,7 @@ __all__ = ["audit_project_brief", "clip_project_context", "per_shot_headings"]
 _NARRATIVE_HEADINGS = frozenset({
     "DESCRIPTION", "STORY", "NARRATIVE", "PLOT", "ARC", "SYNOPSIS", "STORYLINE",
     "SCRIPT", "SCREENPLAY", "OUTLINE", "BEATS", "SEQUENCE", "SCENE LIST",
-    "SHOT LIST", "STORYBOARD", "SCENE BREAKDOWN",
+    "SHOT LIST", "CLIP PLAN", "CLIP PLANS", "STORYBOARD", "SCENE BREAKDOWN",
 })
 
 # Headings that prescribe a decision the PLAN already makes shot by shot. One of these travels
@@ -58,7 +58,8 @@ per_shot_headings = _PER_SHOT_HEADINGS
 # A ``HEADING:`` on a line of its own, short enough that a prose sentence ending in a colon
 # is not mistaken for one. Parentheses and lower case are allowed: a director writes
 # ``SUBJECT LOCK (critical, non-negotiable):`` and ``Description:`` and both are headings.
-_HEADING_RE = re.compile(r"^([^\n:]{2,60}):\s*$")
+_HEADING_RE = re.compile(r"^([^\n:]{2,60}?)(?:\s*\([^)]*\))?:\s*$")
+_CLIP_PLAN_ITEM_RE = re.compile(r"^\s*[-*•]?\s*<C\d+\b", re.IGNORECASE)
 
 
 def clip_project_context(project_context: Any) -> str:
@@ -72,20 +73,37 @@ def clip_project_context(project_context: Any) -> str:
         for section in re.split(r"\n\s*\n", text)
         if section.strip()
     ]
-    kept = [section for section in sections if not _is_film_narrative(section)]
-    if len(kept) == len(sections):
+    kept = []
+    changed = False
+    dropping_clip_plan_items = False
+    for section in sections:
+        heading = _section_heading(section)
+        if heading and heading.upper() in _DROPPED_HEADINGS:
+            dropping_clip_plan_items = heading.upper() in {"CLIP PLAN", "CLIP PLANS"}
+            changed = True
+            continue
+        if dropping_clip_plan_items and _CLIP_PLAN_ITEM_RE.match(section):
+            changed = True
+            continue
+        dropping_clip_plan_items = False
+        kept.append(section)
+    if not changed:
         # Nothing to drop: returned unchanged, so a brief that never had a narrative
         # section is byte-for-byte what its author wrote.
         return text
     return "\n\n".join(kept)
 
 
+def _section_heading(section: str) -> str:
+    first = section.splitlines()[0].strip()
+    match = _HEADING_RE.match(first)
+    return match.group(1).strip() if match else ""
+
+
 def _is_film_narrative(section: str) -> bool:
     """Whether a section is headed as the film's story instead of the clip's contract."""
 
-    first = section.splitlines()[0].strip()
-    match = _HEADING_RE.match(first)
-    return bool(match) and match.group(1).strip().upper() in _DROPPED_HEADINGS
+    return _section_heading(section).upper() in _DROPPED_HEADINGS
 
 
 def _sections(text: Any) -> list[str]:
@@ -99,9 +117,7 @@ def _label(section: str) -> str:
     in the report has no way to know the film's own prose is riding along.
     """
 
-    first = section.splitlines()[0].strip()
-    match = _HEADING_RE.match(first)
-    return match.group(1).strip() if match else "(no heading)"
+    return _section_heading(section) or "(no heading)"
 
 
 def audit_project_brief(

@@ -378,6 +378,11 @@ class CorrectionConversationWiringTests(unittest.TestCase):
             self.pipeline = handle.read()
         with open(os.path.join(_APP_DIR, "launch.py"), encoding="utf-8") as handle:
             self.launch = handle.read()
+        with open(
+            os.path.join(_APP_DIR, "services", "director_prompt_revision.py"),
+            encoding="utf-8",
+        ) as handle:
+            self.revision = handle.read()
 
     def test_the_turn_hands_the_assistant_the_measurement(self):
         self.assertIn("MEASUREMENT OF THE CURRENT PROMPT", self.pipeline)
@@ -393,7 +398,23 @@ class CorrectionConversationWiringTests(unittest.TestCase):
     def test_the_conversation_is_carried_and_bounded(self):
         self.assertIn("history: Optional[list] = None", self.pipeline)
         self.assertIn("][-6:]", self.pipeline)
-        self.assertIn('history = body.get("history")', self.launch)
+        # The turn is checked where our code can be, not inline in the upstream route.
+        self.assertIn('history = body.get("history")', self.revision)
+        self.assertIn("revision_request_payload", self.launch)
+
+    def test_the_turn_is_validated_before_it_reaches_the_assistant(self):
+        """The four refusals are ours, so they live in our module and not in the route."""
+
+        for refusal in (
+            "Request body must be a JSON object",
+            "instruction must be text",
+            "prompt must be text",
+            "history must be a list of turns",
+        ):
+            self.assertIn(refusal, self.revision)
+        # A turn that arrives without its note, or with a prompt that is not text, has
+        # nothing to rewrite.
+        self.assertIn("return None, ", self.revision)
 
     def test_a_refused_rewrite_never_becomes_the_prompt(self):
         start = self.pipeline.index("def _candidate_problems(")

@@ -65,7 +65,9 @@ class GalleryClipRegenerateTests(unittest.TestCase):
         """A rerun publishes one output and no clip_output_files map.
 
         Without the fallback the sidecar lost director_clip_index, so a
-        regenerated clip could no longer be tied to its shot.
+        regenerated clip could no longer be tied to its shot. The three readings it needs are
+        resolved by `publish_position`, which is where they live now -- the batch keeps only the
+        unpacking -- so this asserts the wiring and then the values it produces.
         """
 
         pipeline = _read("app", "services", "director_pipeline.py")
@@ -73,7 +75,10 @@ class GalleryClipRegenerateTests(unittest.TestCase):
 
         self.assertIn('"_director_clip_index": clip_index,', pipeline)
         self.assertIn(
-            'detached_clip_index = job["params"].get("_director_clip_index")',
+            "from services.director.resume_prefix import publish_position", launch,
+        )
+        self.assertIn(
+            "detached_clip_index, supersedes, clip_index_offset = publish_position(job[\"params\"])",
             launch,
         )
         self.assertIn(
@@ -81,6 +86,30 @@ class GalleryClipRegenerateTests(unittest.TestCase):
             '                        file_sidecar["director_clip_index"] = detached_clip_index',
             launch,
         )
+
+    def test_the_position_reader_returns_what_the_sidecar_writes(self):
+        """The rule itself, exercised rather than restated."""
+
+        import sys
+
+        app_dir = Path(__file__).resolve().parents[1] / "app"
+        if str(app_dir) not in sys.path:
+            sys.path.insert(0, str(app_dir))
+        from services.director.resume_prefix import publish_position, director_clip_offset
+
+        self.assertEqual(
+            publish_position({
+                "_director_clip_index": 4,
+                "_director_supersedes": "take1.mp4",
+                "_director_clip_offset": 3,
+            }),
+            (4, "take1.mp4", 3),
+        )
+        # A batch that states nothing answers with nothing, rather than guessing a position.
+        self.assertEqual(publish_position({}), (None, None, 0))
+        # A resumed batch records its offset as text when a saved project is read back.
+        self.assertEqual(director_clip_offset({"_director_clip_offset": "7"}), 7)
+        self.assertEqual(director_clip_offset({"_director_clip_offset": "seven"}), 0)
 
     def test_the_studio_reroll_is_never_a_silent_no_op(self):
         store = _read("ui", "src", "stores", "useStore.ts")

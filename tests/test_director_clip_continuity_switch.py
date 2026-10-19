@@ -41,8 +41,8 @@ class TheProjectCanGrantItTests(unittest.TestCase):
         self.assertEqual(OPTION, "_director_sequence_continuity")
         self.assertIn(f"{OPTION}: directorSequenceContinuity,", _read(_STORE))
 
-    def test_it_is_off_until_the_project_says_so(self):
-        self.assertIn("directorSequenceContinuity: false", _read(_STORE))
+    def test_reference_frame_continuity_is_on_by_default(self):
+        self.assertIn("directorSequenceContinuity: true", _read(_STORE))
 
     def test_the_switch_travels_with_the_render_request(self):
         store = _read(_STORE)

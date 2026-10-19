@@ -17,14 +17,14 @@ Two families of findings, all textual, all in the same shape —
 | `subject-swap` | error | a shot declaring a Subject for the wrong person, judged against the project's own SUBJECT LOCK |
 | `subject-field-duplicated` | error | `subject_definitions` written twice, which reads as a second cast |
 | `line-without-speaker` | warning | a dialogue line no shot claims |
-| `action-section-missing` | warning | a draft whose action is loose prose with nothing separating it from the project text |
-| `project-text-in-draft` | error | the project's shared text copied into a shot instead of its own action |
+| `action-section-missing` | warning | a draft whose action is loose prose with nothing separating it from the project text. An H3-native draft writes `Story handoff:`, `Visible cast:`, `Action:` and `Final beat:` instead, which is structure and not loose prose |
+| `project-text-in-draft` | warning | the project's shared text copied into a shot instead of its own action — measured by finding the project's own sentences in the draft, not by the draft's length |
 | `brief` | warning | a brief whose budget drops sections a shot needed |
 | **`clip-holds-two-shots`** | error | a one-shot body that names another shot at the start of a line, or that keeps a stray `At MM:SS.mmm` from the planner's own clock |
 | **`brief-heading-in-clip`** | error | the brief's own `CAMERA:`-style heading reaching a clip, where it overrides the plan identically in every shot |
 | **`camera-contradiction`** | warning | a camera declared locked and moving at once |
 | **`lighting-contradiction`** | warning | a shot lit by daylight and by night |
-| **`wardrobe-contradiction`** | error | one Subject dressed as two different people |
+| **`wardrobe-contradiction`** | error | one Subject dressed as two different people, judged by the garments each entry names |
 | **`music-contradiction`** | warning | `non_diegetic_music:` saying silence over a scene that describes a violin |
 
 The last six are the contradictions *inside* a prompt and live in
@@ -140,6 +140,19 @@ are the ones that measurement found:
 - **The short subject tag counts.** Real prompts write `Roman (S2)` in the prose. A
   garment is charged to the last Subject seen, and without reading `(S2)` a wardrobe
   a later paragraph describes was charged to the wrong person.
+- **The name a cast list writes counts, and a draft's length is not evidence.** A shot
+  repeats the cast table without any tag beside it, and charging the last Subject seen
+  gave every untagged table whichever tag happened to be nearest: on a real project that
+  was the `<Subject 3>` of the project's own `CHARACTERS AND BINDINGS` block, so Aria's
+  vivid red mini dress and Hector's charcoal suit jacket landed on one Subject and all
+  ten shots reported an error-level `wardrobe-contradiction`. The garment is charged to
+  the name its own entry writes instead. The same project measured the other half: its
+  6980-character draft carried **none** of the project's text — no `SUBJECT LOCK`, no
+  `CHARACTERS AND BINDINGS`, no `identity comes from` — it repeated the shot's own cast
+  table three times. So `project-text-in-draft` looks for the project's own sentences
+  inside the draft rather than reading its size, and the H3-native draft dialect
+  (`Story handoff:`, `Visible cast:`, `Action:`, `Final beat:`, `OPENING CONTINUITY:`)
+  counts as structured rather than as loose prose.
 - **The music field does not contradict itself.** `non_diegetic_music` contains the
   word "music", and a `<Audio 1>` reference line describes a borrowed style rather
   than a score, so both are removed before the scene is searched for music words.
@@ -158,6 +171,13 @@ in a dress and, in the same prompt, in a shirt and a leather vest over dark pant
 the "same dress, different girl" case, where the wardrobe comes off one description
 and the identity off the reference.
 
+Re-measured after the two sharpenings above, on the project they came from (10 shots,
+`prueba-2`): ten `action-section-missing`, ten `project-text-in-draft` and ten
+error-level `wardrobe-contradiction` went to **zero**, and the report reads "no
+inconsistencies found". No rule was relaxed to get there: the same classifier still
+reports one Subject in a dress and in a shirt and a vest in one prompt, which is the
+case the reduction would have had to keep.
+
 ## Tests
 
 `tests/test_prompt_contradictions.py` holds one case per code plus the guards the
@@ -166,4 +186,6 @@ a panorama that is not a pan, a marker inside a sentence, a timestamp at zero, a
 sweater under a blazer, and the wiring — that the router serves the path the
 interface asks for, that each clip is told which shot it is, that a suggestion clears
 its finding, that a suggestion is withheld when it would clear nothing, and that the
-panel saves through the endpoint the clip cards use.
+panel saves through the endpoint the clip cards use. `tests/test_project_prompt_audit.py`
+adds the other two: a draft that really repeats the project's text is named, a draft that
+is only long is not, and a native H3 draft is not read as loose prose.

@@ -27,10 +27,11 @@ video:
   direction only", and binds that ``<Picture N>`` in the next prompt. The engine path is
   complete; it only needs the job flag ``_omni_sequence_continuity``.
 
-It is an option, off by default, and it is a permission rather than a decision: the project
-says continuity between clips may be used, and the **plan** says where. A music video's cuts
-are editorial, and turning it on changes how every clip renders. It does not touch the audio,
-because it adds references rather than overlapping windows.
+It is enabled by default in the Director reference-video UI and remains user-toggleable. It
+is a permission rather than a decision: the project says continuity between clips may be
+used, and the **plan** says where. The plan still owns the cuts, so independent shots remain
+independent. It does not touch the audio, because it adds references rather than overlapping
+windows.
 
 Measured before this existed, on a real 30-shot project: 0 of 30 shots carried a start image,
 none declared a continuity strategy, and `_omni_sequence_continuity` was never set True
@@ -42,19 +43,23 @@ escena de un clip al siguiente".
 from __future__ import annotations
 
 import difflib
+import re
 from typing import Any, Mapping
 
 from services.director_video_strategy import BOUNDED_START_END, OMNI_REFERENCE
 
 __all__ = [
+    "carry_from_by_shot",
     "continuity_run",
     "duplicate_image_prompts",
     "hands_over_the_frame",
     "keyframe_steps",
     "offered_reference_modes",
+    "place_continuity_groups",
     "reference_mode",
     "restale_neighbours",
     "sequence_continuity_flags",
+    "shot_setups",
     "starts_to_keep",
     "stitches_shots",
 ]
@@ -85,6 +90,15 @@ _CUTS = frozenset({"independent"})
 
 _ENVIRONMENT_KEYS = ("environment", "_director_environment", "setting")
 _SECTION_KEYS = ("section", "narrative_role", "scene_type")
+# The camera setup a shot stages, in the order the plan states it: the structured field when the
+# plan is in hand, and the label the opening blocking leads with when only the built shot is
+# (``Hector's subjective POV.``, ``Reaction shot.``, ``Close-up.``, ``Wide shot.``).
+_SETUP_KEYS = ("_director_camera_plan", "camera_plan")
+_SETUP_LEADING = (
+    "opening_blocking", "_director_opening_blocking",
+    "spatial_setup", "_director_spatial_setup",
+)
+_SETUP_MAX_WORDS = 6
 # The batch reads shot state from the persisted clip plan, where the planner's strategy is
 # filed under the director-prefixed key. Accept both so a live plan and a resumed one agree.
 _DECLARED_KEYS = ("continuity_strategy", "_director_continuity_strategy")
@@ -218,7 +232,138 @@ def sequence_continuity_flags(
     if str(director_strategy or "").strip() != str(omni_reference).strip():
         return {}
     flags = continuity_run(clip_plans) if clip_plans else []
-    return {"_omni_sequence_continuity": flags or True}
+    return {
+        "_omni_sequence_continuity": flags or True,
+        # Which earlier clip's frame each returning shot resumes from.
+        "_omni_sequence_carry_from": carry_from_by_shot(clip_plans) if clip_plans else [],
+    }
+
+
+def shot_setups(shot_dicts: Any) -> list[str]:
+    """The camera setup each shot stages, as one comparable word per shot.
+
+    A shot that keeps the setup of the one before it is a continuation of that take, and a shot
+    that returns to a setup an earlier shot used is a return. Both are read here, because the
+    plan states the setup in plain words: measured on a real 17-shot project, the openings read
+    ``Wide shot.``, ``Hector's subjective POV.``, ``Reaction shot.``, ``Close-up.`` and cycled
+    through them. An empty word means the plan did not say, and the shot is then treated as
+    keeping the setup it had -- the safe reading, because it never restarts a take.
+    """
+
+    setups: list[str] = []
+    for shot in shot_dicts or []:
+        if not isinstance(shot, Mapping):
+            setups.append("")
+            continue
+        setups.append(_setup_words(shot))
+    return setups
+
+
+def _setup_words(shot: Mapping[str, Any]) -> str:
+    for key in _SETUP_KEYS:
+        camera = shot.get(key)
+        if not isinstance(camera, Mapping):
+            continue
+        stated = " ".join(
+            str(camera.get(field) or "")
+            for field in ("framing", "angle", "movement")
+        )
+        stated = re.sub(r"\s+", " ", stated).strip().casefold()
+        if stated:
+            return stated
+    for key in _SETUP_LEADING:
+        text = re.sub(r"\s+", " ", str(shot.get(key) or "")).strip()
+        if not text:
+            continue
+        lead = re.sub(r"[^A-Za-z0-9' ]+", " ", text.split(".", 1)[0]).strip().casefold()
+        if lead and len(lead.split()) <= _SETUP_MAX_WORDS:
+            return lead
+    return ""
+
+
+def carry_from_by_shot(clip_plans: Any) -> list[int | None]:
+    """Which earlier shot's final frame each returning shot should resume from.
+
+    A shot that returns to a setup an earlier shot already staged -- the ordinary shot/reverse-shot
+    rhythm, and the case measured on a real 17-shot project where ``Hector's subjective POV`` ran
+    at clips 2, 5, 6, 8, 9, 11 and 13 -- is handed the frame the last shot *of that same setup* ended
+    on, instead of the frame of whatever shot happens to sit immediately before it. Without it the
+    return is composed from the character photographs again and re-stages the tableau it had already
+    left: the reported "avanzan tres centímetros y vuelven al mismo loop desde ese otro punto".
+
+    ``None`` means the ordinary rule -- resume from the shot immediately before -- which is what
+    every shot whose setup is new or unchanged keeps. Positions are 1-based, the way the batch
+    numbers its clips, because that is the number the engine names a clip's frame with.
+    """
+
+    plans = [plan for plan in (clip_plans or []) if isinstance(plan, Mapping)]
+    setups = shot_setups(plans)
+    carries: list[int | None] = []
+    last_seen: dict[str, int] = {}
+    for index, plan in enumerate(plans):
+        position = index + 1
+        setup = setups[index] if index < len(setups) else ""
+        declared = next(
+            (
+                _normalise_declared(plan.get(key))
+                for key in _DECLARED_KEYS
+                if _normalise_declared(plan.get(key))
+            ),
+            "",
+        )
+        continues = declared in _CONTINUES or (
+            not declared and index > 0 and (not setup or setup == setups[index - 1])
+        )
+        earlier = last_seen.get(setup) if setup else None
+        carries.append(
+            earlier if continues and earlier is not None and earlier != position else None
+        )
+        if setup:
+            last_seen[setup] = position
+    return carries
+
+
+def _normalise_declared(value: Any) -> str:
+    return str(value or "").strip().casefold()
+
+
+def place_continuity_groups(shot_dicts: Any) -> None:
+    """One place, stated in the same words, is one continuity group.
+
+    The plan numbers its groups per shot: measured on a real 17-shot project, the whole film
+    happens in one warehouse at night, its ``environment`` is byte-identical in all seventeen
+    shots, and the plan still wrote ``warehouse_piano_1`` ... ``warehouse_piano_11``. Every
+    group boundary forces ``independent`` -- a hard cut that carries nothing -- so eleven of
+    those shots re-staged the same tableau from the same four reference photos, which is the
+    reported "los clips siguen siendo similares entre si".
+
+    The words the plan uses for the place are what survives the numbering, so a group is reused
+    while they do not change. A shot that moves somewhere new states a new place, and keeps its
+    cut.
+    """
+
+    previous: Mapping[str, Any] | None = None
+    previous_place = ""
+    for shot in shot_dicts or []:
+        if not isinstance(shot, dict):
+            previous, previous_place = None, ""
+            continue
+        place = _place_words(shot)
+        if previous is not None and place and place == previous_place:
+            previous_group = str(previous.get("continuity_group") or "").strip()
+            if previous_group:
+                shot["continuity_group"] = previous_group
+        previous, previous_place = shot, place
+
+
+def _place_words(shot: Mapping[str, Any]) -> str:
+    """The place this shot states, in one comparable spelling."""
+
+    for key in _ENVIRONMENT_KEYS:
+        value = re.sub(r"\s+", " ", str(shot.get(key) or "")).strip()
+        if value:
+            return value.casefold()
+    return ""
 
 
 def _enabled(value: Any) -> bool:

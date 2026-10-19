@@ -149,11 +149,50 @@ class StructureTests(unittest.TestCase):
         self.assertIn("editing", finding["message"])
 
     def test_a_draft_carrying_the_project_text_is_named(self):
+        shared = (
+            "SUBJECT LOCK (critical, non-negotiable): <Subject 1> <S1> is ALWAYS <Aria>, and "
+            "the warehouse floor stays wet under one hard spotlight while she crosses the room "
+            "towards the grand piano at the centre of the frame. "
+        )
+        audit = audit_project_prompts([
+            shot(0, shared * 16, draft="[Shot 1] " + shared * 16, context=shared * 16)
+        ])
+
+        self.assertIn("project-text-in-draft", codes(audit["findings"][0]))
+
+    def test_a_draft_that_is_only_long_is_not_blamed_on_the_project_text(self):
+        """Measured on a real project: its 6980-character draft carried none of the project text.
+
+        No ``SUBJECT LOCK``, no ``CHARACTERS AND BINDINGS``, no ``identity comes from`` -- it
+        repeated the shot's own cast table three times. The finding named the wrong cause on all
+        ten of its shots, which is what a warning nobody can act on costs.
+        """
+
         audit = audit_project_prompts(
             [shot(0, LOCKED_HEAD + BINDINGS, draft="[Shot 1] " + "contexto " * 300)]
         )
 
-        self.assertIn("project-text-in-draft", codes(audit["findings"][0]))
+        self.assertNotIn("project-text-in-draft", codes(audit["findings"][0]))
+
+    def test_a_native_h3_draft_is_not_read_as_loose_prose(self):
+        """The H3 planner writes structured prose with its own labels, not the director's."""
+
+        audit = audit_project_prompts([shot(
+            0, LOCKED_HEAD + BINDINGS,
+            draft=(
+                "[Shot 1] Story handoff: Aria is posed on the open grand piano. Visible cast: "
+                "Aria, a woman in her mid 20s, wearing a fitted vivid red mini dress, positioned "
+                "center foreground. Camera: wide establishing shot, slow push in. Action: Hector's "
+                "hand moves to his fly. Lighting: one hard top-down spotlight. Final beat: Roman "
+                "steps forward. OPENING CONTINUITY: Aria seated center on the piano bench. FINAL "
+                "BLOCKING: Roman stands before Aria facing her."
+            ),
+        )])
+
+        reported = [
+            finding["code"] for entry in audit["findings"] for finding in entry["findings"]
+        ]
+        self.assertNotIn("action-section-missing", reported)
 
     def test_the_orders_the_project_uses_are_counted(self):
         clippy = [

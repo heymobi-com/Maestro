@@ -10277,7 +10277,7 @@ export const useStore = create<AppState>((set, get) => ({
   // to retake/review than one rolling-window render).
   directorAutoMode: true,
   directorSeamless: false,
-  directorSequenceContinuity: false, setDirectorSequenceContinuity: (v) => set({ directorSequenceContinuity: v }),
+  directorSequenceContinuity: true, setDirectorSequenceContinuity: (v) => set({ directorSequenceContinuity: v }),
   directorShotImageGuidance: 'auto' as DirectorShotImageGuidance,
   directorLlmLog: [],
   directorSkill: null,

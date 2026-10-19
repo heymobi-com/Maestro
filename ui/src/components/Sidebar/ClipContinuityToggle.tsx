@@ -6,9 +6,9 @@
  * The mechanism is H3's rolling reference, and it is the only one a reference model can use: the
  * literal final-frame handoff needs a start frame, which that model does not accept.
  *
- * Off by default, and it is a permission rather than a decision: the project says continuity may
- * be used between clips, and the plan says where. A film that continues everywhere has no cuts
- * and loses its rhythm, so this belongs with the other workflow switches rather than on.
+ * On by default for reference-based Director renders, and it is a permission rather than a
+ * decision: the project says continuity may be used between clips, and the plan says where.
+ * Independent shots remain cuts, so enabling the mechanism does not make the whole film one take.
  *
  * Only offered for a reference (omni) video model, because that is the only path with the
  * mechanism to carry it out.

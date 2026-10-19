@@ -45,6 +45,7 @@ from ..long_form_story import (
     resolve_locked_dialogue_speakers,
     sanitize_long_form_shot_dicts,
 )
+from ..sequence_continuity import place_continuity_groups
 from .base import BasePlanner
 from services.text_integrity import repair_text
 from services.dialogue_timing import (
@@ -2667,8 +2668,7 @@ def _h3_planner_token_budget(target_duration: float) -> int:
     # its complete world, cast, blocking, audio, and prompt context. The prior
     # 200-token/second allowance hit its exact ceiling on a valid 90-second
     # plan and left the final object half-written.
-    # Increased to 300 tokens/second (25% boost) and max 32000 to handle complex
-    # multi-act narratives with detailed blocking and dialogue coverage.
+    # 300 tokens/second (25% boost), capped at 32000 for long multi-act narratives.
     return min(32000, max(12288, int(math.ceil(target_duration * 300))))
 
 
@@ -2753,7 +2753,9 @@ def _h3_rebuilt_visual_prompt(raw: dict) -> str:
     if causal_handoff:
         parts.append("Story handoff: " + causal_handoff)
     persistent_state = clean(raw.get("persistent_story_state"))
-    if persistent_state:
+    declared_continuity = raw.get("continuity_strategy") or raw.get("_director_continuity_strategy")
+    continuity_strategy = clean(declared_continuity).casefold()
+    if persistent_state and continuity_strategy not in {"continuous", "extend_previous"}:
         parts.append("Continuity state: " + persistent_state)
     for field in ("scene_goal", "environment", "spatial_setup"):
         value = clean(raw.get(field))
@@ -4619,6 +4621,7 @@ def _prepare_long_form_ltx_prompt_contract(
 def _prepare_h3_prompt_only_continuity(shot_dicts: list[dict]) -> list[dict]:
     """Normalize H3 shot state and choreograph adjacent blocking handoffs."""
 
+    place_continuity_groups(shot_dicts)
     prior_group = ""
     wardrobe_by_scene_subject: dict[tuple[str, str], str] = {}
     opening_blocking: list[str] = []
@@ -4670,16 +4673,8 @@ def _prepare_h3_prompt_only_continuity(shot_dicts: list[dict]) -> list[dict]:
                 " ",
                 str(subject.get("position_or_relation") or "unspecified position"),
             ).strip()
-            description = re.sub(
-                r"\s+", " ", str(subject.get("visual_description") or "")
-            ).strip()
-            subject_bits = [name]
-            if description:
-                subject_bits.append(description)
-            if wardrobe:
-                subject_bits.append(f"wearing {wardrobe}")
-            subject_bits.append(f"positioned {position}")
-            opening_subjects.append(", ".join(subject_bits))
+            # Blocking only: the wardrobe already travels in this shot's cast table.
+            opening_subjects.append(f"{name}, positioned {position}")
 
         spatial_setup = re.sub(
             r"\s+", " ", str(raw.get("spatial_setup") or "")
@@ -6830,10 +6825,7 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
                     "restart or repeat completed action.\n"
                     f"Previous planned ending: "
                     f"{previous_ending or 'No prior clip; establish the opening.'}\n\n"
-                    # The batch used to see only its own clips, with the previous
-                    # ending as its sole reference, and a small model satisfied
-                    # that by staying where it was. The whole list is context: it
-                    # shows what is still ahead so this batch can differ from it.
+                    # Whole-timeline context: told only its own clips, a small model stayed put.
                     "THE WHOLE TIMELINE (context only: see where this batch sits "
                     f"and what is still ahead; plan ONLY clips {start + 1}-{end}):\n"
                     f"{timeline_overview}"
@@ -6909,19 +6901,11 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
             for sid, info in speaker_mappings.items():
                 speaker_names[sid] = info.get("name", sid)
 
-        # The transcript carries raw pyannote ids (SPEAKER_00) while the user's
-        # mapping is keyed by the stable labels ((S1)). Looking the raw id up
-        # against the mapping therefore always missed, so the planner sent the
-        # model opaque "SPEAKER_00" tokens with no cast binding. The model then
-        # invented its own speaker numbering and omitted speaker_id on most
-        # beats. Resolve raw ids to the canonical labels before building any
-        # context, and hand the model the closed cast vocabulary up front.
+        # Pyannote ids (SPEAKER_00) never match the user's ((S1)) mapping, so the model
+        # invented its own speaker numbering; resolve to the canonical labels first.
         from ..speaker_binding import (
-            SPEAKER_LABEL_RULES,
-            cast_vocabulary,
-            format_speaker,
-            speaker_cast_block,
-            speaker_label_order,
+            SPEAKER_LABEL_RULES, cast_vocabulary, format_speaker,
+            speaker_cast_block, speaker_label_order,
         )
         from ..voice_gender import declared_gender_for_labels
 
@@ -6935,8 +6919,7 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
         cast_block = speaker_cast_block(vocabulary, cast_genders)
         cast_section = (
             "CANONICAL SPEAKER CAST — the complete and closed set of speakers "
-            f"for this project:\n{cast_block}\n\n{SPEAKER_LABEL_RULES}\n\n"
-            if cast_block else ""
+            f"for this project:\n{cast_block}\n\n{SPEAKER_LABEL_RULES}\n\n" if cast_block else ""
         )
 
         def speaker_display(raw_speaker) -> str:
@@ -7242,8 +7225,7 @@ Shots to plan:
             user_prompt=user_prompt,
             system_prompt=system_prompt,
             max_tokens=max_tokens,
-            # No explicit budget: the shared helper picks the model-aware one, and
-            # bounded tells it this is a single batch of a long timeline.
+            # No explicit budget: the shared helper picks the model-aware one.
             bounded=_bounded_batch,
             image_paths=image_paths,
             json_schema=audio_schema,
@@ -9994,10 +9976,10 @@ SCREENPLAY:
 
 H3 NATIVE SHOT CONTRACT — NON-NEGOTIABLE:
 - Every array item is ONE bounded H3 generation lasting {minimum_seconds:.2f}-{maximum_seconds:.2f} seconds.
-- Use video_prompt for every item and set window_prompts to []. Never write 20-second windows, timeline ranges, or prompt instructions referring to a previous/preceding shot. The structured continuity_strategy and continuity_group fields are required planning metadata, while every video_prompt must remain self-contained.
-- Every video_prompt must stand alone, but it must also be economical: normally 180-450 words and never more than 650 words. State the exact physical setting, visible people, essential appearance/wardrobe, chronological action, camera, lighting, dialogue, ambience, effects, and music once each. Do not paste the screenplay, story bible, production contract, or continuity metadata into the prompt; translate them into concrete visible/audible instructions. Never restate the same opening, action, speaker, or ending in multiple differently worded paragraphs.
+- Use video_prompt for every item and set window_prompts to []. Never write 20-second windows or timeline ranges, or ask the renderer to regenerate an earlier shot. The structured continuity_strategy and continuity_group fields are required planning metadata. For a continuous shot, causal_handoff names only the immediately preceding visible beat; it is not permission to replay the film's opening.
+- Every video_prompt must stand alone, but it must also be economical: normally 180-450 words and never more than 650 words. Include only the setting, people, appearance/wardrobe, action, camera, lighting, dialogue, ambience, effects, and music needed for THIS shot, once each. Do not paste the screenplay, story bible, production contract, full clip plan, or continuity metadata into the prompt; translate stable constraints into concise visual/audible anchors. Never restate the same opening, action, speaker, or ending in multiple differently worded paragraphs.
 - WARDROBE IS STATE: on every appearance, subjects_on_screen must give each person a complete head-to-toe wardrobe (colors, materials, layers, accessories, and visible footwear). Repeat the same wardrobe wording in every shot within a continuity_group unless the screenplay explicitly changes it, and show that change visibly before using the new wardrobe.
-- BLOCKING IS STATE: spatial_setup and each subject's position_or_relation describe the FIRST FRAME precisely: screen-left/center/right, foreground/midground/background, standing/seated/leaning, facing direction, and nearby furniture or props. Repeat that opening blocking in video_prompt.
+- BLOCKING IS SHOT-LOCAL: spatial_setup describes THIS clip's first frame. In a continuous group it follows the preceding shot's closing_blocking and causal_handoff; never reset later clips to the group's opening tableau. Repeat only the positions and props needed to stage this shot, and show any required movement into the next arrangement before the cut.
 - closing_blocking describes the final positions at the end of the shot. When the next shot in the same continuity_group opens with different blocking, the current shot must visibly show the person walking, sitting, standing, turning, or otherwise moving into that next arrangement before the cut.
 - continuity_strategy is "independent" for a new place/time, "continuous" for a normal editorial cut within the same scene, or "extend_previous" ONLY when the next generation should start from the literal final frame with the same camera axis/composition and no intended cut. Use extend_previous sparingly.
 - continuity_group is a short stable ID such as kitchen_morning_1. Reuse it only while place and story time remain uninterrupted; change it for any location or time jump.
@@ -10006,9 +9988,9 @@ H3 NATIVE SHOT CONTRACT — NON-NEGOTIABLE:
 - STORY STATE IS CONTINUOUS ACROSS GROUPS: carry the active objective, information learned, relationship changes, injuries, dirt or wardrobe damage, and important props even when the physical location changes.
 - story_scene_number maps every shot to the corresponding ordered scene in the binding blueprint. Multiple coverage shots may share one story_scene_number, but scene numbers never move backward or skip the screenplay's causal events.
 - causal_handoff is camera-observable story context, not an editing instruction. On the first shot of a scene it states the exact prior cause and visible arrival/result; on later coverage in the same scene it states the immediately preceding action or consequence that this shot advances.
-- persistent_story_state states the current objective, knowledge, relationship, physical damage, wardrobe/prop state, and unresolved danger that remain true at this point. Repeat the relevant state instead of silently resetting it at a cut.
+- persistent_story_state states only the concise current objective, knowledge, relationship, physical damage, wardrobe/prop state, and unresolved danger needed at this point. Do not repeat the film's opening tableau or recap unchanged history in every shot; a continuous shot advances from the immediate handoff.
 - Do not invent a new villain, emergency, crime, objective, or location that is absent from both the screenplay and the binding story blueprint. Shot planning directs and photographs the written film; it does not replace it with disconnected coverage.
-- WORLD CONTINUITY IS REQUIRED: preserve any supplied TV show, film, performer, franchise, historical era, city, named venue, room, or recognizable set. Repeat the relevant world/franchise and full location in EACH video_prompt; never collapse a named series and its recognizable apartment set into a generic kitchen.
+- WORLD CONTINUITY IS REQUIRED: preserve any supplied TV show, film, performer, franchise, historical era, city, named venue, room, or recognizable set. Give each video_prompt a concise world/location anchor, but do not repeat the full project description, establishing tableau, or film-wide camera arc.
 - Each screenplay event and each spoken line appears in exactly one shot. Do not duplicate dialogue across adjacent shots. Preserve scripted dialogue verbatim.
 - CONVERSATION PACKING IS REQUIRED: a change of speaker is not by itself a reason to start another array item. Within the same uninterrupted location and story beat, prefer one native clip ({preferred_duration_text}) containing 2-4 alternating dialogue turns when their combined total is no more than {maximum_dialogue_words} words. Keep a brief reaction such as "What?", a gasp, or a one-line reply in the surrounding exchange instead of wasting a separate minimum-length clip.
 - INTERNAL CAMERA EDITING IS SUPPORTED: inside one bounded H3 clip, the camera may begin on an ensemble frame, cut or reframe to each current speaker before their tagged line, hold their unobstructed face and mouth through the complete line, capture reactions, and finish on a new composition. Describe that chronological coverage in camera_plan and action_beats. Prefer the lower end of the requested shot-count range for a continuous dialogue scene.

@@ -148,6 +148,128 @@ run confirms it in one line, `[Continuation] Extracted last frame for clip N`, a
 N's first frame with clip N-1's last frame.
 
 
+## The decision is graded, and a return resumes from its own setup
+
+Reported from use: "hay escenas que requieren continuidad y otras donde el corte debe ser limpio...
+lo que no me agrada es que nunca hay continuidad entre un clip y otro, solo son cortes, y esto lleva a
+clips repetitivos y donde no se justifica regresar a la escena inicial. No debe ser negro o blanco,
+sino dar margen para creatividad sin que esto genere clips que parten todos del mismo punto inicial o
+que avanzan tres centímetros y vuelven al mismo loop desde ese otro punto."
+
+Both halves were measured on a real 17-shot run, and they have the same cause.
+
+**The plan fragments one scene.** Its whole film happens in one warehouse at night, its `environment`
+is byte-identical in all seventeen shots, and the plan still numbered eleven `continuity_group`s
+(`warehouse_piano_1` … `warehouse_piano_11`), which its own contract forbids ("reuse it only while
+place and story time remain uninterrupted"). Every group boundary forces `independent`, so **6 of 17
+clips carried the one before them and 11 were hard cuts inside one uninterrupted scene** — and each of
+those cuts re-staged the same tableau from the same four reference photographs. That is the repetitive
+clip.
+
+**The camera setups cycle.** The plan's openings read `Wide shot`, `Hector's subjective POV`,
+`Reaction shot`, `Close-up`, then POV again, and again: the POV appears at clips 2, 5, 6, 8, 9, 11, 13.
+The pairs (2-3, 5-6, 8-9, 15-16) exist because an eight-second ceiling splits one take; the returns
+exist because that is the editing rhythm. Handed only the shot immediately before it, a returning POV
+was composed from the character photographs and **re-staged the tableau it had already left**.
+
+### The three levels
+
+Derived from what the plan already writes — the place and the camera setup — so it stays automatic,
+and it is a gradient rather than a switch:
+
+| The shot | Continuity | What it is handed |
+|---|---|---|
+| states a new place (`environment` changes) | **clean cut** | nothing at all |
+| same place, a **different** setup | **coherent cut** | the previous clip's late frame as a composition-only reference: world, light and wardrobe continue, the composition is new |
+| same place, the **same** setup | **continuation** | the previous clip's own frame, and on a return the frame of the **last clip that staged that same setup** |
+
+`place_continuity_groups()` decides the first row: one place, stated in the same words, is one group
+whatever number the plan appended to it, so a scene the plan numbered eleven times is one scene. A
+shot that moves somewhere new states a new place and keeps its cut. `carry_from_by_shot()` decides the
+last column: the frame a returning shot resumes from, by the setup its opening blocking names
+(`Hector's subjective POV.`, `Reaction shot.`, `Close-up.` …) or the structured `camera_plan`.
+
+Measured on that same 17-shot plan, as a fresh run decides it:
+
+```
+  clip 1  wide shot               cut, nothing
+  clip 2  (unstated setup)        continues the shot before it
+  clip 3  hector's subjective pov continues the shot before it
+  clip 4  hector's subjective pov resumes from clip 3   (same setup)
+  clip 5  reaction shot           continues the shot before it
+  clip 6  hector's subjective pov resumes from clip 4   (the return, not its neighbour)
+  clip 7  hector's subjective pov resumes from clip 6
+  clip 8  reaction shot           resumes from clip 5   (the reaction's own last state)
+  ...                             and so on to clip 17
+```
+
+16 of 17 clips continue, 11 of them resume from a clip staging the same setup, and the 11 mappings
+were checked to name a clip whose setup is the same word for word. The one cut is the film's opening.
+
+### What the engine does with it, and the level that is not available yet
+
+The batch's own hand-over now reads the **receiving** clip's decision (`multi_clip_info`), not the
+finished clip's, so a clean cut is genuinely handed nothing — the flag used to be read off the shot
+that had just finished, one shot out of phase. The frame it wants is already on disk
+(`_omni_sequence_continuity_<job>_<clip>.png`), so a return reuses it rather than re-extracting a clip
+that is not the composition it needs.
+
+The strongest level — start from the last frame itself — is **not** wired for `omni_reference` (H3
+Singularity references), and it cannot be reached by the obvious route. Verified in the engine:
+
+```python
+# app/models/minimax_h3/minimax_h3_main.py
+if has_explicit_start:            # image_start is set
+    return None, None, 0          # ...no history, and no boundary frame
+...
+if self.omni_reference:
+    continuation_picture = _tensor_to_pil(boundary_video)   # the ONLY first-frame anchor
+```
+
+`has_explicit_start` is `image_start is not None`, and the `elif` that consumes `image_start` belongs
+to the non-omni branch. So setting `image_start` on an `omni_reference` job would **remove** the one
+first-frame anchor that path has and put nothing in its place. On that strategy the anchor arrives
+through the sliding-window overlap instead, which is where a true start frame has to be delivered —
+a separate, verifiable change.
+
+### Reading the log
+
+One line is the whole evidence, and it is the engine's own:
+
+```
+  [H3 Omni Sequence] Added curated continuity Picture 5 for clip 8.
+```
+
+The picture number is the label the borrowed frame receives — 5 when the four canonical
+references (the cast and the location) are in front of it, 6 when the project-look frame was also
+added. The clip number is the clip that **receives** it, the one about to be generated. Two lines
+later the same clip reports its runtime bindings, which is where the hand-over becomes visible to
+the model:
+
+```
+  Picture 5=Maestro rolling continuity reference from the preceding generated clip;
+  blocking, environment state, lighting, and screen direction only
+```
+
+In the run that measured the fragmentation it appeared **once**, for clip 8, because eleven of the
+seventeen clips were forced to `independent`. A run with this decision should print it from clip 2
+onward, naming a different receiving clip each time — and it should **not** print for a clean cut,
+which is the other half of the evidence.
+
+One wording note, left as it is: the role string says "the preceding generated clip", and on a
+return the frame comes from the clip that last staged this setup, several shots back. The string is
+upstream's, in a file upstream owns, so it would cost budget to reword; what the model acts on is
+the instruction beside it — "preserve prior blocking, environment state, lighting, and screen
+direction; begin with a newly generated moving composition rather than an opening freeze-frame" —
+which is accurate for both cases.
+
+
+Where it lives: `app/services/director/sequence_continuity.py` owns the rules(`place_continuity_groups`, `shot_setups`, `carry_from_by_shot`, `sequence_continuity_flags`), the
+planner calls the first one before it decides any strategy, and the batch reads the result from
+`multi_clip_info`. The pinned cases are in `tests/test_director_sequence_continuity.py`, including the
+hand-over block lifted out of `launch.py` and run against real files.
+
+
 ## What holds the images back, measured
 
 Reported after the first attempt: "veo imagenes de inicio muy similares entre un clip y otro... genera
@@ -450,6 +572,36 @@ swapped speaker. It is not: the prompt declares both mappings in its own `subjec
 `<Subject N>` is frame order (`_speaker_map`, so the first row on screen is 1), while `(S N)` is the
 stable label the registry and the project subject lock assign. On the operator's three-character
 project every line compiles with both, and all three characters resolve.
+
+## "detailed_description is missing [Shot 1]" on a prompt that carries it
+
+The single-shot project that produced this refusal reported it five times, each about eight seconds
+apart, and the message names a rule the prompt visibly satisfied. Measured, not guessed:
+
+- the scene description the run started from was **itself a compiled six-field prompt** (4,799
+  characters, `subject_definitions` → `non_diegetic_music`, `[Shot 1]` three times). The intent was
+  reasonable -- paste a shot's prompt to correct it in another project -- and the planner was the
+  local 4B writer;
+- the planner's answer was a prose draft, and the compiler wraps that in the six official fields,
+  writing `[Shot 1]` itself. So the marker was never missing from what the compiler built;
+- the validator counts a field at a line start (`^\s*detailed_description\s*:`), and then inspects
+  the value **`_extract_h3_fields`** returned for that same name. That reader searched without the
+  anchor. A label mentioned in the prose earlier in the text won the match, and the slice ended at
+  the real label -- so the counter said "one field, present" and the reader handed back the words
+  that followed the mention.
+
+That is exactly reproducible: an echo of `detailed_description:` in the summary of an otherwise valid
+compiled prompt yields `['detailed_description is missing [Shot 1]', ...]` and nothing else is wrong
+with the prompt. A small local planner rewriting a compiled prompt echoes labels; a larger one may
+too, and nothing about the compiler made the echo harmless.
+
+The reader now prefers the occurrence of each field that starts its own line, and keeps the inline
+search as the fallback it was written for, per field rather than for the whole prompt: legacy
+one-line prompts (which have no line-anchored field at all) still read exactly as before, and a
+prompt whose *first* field lost its line start to a prefix still yields that field. The refusal also
+prints what it saw -- `Refused a prompt built from these fields: summary=…, detailed_description=…;
+Body starts: '…'` -- because a rule name alone costs a whole planning pass to diagnose. Both live in
+the reader and in `services/director/h3_prompt_shape.py`; the contract itself is unchanged.
 
 ## Confirmed in use
 

@@ -29,6 +29,10 @@ if _APP_DIR not in sys.path:
 
 from services.director import h3_dialogue  # noqa: E402
 from services.director.h3_dialogue import compile_h3_official_prompt  # noqa: E402
+from services.director.planners.short_film import (  # noqa: E402
+    _h3_rebuilt_visual_prompt,
+    _prepare_h3_prompt_only_continuity,
+)
 from services.director.project_brief import audit_project_brief, clip_project_context  # noqa: E402
 from services.director.prompt_audit import format_audit_report  # noqa: E402
 
@@ -126,6 +130,72 @@ class TheFilmStoryStaysOutOfTheClipTests(unittest.TestCase):
         self.assertIn("glossy, mirror-like floor", compiled)
         self.assertIn("Do not invent speech", compiled)
         self.assertIn("<Subject 2> (S2)(SINGER)", compiled)
+
+    def test_a_formatted_clip_plan_does_not_travel_into_every_clip(self):
+        brief = (
+            "SUBJECT LOCK (critical, non-negotiable):\n"
+            "- <Subject 1> is ALWAYS Aria.\n\n"
+            "CHARACTERS AND BINDINGS:\n"
+            "<Subject 1> (S1): Aria; identity comes from <Picture 1>.\n\n"
+            "DESCRIPTION:\n"
+            "Wide establishing tableau: Aria sits poised on the grand piano.\n\n"
+            "CLIP PLAN (hardware constraint — split the DESCRIPTION into these; "
+            "8–9 s clips, ~117 s ≈ 2 min, words):\n\n"
+            "- <C01 | 8 s | establishing tableau>: Aria sits poised on the piano.\n\n"
+            "- <C02 | 8 s | close-up>: Hector watches Aria from beside the piano.\n\n"
+            "AMBIENCE:\n"
+            "A cavernous warehouse with a glossy floor."
+        )
+
+        kept = clip_project_context(brief)
+        compiled, _ = compile_h3_official_prompt(
+            SHOT, [], [], mode="ref2va", references=REFERENCES,
+            project_context=brief,
+        )
+
+        for text in (kept, compiled):
+            self.assertNotIn("Wide establishing tableau", text)
+            self.assertNotIn("<C01", text)
+            self.assertNotIn("<C02", text)
+        self.assertIn("SUBJECT LOCK", kept)
+        self.assertIn("CHARACTERS AND BINDINGS", compiled)
+        self.assertIn("cavernous warehouse", compiled)
+
+    def test_a_continuous_shot_does_not_restate_the_full_story_state(self):
+        prompt = _h3_rebuilt_visual_prompt({
+            "continuity_strategy": "continuous",
+            "causal_handoff": "Hector lowers his hand after Aria meets his gaze.",
+            "persistent_story_state": (
+                "Active objective: Establish the opening tableau. "
+                "State carried forward: Aria remains poised on the piano; "
+                "Roman stands beside her; Hector waits near the piano."
+            ),
+            "scene_goal": "Hector accepts Aria's invitation.",
+            "environment": "The same warehouse and grand piano.",
+            "subjects_on_screen": [
+                {
+                    "speaker_name": "Hector",
+                    "visual_description": "A gray-haired man in a charcoal suit.",
+                    "position_or_relation": "beside the piano",
+                },
+            ],
+            "action_beats": ["Hector steps closer to Aria."],
+        })
+
+        self.assertTrue(prompt.startswith("Story handoff:"))
+        self.assertIn("Hector lowers his hand", prompt)
+        self.assertIn("Hector steps closer", prompt)
+        self.assertNotIn("Continuity state:", prompt)
+        self.assertNotIn("opening tableau", prompt)
+
+    def test_an_independent_shot_keeps_its_explicit_state_context(self):
+        prompt = _h3_rebuilt_visual_prompt({
+            "_director_continuity_strategy": "independent",
+            "persistent_story_state": "Hector has arrived at the warehouse.",
+            "environment": "The warehouse entrance.",
+        })
+
+        self.assertIn("Continuity state: Hector has arrived at the warehouse.", prompt)
 
     def test_the_compiler_is_what_keeps_the_film_out_of_the_clip(self):
         """Bypassing the trim brings the narrative back, so this is the wiring."""
@@ -267,6 +337,105 @@ class TheBriefReportTests(unittest.TestCase):
         self.assertIn("PROPS", brief)
         self.assertIn("piano", brief)
         self.assertNotIn("orbits", brief)
+
+
+class TheBlockingDoesNotRepeatTheWardrobeTests(unittest.TestCase):
+    """The wardrobe is written once per shot, not three times.
+
+    Measured on a real 10-shot project: each opening block carried the full head-to-toe
+    wardrobe of every subject (1234 characters per shot, positions included), and the same
+    text was written again into FINAL BLOCKING -- which is how a prompt whose action is a
+    few hundred characters came to 7000. The blocks are blocking, so they carry positions
+    and nothing else; the appearance still travels in the shot's own cast table and, one
+    step later, in the compiler's ``subject_definitions``.
+    """
+
+    WARDROBE = "a fitted red mini dress and black heels"
+
+    def _planned(self):
+        shots = [
+            {
+                "continuity_group": "loft_1",
+                "spatial_setup": f"Shot {index + 1} opens on the same loft.",
+                "subjects_on_screen": [{
+                    "speaker_name": "Aria",
+                    "visual_description": "a woman with glossy shoulder-length curls",
+                    "wardrobe": self.WARDROBE,
+                    "position_or_relation": "seated center on the piano bench",
+                }],
+            }
+            for index in range(2)
+        ]
+        for shot in shots:
+            shot["video_prompt"] = _h3_rebuilt_visual_prompt(shot)
+        return _prepare_h3_prompt_only_continuity(shots)
+
+    def test_the_opening_block_carries_the_position_and_not_the_outfit(self):
+        prompt = str(self._planned()[0]["video_prompt"])
+        opening = prompt.split("OPENING CONTINUITY:", 1)[1]
+
+        self.assertIn("Aria, positioned seated center on the piano bench", opening)
+        self.assertNotIn(self.WARDROBE, opening)
+
+    def test_the_final_block_is_blocking_too(self):
+        prompt = str(self._planned()[0]["video_prompt"])
+        final = prompt.split("FINAL BLOCKING:", 1)[1]
+
+        self.assertNotIn(self.WARDROBE, final)
+
+    def test_the_wardrobe_still_travels_with_the_shot(self):
+        prompt = str(self._planned()[0]["video_prompt"])
+
+        self.assertIn(f"wearing {self.WARDROBE}", prompt)
+
+
+class ThePlaceDecidesTheContinuityGroupTests(unittest.TestCase):
+    """One uninterrupted place is one group, whatever number the plan appended to it.
+
+    Measured on a real 17-shot project: the whole film happens in one warehouse at night, its
+    "environment" is byte-identical in all seventeen shots, and the plan still numbered eleven
+    groups (``warehouse_piano_1`` ... ``_11``). Every group boundary forces ``independent``, so
+    eleven shots were hard cuts that carried nothing, and each re-staged the same tableau from
+    the same four reference photos -- the reported "los clips siguen siendo similares entre si".
+    """
+
+    PLACE = "Interior, cavernous industrial warehouse, night. A grand piano stands under one light."
+
+    def _shots(self, groups, places=None):
+        places = places or [self.PLACE] * len(groups)
+        return _prepare_h3_prompt_only_continuity([
+            {
+                "continuity_group": group,
+                "environment": place,
+                "spatial_setup": f"Shot {index + 1} opens on the same floor.",
+                "subjects_on_screen": [{
+                    "speaker_name": "Aria",
+                    "visual_description": "a woman with glossy curls",
+                    "wardrobe": "a fitted red mini dress",
+                    "position_or_relation": "seated center",
+                }],
+                "video_prompt": "Action: Aria waits.",
+            }
+            for index, (group, place) in enumerate(zip(groups, places))
+        ])
+
+    def test_numbered_groups_over_one_place_become_one_group(self):
+        shots = self._shots([f"warehouse_piano_{index + 1}" for index in range(11)])
+
+        self.assertEqual({shot["continuity_group"] for shot in shots}, {"warehouse_piano_1"})
+        self.assertEqual(
+            [shot["continuity_strategy"] for shot in shots],
+            ["independent"] + ["continuous"] * 10,
+        )
+
+    def test_a_new_place_still_cuts(self):
+        shots = self._shots(
+            ["warehouse_piano_1", "warehouse_piano_2", "warehouse_piano_3"],
+            [self.PLACE, self.PLACE, "Exterior, rain-soaked street, dawn."],
+        )
+
+        self.assertEqual(shots[2]["continuity_strategy"], "independent")
+        self.assertEqual(shots[1]["continuity_strategy"], "continuous")
 
 
 if __name__ == "__main__":

@@ -91,7 +91,7 @@ class MusicCueTests(unittest.TestCase):
                    cumulative_offset=0, total_trimmed_frames=0, group_id='test', clip_count=3,
                    multi_clip_audio_start_sec=0, multi_clip_concat_audio='song.wav',
                    omni_sequence_continuity=False, omni_sequence_target_frames=0,
-                   multi_clip_defer_concat=False)
+                   omni_sequence_carry_from=None, multi_clip_defer_concat=False)
         offsets, trims = [], []
         for i in range(3):
             env.update(i=i, clip_params={})

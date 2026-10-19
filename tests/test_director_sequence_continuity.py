@@ -33,14 +33,17 @@ if _APP_DIR not in sys.path:
 from services.director.sequence_continuity import (  # noqa: E402
     MAX_RUN,
     OPTION,
+    carry_from_by_shot,
     continuity_run,
     duplicate_image_prompts,
     hands_over_the_frame,
     keyframe_steps,
     offered_reference_modes,
+    place_continuity_groups,
     reference_mode,
     restale_neighbours,
     sequence_continuity_flags,
+    shot_setups,
     starts_to_keep,
     stitches_shots,
 )
@@ -84,6 +87,17 @@ def _pipeline_source() -> str:
         return handle.read()
 
 
+def _launch_source() -> str:
+    with open(os.path.join(_APP_DIR, "launch.py"), encoding="utf-8") as handle:
+        return handle.read()
+
+
+def ast_unparse(node) -> str:
+    import ast
+
+    return ast.unparse(node)
+
+
 def _image_shot(prompt, strategy=None):
     shot = {"image_prompt": prompt}
     if strategy:
@@ -109,23 +123,25 @@ class TheSequenceContinuityOptionTests(unittest.TestCase):
         )
 
     def test_it_reaches_the_engine_when_the_project_asks_for_it(self):
-        self.assertEqual(
-            sequence_continuity_flags(
-                {OPTION: True}, OMNI_REFERENCE, omni_reference=OMNI_REFERENCE,
-            ),
-            {"_omni_sequence_continuity": True},
+        flags = sequence_continuity_flags(
+            {OPTION: True}, OMNI_REFERENCE, omni_reference=OMNI_REFERENCE,
         )
+
+        self.assertIs(flags["_omni_sequence_continuity"], True)
+        # The second question the batch asks -- which clip a return resumes from -- travels
+        # with the first, so one call in the pipeline carries both.
+        self.assertIn("_omni_sequence_carry_from", flags)
 
     def test_a_saved_project_may_hold_the_option_as_a_string(self):
         """A checkbox sends a boolean; a params file on disk may hold text."""
 
         for value in ("true", "TRUE", "on", "yes", "1"):
             with self.subTest(value=value):
-                self.assertEqual(
+                self.assertIs(
                     sequence_continuity_flags(
                         {OPTION: value}, OMNI_REFERENCE, omni_reference=OMNI_REFERENCE,
-                    ),
-                    {"_omni_sequence_continuity": True},
+                    )["_omni_sequence_continuity"],
+                    True,
                 )
 
     def test_it_stays_off_for_a_strategy_whose_mechanism_is_the_other_one(self):
@@ -350,15 +366,18 @@ class ThePlanDecidesTests(unittest.TestCase):
             omni_reference=OMNI_REFERENCE, clip_plans=plans,
         )
 
-        self.assertEqual(shares, {"_omni_sequence_continuity": [False, True, False]})
+        self.assertEqual(shares["_omni_sequence_continuity"], [False, True, False])
+        self.assertEqual(len(shares["_omni_sequence_carry_from"]), len(plans))
 
     def test_one_shot_still_gets_the_plain_form(self):
         """A caller with no shots in hand means every clip, and reads as it always did."""
 
-        self.assertEqual(
-            sequence_continuity_flags({OPTION: True}, OMNI_REFERENCE, omni_reference=OMNI_REFERENCE),
-            {"_omni_sequence_continuity": True},
+        flags = sequence_continuity_flags(
+            {OPTION: True}, OMNI_REFERENCE, omni_reference=OMNI_REFERENCE,
         )
+
+        self.assertIs(flags["_omni_sequence_continuity"], True)
+        self.assertEqual(flags["_omni_sequence_carry_from"], [])
 
 
 class TheEngineReadsOneClipAtATimeTests(unittest.TestCase):
@@ -370,7 +389,7 @@ class TheEngineReadsOneClipAtATimeTests(unittest.TestCase):
     called a module-level helper here and broke ``test_director_music_cues``.
     """
 
-    def _manifests(self, flags):
+    def _manifests(self, flags, carry_from=None):
         import ast
 
         with open(os.path.join(_APP_DIR, "launch.py"), "r", encoding="utf-8") as handle:
@@ -408,6 +427,7 @@ class TheEngineReadsOneClipAtATimeTests(unittest.TestCase):
             cumulative_offset=0, total_trimmed_frames=0, group_id="test", clip_count=3,
             multi_clip_audio_start_sec=0, multi_clip_concat_audio="song.wav",
             omni_sequence_continuity=flags, omni_sequence_target_frames=0,
+            omni_sequence_carry_from=carry_from,
             multi_clip_defer_concat=False,
         )
         manifests = []
@@ -423,6 +443,24 @@ class TheEngineReadsOneClipAtATimeTests(unittest.TestCase):
         self.assertEqual(
             [manifest["omni_sequence_continuity"] for manifest in manifests],
             [False, True, False],
+        )
+
+    def test_each_clip_carries_the_clip_it_resumes_from(self):
+        """The film position is the engine's own naming: ``carry_from=2`` means clip 2's frame."""
+
+        manifests = self._manifests([True, True, True], carry_from=[None, 2, 1])
+
+        self.assertEqual(
+            [manifest["carry_from"] for manifest in manifests],
+            [None, 2, 1],
+        )
+
+    def test_a_batch_that_states_nothing_carries_from_nowhere(self):
+        manifests = self._manifests([True, True, True])
+
+        self.assertEqual(
+            [manifest["carry_from"] for manifest in manifests],
+            [None, None, None],
         )
 
     def test_one_plain_flag_still_covers_every_clip(self):
@@ -813,6 +851,480 @@ class TheNeighbourGoesStaleTests(unittest.TestCase):
         self.assertIn(
             "for neighbour in sequence_continuity.restale_neighbours(s, clip_index)", source,
         )
+
+
+class TheHandoffFindsTheClipItJustRenderedTests(unittest.TestCase):
+    """A frame is handed over only if the clip that produced it is found where it was written.
+
+    Measured on the affected project's own render log: ``_omni_sequence_continuity`` was True for
+    9 of its 10 clips and did reach the job, yet all ten bound the same four references and no
+    ``[H3 Omni Sequence]`` picture was ever added -- and no ``[Continuation]`` frame was ever
+    extracted, in any run of any project. One join explains all of it: ``wgp`` registers a render
+    the way it printed it (``New video saved to Path: outputs/<workspace>/<file>.mp4``), which is
+    relative to the working directory that ``launch.py`` pins to ``app``, while ``out_dir`` spells
+    that same workspace. Joining the one onto the other asked for
+    ``outputs/<workspace>/outputs/<workspace>/<file>.mp4``, never found the file, and both
+    hand-offs fell through in silence.
+
+    The lookup is launch.py's own, lifted out by AST and run the way upstream runs it, so this is
+    the shipped rule and not a restatement of it.
+    """
+
+    def _loop(self):
+        import ast
+
+        tree = ast.parse(_launch_source())
+        return next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.For)
+            and ast.unparse(node.iter) == "reversed(task_files)"
+            and any(
+                isinstance(child, ast.Name) and child.id == "candidate"
+                for child in ast.walk(node)
+            )
+        )
+
+    def _lookup(self, out_dir, task_files):
+        import ast
+
+        program = compile(
+            ast.Module(body=[self._loop()], type_ignores=[]), "<queue omni lookup>", "exec",
+        )
+        namespace = {
+            "os": os, "out_dir": out_dir, "task_files": task_files, "latest_video": None,
+        }
+        exec(program, namespace)
+        return namespace["latest_video"]
+
+    def _workspace(self, root, *names):
+        out_dir = os.path.join(root, "outputs", "prueba-2")
+        os.makedirs(out_dir, exist_ok=True)
+        for name in names:
+            Path(os.path.join(out_dir, name)).touch()
+        return out_dir
+
+    def test_the_render_is_found_where_wgp_wrote_it(self):
+        with tempfile.TemporaryDirectory() as root:
+            out_dir = self._workspace(root, "clip1.mp4")
+            registered = os.path.join("outputs", "prueba-2", "clip1.mp4")
+            previous = os.getcwd()
+            os.chdir(root)
+            try:
+                found = self._lookup(out_dir, [registered])
+            finally:
+                os.chdir(previous)
+
+            self.assertEqual(found, os.path.realpath(os.path.join(out_dir, "clip1.mp4")))
+
+    def test_the_join_that_used_to_be_there_is_why_nothing_was_found(self):
+        """The regression, kept as the failing case it was."""
+
+        with tempfile.TemporaryDirectory() as root:
+            out_dir = self._workspace(root, "clip1.mp4")
+            registered = os.path.join("outputs", "prueba-2", "clip1.mp4")
+
+            self.assertFalse(os.path.isfile(os.path.join(out_dir, registered)))
+
+    def test_another_projects_media_is_refused(self):
+        """A shared-folder diff can register a concurrent dashboard operation's file."""
+
+        with tempfile.TemporaryDirectory() as root:
+            out_dir = self._workspace(root)
+            other = os.path.join(root, "outputs", "podcast")
+            os.makedirs(other)
+            Path(os.path.join(other, "clip1.mp4")).touch()
+
+            self.assertIsNone(self._lookup(out_dir, [os.path.join(other, "clip1.mp4")]))
+
+    def test_a_file_that_is_not_a_video_is_skipped(self):
+        with tempfile.TemporaryDirectory() as root:
+            out_dir = self._workspace(root, "still.png")
+
+            self.assertIsNone(self._lookup(out_dir, [os.path.join(out_dir, "still.png")]))
+
+    def test_the_newest_registered_render_is_the_one_carried(self):
+        with tempfile.TemporaryDirectory() as root:
+            out_dir = self._workspace(root, "first.mp4", "second.mp4")
+            previous = os.getcwd()
+            os.chdir(root)
+            try:
+                found = self._lookup(out_dir, [
+                    os.path.join("outputs", "prueba-2", "first.mp4"),
+                    os.path.join("outputs", "prueba-2", "second.mp4"),
+                ])
+            finally:
+                os.chdir(previous)
+
+            self.assertEqual(os.path.basename(found), "second.mp4")
+
+    def test_the_engine_resolves_it_as_written_and_not_against_out_dir(self):
+        import ast
+
+        self.assertNotIn("os.path.join(out_dir", ast.unparse(self._loop()))
+        self.assertIn("os.path.realpath(candidate)", ast.unparse(self._loop()))
+        # The rule leans on the working directory being the folder wgp wrote into.
+        self.assertIn("os.chdir(_app_dir)", _launch_source())
+
+
+class ThePlaceDecidesTheGroupTests(unittest.TestCase):
+    """One place, stated in the same words, is one continuity group.
+
+    Measured on a real 17-shot project: the whole film happens in one warehouse at night, its
+    ``environment`` is byte-identical in all seventeen shots, and the plan still numbered eleven
+    groups (``warehouse_piano_1`` ... ``warehouse_piano_11``). Every group boundary forces
+    ``independent`` -- a hard cut that carries nothing -- so eleven shots re-staged the same
+    tableau from the same four reference photos, which is the reported "los clips siguen siendo
+    similares entre si".
+    """
+
+    PLACE = "Interior, cavernous industrial warehouse, night."
+
+    def _shots(self, groups, places=None):
+        places = places or [self.PLACE] * len(groups)
+        return [
+            {"continuity_group": group, "environment": place}
+            for group, place in zip(groups, places)
+        ]
+
+    def test_numbered_groups_over_one_place_become_one_group(self):
+        shots = self._shots([f"warehouse_piano_{index + 1}" for index in range(11)])
+
+        place_continuity_groups(shots)
+
+        self.assertEqual(
+            [shot["continuity_group"] for shot in shots],
+            ["warehouse_piano_1"] * 11,
+        )
+
+    def test_whitespace_and_case_do_not_split_a_place(self):
+        shots = self._shots(
+            ["warehouse_1", "warehouse_2"],
+            [self.PLACE, "  interior,   cavernous industrial WAREHOUSE, night. "],
+        )
+
+        place_continuity_groups(shots)
+
+        self.assertEqual(shots[1]["continuity_group"], "warehouse_1")
+
+    def test_a_new_place_keeps_its_group(self):
+        shots = self._shots(
+            ["warehouse_1", "warehouse_2", "street_1"],
+            [self.PLACE, self.PLACE, "Exterior, rain-soaked street, dawn."],
+        )
+
+        place_continuity_groups(shots)
+
+        self.assertEqual(
+            [shot["continuity_group"] for shot in shots],
+            ["warehouse_1", "warehouse_1", "street_1"],
+        )
+
+    def test_a_project_that_states_no_place_is_left_alone(self):
+        shots = self._shots(["warehouse_1", "warehouse_2"], ["", ""])
+
+        place_continuity_groups(shots)
+
+        self.assertEqual([shot["continuity_group"] for shot in shots], ["warehouse_1", "warehouse_2"])
+
+    def test_the_planner_calls_it_before_it_decides_the_strategy(self):
+        """The strategy and the blocking hand-off are both read from the group."""
+
+        with open(
+            os.path.join(_APP_DIR, "services", "director", "planners", "short_film.py"),
+            encoding="utf-8",
+        ) as handle:
+            source = handle.read()
+        body = source.split("def _prepare_h3_prompt_only_continuity", 1)[1]
+
+        self.assertLess(
+            body.index("place_continuity_groups(shot_dicts)"),
+            body.index("requested ="),
+        )
+
+
+class TheCameraSetupDecidesWhatIsCarriedTests(unittest.TestCase):
+    """A return to an earlier shot's setup resumes from that shot, not from its neighbour.
+
+    Measured on a real 17-shot project: within one uninterrupted warehouse the plan cycled
+    through ``Wide shot``, ``Hector's subjective POV``, ``Reaction shot`` and ``Close-up``, so
+    the POV came back at clips 2, 5, 6, 8, 9, 11 and 13. Handed only the shot immediately before
+    it, every one of those returns was composed from the character photographs again and
+    re-staged the tableau it had already left -- "avanzan tres centímetros y vuelven al mismo
+    loop desde ese otro punto".
+    """
+
+    def _plan(self, opening, strategy="continuous"):
+        return {
+            "environment": "Interior, one warehouse, night.",
+            "continuity_strategy": strategy,
+            "_director_opening_blocking": opening,
+        }
+
+    def test_the_setup_is_read_from_the_opening_label(self):
+        setups = shot_setups([
+            self._plan("Hector's subjective POV. Roman stands between her legs."),
+            self._plan("Reaction shot. Hector tightens his jaw."),
+            self._plan("Close-up. Aria's mouth opens."),
+        ])
+
+        self.assertEqual(
+            setups, ["hector's subjective pov", "reaction shot", "close up"],
+        )
+
+    def test_the_structured_camera_plan_wins_when_the_plan_has_one(self):
+        setups = shot_setups([{
+            "environment": "one warehouse",
+            "_director_opening_blocking": "Hector's subjective POV. Roman stands.",
+            "_director_camera_plan": {"framing": "medium close-up", "angle": "low"},
+        }])
+
+        self.assertEqual(setups, ["medium close-up low"])
+
+    def test_a_return_resumes_from_the_last_shot_of_that_setup(self):
+        plans = [
+            self._plan("Wide shot. Aria lies across the piano."),
+            self._plan("Hector's subjective POV. Roman steps in.", strategy="independent"),
+            self._plan("Reaction shot. Hector tightens his jaw.", strategy="independent"),
+            self._plan("Hector's subjective POV. Aria's legs open wider."),
+        ]
+
+        carries = carry_from_by_shot(plans)
+
+        # Clip 3 returns to the POV, and clip 2 is where that setup was last photographed --
+        # clip 3's own neighbour is the reaction shot, and it is the wrong composition.
+        self.assertEqual(carries, [None, None, None, 2])
+
+    def test_a_setup_kept_for_a_second_shot_resumes_from_its_neighbour(self):
+        plans = [
+            self._plan("Close-up. Aria speaks."),
+            self._plan("Close-up. Aria answers herself in a whisper."),
+            self._plan("Close-up. Aria holds still."),
+        ]
+
+        carries = carry_from_by_shot(plans)
+
+        # The ordinary continuation is the shot directly before, which is what the engine does
+        # when nothing is named.
+        self.assertEqual(carries, [None, 1, 2])
+
+    def test_a_shot_that_cuts_carries_nothing_even_on_a_return(self):
+        plans = [
+            self._plan("Close-up. Aria speaks."),
+            self._plan("Close-up. Aria holds still.", strategy="independent"),
+        ]
+
+        carries = carry_from_by_shot(plans)
+
+        self.assertEqual(carries, [None, None])
+
+    def test_a_shot_whose_setup_is_unstated_keeps_the_take_it_is_in(self):
+        plans = [
+            self._plan("Close-up. Aria speaks."),
+            self._plan(""),
+        ]
+
+        carries = carry_from_by_shot(plans)
+
+        # ``None`` is the ordinary rule -- resume from the shot directly before -- so an unstated
+        # setup needs no special case: the neighbour is already the right answer.
+        self.assertEqual(carries, [None, None])
+
+
+class TheEngineCarriesTheNamedClipTests(unittest.TestCase):
+    """The block that hands the frame over, lifted out of launch.py and run.
+
+    A name that only exists at module level is exactly what a lifted block cannot see, so the
+    receiving clip's own decision is read from the batch itself, and the frame it names is
+    reused rather than re-extracted.
+    """
+
+    def _omni_block(self):
+        """The whole hand-off, from the batch's own gate down to the reference it appends."""
+
+        import ast
+
+        tree = ast.parse(_launch_source())
+        return next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.If)
+            and "sequence_info.get('omni_sequence_continuity')" in ast.unparse(node.test)
+            and "carry_from" in ast.unparse(node)
+        )
+
+    def test_the_receiving_clip_owns_the_decision(self):
+        source = ast_unparse(self._omni_block())
+
+        self.assertIn("queue[task_idx + 1]", source)
+        self.assertIn("next_info.get('omni_sequence_continuity')", source)
+
+    def test_the_named_clip_supplies_the_frame(self):
+        source = ast_unparse(self._omni_block())
+
+        self.assertIn("next_info.get('carry_from') or task_no", source)
+        # The frame already on disk is reused: re-extracting would have to re-read the clip.
+        self.assertIn("if not os.path.isfile(continuity_path)", source)
+    def _run(self, carry_from, frames, fresh=True):
+        """Run the real block over a batch of three, and return the third clip's manifest."""
+
+        import ast
+
+        program = compile(
+            ast.Module(body=[self._omni_block()], type_ignores=[]),
+            "<queue omni handoff>", "exec",
+        )
+        namespace = {
+            "os": os, "is_multiclip": True, "total_tasks": 3, "task_idx": 1,
+            "task_no": 2, "job_id": "job", "_mc_model_def": {"fps": 24},
+            "omni_sequence_temp_files": [], "out_dir": frames,
+            "sequence_info": {"omni_sequence_continuity": True},
+        }
+        references = [{"type": "image", "path": os.path.join(frames, "aria.jpg"), "role": "Aria"}]
+        queue = [
+            {
+                "params": {
+                    "multi_clip_info": {"omni_sequence_continuity": True},
+                    "minimax_h3_references": list(references),
+                },
+                "prompt": "prompt of clip 1",
+            },
+            {
+                # The clip that just finished, and the only video this task registered.
+                "params": {
+                    "multi_clip_info": {"omni_sequence_continuity": True},
+                    "minimax_h3_references": list(references),
+                },
+                "prompt": "prompt of clip 2",
+            },
+            {
+                "params": {
+                    "multi_clip_info": {
+                        "omni_sequence_continuity": True, "carry_from": carry_from,
+                    },
+                    "minimax_h3_references": list(references),
+                },
+                "prompt": "Action: Aria waits.",
+            },
+        ]
+        namespace.update(
+            queue=queue,
+            task_files=[os.path.join(frames, "clip1.mp4")],
+        )
+        exec(program, namespace)
+        return queue[2]["params"]
+
+    def _frames(self, root, *names):
+        out_dir = os.path.join(root, "outputs", "prueba-2")
+        os.makedirs(out_dir, exist_ok=True)
+        Path(os.path.join(out_dir, "clip1.mp4")).touch()
+        for name in names:
+            Path(os.path.join(out_dir, name)).touch()
+        return out_dir
+
+    def test_a_return_reuses_the_named_clips_frame(self):
+        with tempfile.TemporaryDirectory() as root:
+            out_dir = self._frames(
+                root,
+                "_omni_sequence_continuity_job_1.png",
+                "_omni_sequence_continuity_job_2.png",
+            )
+
+            # Clip 3 returns to the setup clip 1 staged, while clip 2 is the shot just finished.
+            params = self._run(carry_from=1, frames=out_dir)
+            attached = [ref for ref in params["minimax_h3_references"] if ref.get("role", "").startswith("Maestro rolling")]
+
+            self.assertEqual(len(attached), 1)
+            self.assertTrue(attached[0]["path"].endswith("_omni_sequence_continuity_job_1.png"))
+
+    def test_the_clip_before_it_is_used_when_no_return_is_named(self):
+        with tempfile.TemporaryDirectory() as root:
+            out_dir = self._frames(
+                root,
+                "_omni_sequence_continuity_job_1.png",
+                "_omni_sequence_continuity_job_2.png",
+            )
+
+            params = self._run(carry_from=None, frames=out_dir)
+            attached = [ref for ref in params["minimax_h3_references"] if ref.get("role", "").startswith("Maestro rolling")]
+
+            self.assertEqual(len(attached), 1)
+            self.assertTrue(attached[0]["path"].endswith("_omni_sequence_continuity_job_2.png"))
+
+    def test_the_appended_frame_is_bound_in_the_prompt(self):
+        """The label reaches the prompt, so the model is told what the picture is for."""
+
+        with tempfile.TemporaryDirectory() as root:
+            out_dir = self._frames(root, "_omni_sequence_continuity_job_2.png")
+            import ast
+
+            program = compile(
+                ast.Module(body=[self._omni_block()], type_ignores=[]),
+                "<queue omni handoff>", "exec",
+            )
+            references = [{"type": "image", "path": os.path.join(out_dir, "aria.jpg")}]
+            prompt = (
+                "subject_definitions: <Subject 1> is Aria (S1).\n\n"
+                "retention_analysis: preserve her wardrobe.\n\n"
+                "detailed_description: [Shot 1] Action: Aria waits."
+            )
+            queue = [
+                {"params": {"multi_clip_info": {}}, "prompt": "a"},
+                {"params": {"multi_clip_info": {}}, "prompt": "b"},
+                {
+                    "params": {
+                        "multi_clip_info": {
+                            "omni_sequence_continuity": True, "carry_from": 2,
+                        },
+                        "minimax_h3_references": list(references),
+                        "prompt": prompt,
+                    },
+                    "prompt": prompt,
+                },
+            ]
+            namespace = {
+                "os": os, "is_multiclip": True, "total_tasks": 3, "task_idx": 1,
+                "task_no": 2, "job_id": "job", "_mc_model_def": {"fps": 24},
+                "omni_sequence_temp_files": [], "out_dir": out_dir, "queue": queue,
+                "task_files": [os.path.join(out_dir, "clip1.mp4")],
+                "sequence_info": {"omni_sequence_continuity": True},
+            }
+            exec(program, namespace)
+
+            updated = queue[2]["params"]["prompt"]
+            self.assertIn("<Picture 2>", updated)
+            self.assertIn("weak continuity reference", updated)
+
+    def test_a_clean_cut_is_handed_nothing(self):
+        with tempfile.TemporaryDirectory() as root:
+            out_dir = self._frames(root, "_omni_sequence_continuity_job_2.png")
+            import ast
+
+            program = compile(
+                ast.Module(body=[self._omni_block()], type_ignores=[]),
+                "<queue omni handoff>", "exec",
+            )
+            references = [{"type": "image", "path": os.path.join(out_dir, "aria.jpg")}]
+            queue = [
+                {"params": {"multi_clip_info": {}}, "prompt": "a"},
+                {"params": {"multi_clip_info": {}}, "prompt": "b"},
+                {
+                    "params": {
+                        "multi_clip_info": {"omni_sequence_continuity": False},
+                        "minimax_h3_references": list(references),
+                    },
+                    "prompt": "a new place",
+                },
+            ]
+            namespace = {
+                "os": os, "is_multiclip": True, "total_tasks": 3, "task_idx": 1,
+                "task_no": 2, "job_id": "job", "_mc_model_def": {"fps": 24},
+                "omni_sequence_temp_files": [], "out_dir": out_dir, "queue": queue,
+                "task_files": [os.path.join(out_dir, "clip1.mp4")],
+                "sequence_info": {"omni_sequence_continuity": True},
+            }
+            exec(program, namespace)
+
+            self.assertEqual(len(queue[2]["params"]["minimax_h3_references"]), 1)
+            self.assertEqual(queue[2]["prompt"], "a new place")
 
 
 if __name__ == "__main__":

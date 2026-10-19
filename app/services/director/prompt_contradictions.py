@@ -70,13 +70,27 @@ _DAY = ("daylight", "sunlight", "daytime", "at noon", "midday", "broad daylight"
 _NIGHT = ("midnight", "at night", "nighttime", "night scene", "moonlit", "moonlight")
 
 _WARDROBE = re.compile(
-    r"(?:wearing|wears|dressed in|wardrobe\s*:)\s*([^.;\n]{3,80})",
+    r"(?:wearing|wears|dressed in|wardrobe\s*:)\s*(?P<phrase>[^.;\n]{3,80})",
     re.IGNORECASE,
 )
 # Both forms a compiled prompt uses: the field's own "<Subject 2>" and the short "(S2)" tag the
 # prose writes beside a name. Measured: without the short tag, a garment worn by the speaker of a
 # later paragraph is charged to whoever the last <Subject n> happened to be.
 _SUBJECT = re.compile(r"<Subject\s*(\d+)>|\b(?:S|Subject)\s*(\d+)\b", re.IGNORECASE)
+
+# The person a Subject is bound to by name, in the dialects a prompt writes it:
+# "<Subject 1> is Aria (S1)", "<Subject 1> <S1> is ALWAYS <Aria>.", "<Subject 2> (S2) [Roman]:".
+# A cast list repeats the wardrobe without any tag beside it, and the tag that would be charged
+# instead is simply the last one in the prompt: measured on a real project, the three untagged
+# tables inside the shot body inherited `<Subject 3>` from the project's CHARACTERS AND BINDINGS
+# block, so Aria's red mini dress and Hector's charcoal suit jacket were reported as one Subject in
+# two outfits -- on all ten shots. The name is what tells them apart, so it is read. The capture is
+# case-sensitive on purpose, so "<Subject 4> is the environment" names nobody.
+_SUBJECT_NAMED_RE = re.compile(
+    r"<Subject\s*(\d+)>\s*(?:<\s*S\s*\d+\s*>|\(\s*S\s*\d+\s*\))?\s*"
+    r"(?:\bis\s+(?:ALWAYS\s+)?<?|\[\s*)"
+    r"([A-Z][A-Za-z\u00c0-\u024f'’-]{1,23})[>\]]?"
+)
 
 # What a phrase actually puts on a body, from a closed list, because two outfits are recognised by
 # the garments and not by the words: on 2156 real prompts, comparing the wording flagged "her silky
@@ -269,15 +283,44 @@ def _garment_phrase(text: str) -> str:
     return re.split(r",\s*(?:with|while|who)\b|\bwhile\b", limited, maxsplit=1)[0].strip()
 
 
+def _declared_subject_names(prompt: str) -> dict[str, int]:
+    """The person each Subject is bound to by name, as the prompt itself declares it."""
+
+    names: dict[str, int] = {}
+    for number, name in _SUBJECT_NAMED_RE.findall(prompt):
+        names.setdefault(name, int(number))
+    return names
+
+
+def _wardrobe_scan(prompt: str) -> tuple[re.Pattern, dict[str, int]]:
+    """The tags, the declared names and the wardrobe phrases, read in one left-to-right pass."""
+
+    names = _declared_subject_names(prompt)
+    alternatives = [_SUBJECT.pattern]
+    # The group is always present so the scan can ask for it by name, and it never matches
+    # when the prompt declares no names at all.
+    listed = "|".join(
+        re.escape(name) for name in sorted(names, key=len, reverse=True)
+    )
+    alternatives.append(rf"(?P<named>{listed or '(?!)'})")
+    alternatives.append(_WARDROBE.pattern)
+    return re.compile("|".join(alternatives)), names
+
+
 def _wardrobe(prompt: str) -> list[dict[str, str]]:
     outfits: dict[int, set[str]] = {}
     subject = 0
-    for match in re.finditer(rf"{_SUBJECT.pattern}|{_WARDROBE.pattern}", prompt, re.IGNORECASE):
+    scan, names = _wardrobe_scan(prompt)
+    for match in scan.finditer(prompt):
+        named = match.group("named")
+        if named:
+            subject = names[named]
+            continue
         number = match.group(1) or match.group(2)
         if number:
             subject = int(number)
         elif subject:
-            phrase = _garment_phrase(re.sub(r"\s+", " ", match.group(3)))
+            phrase = _garment_phrase(re.sub(r"\s+", " ", match.group("phrase")))
             if phrase:
                 outfits.setdefault(subject, set()).add(phrase.lower())
     mixed = {

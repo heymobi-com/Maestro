@@ -113,6 +113,35 @@ class SingleShotScopeTests(unittest.TestCase):
 
         self.assertNotIn("one continuous shot", summary.lower())
 
+    def test_the_summary_uses_shot_direction_not_the_global_project_context(self):
+        context = (
+            "SUBJECT LOCK (critical, non-negotiable):\n"
+            "- <Subject 1> is ALWAYS Aria.\n\n"
+            "DESCRIPTION:\n"
+            "Wide establishing tableau: Aria sits poised on the grand piano.\n\n"
+            "CLIP PLAN (hardware constraint — split into shots):\n\n"
+            "- <C01>: Aria sits poised on the piano.\n"
+        )
+        plan = _plan(
+            context,
+            prompt=(
+                "Story handoff: The opening tableau is still established across the full film. "
+                "Continuity state: Active objective: Establish the opening tableau. "
+                "Action: Hector steps closer to Aria and meets her gaze. "
+                "Lighting: A hard spotlight isolates the piano."
+            ),
+        )
+
+        compile_h3_clip_plans([plan], prompt_modes=["ref2va"], durations=[8.0])
+        summary = str(plan["video_prompt"]).split("summary:", 1)[1].split("\n", 1)[0]
+
+        self.assertIn("Hector steps closer to Aria", summary)
+        self.assertNotIn("Project context", summary)
+        self.assertNotIn("Wide establishing tableau", summary)
+        self.assertNotIn("Story handoff", summary)
+        self.assertNotIn("opening tableau", summary)
+        self.assertNotIn("<C01>", summary)
+
     def test_a_compiled_body_is_not_mistaken_for_a_storyboard(self):
         # The compiled Context-IR body marks its shot as "[Shot 1]", which must
         # not read as "this body contains several shots".

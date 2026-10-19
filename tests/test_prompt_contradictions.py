@@ -242,6 +242,42 @@ class WardrobeTests(unittest.TestCase):
         prompt = "wardrobe: a green dress.\n<Subject 1> wears a dark suit."
         self.assertNotIn("wardrobe-contradiction", codes(prompt, shot=1))
 
+    def test_a_cast_list_without_tags_is_charged_to_the_names_it_writes(self):
+        """Measured on a real project: the shot's own cast list inherited the last tag.
+
+        The project's CHARACTERS AND BINDINGS block ends with ``<Subject 3>``, so the three
+        untagged tables the shot repeats below it were all charged to Subject 3 -- and Aria's
+        vivid red mini dress, described again in that list, was reported as the same Subject
+        wearing Hector's charcoal suit jacket. On all ten shots of the project.
+        """
+
+        prompt = healthy(
+            subject_definitions=(
+                "<Subject 1> is Aria (S1): a woman. <Subject 2> is Roman (S2): a man. "
+                "<Subject 3> is Hector (S3): a man."
+            ),
+            extra=(
+                "CHARACTERS AND BINDINGS: <Subject 1> (S1) [Aria]; <Subject 2> (S2) [Roman]; "
+                "<Subject 3> (S3) [Hector]; identity comes from <Picture 3>. Visible cast: "
+                "Aria, a woman in her mid 20s, wearing a fitted vivid red mini dress; "
+                "Roman, a man in his late 30s, wearing a crisp white long-sleeve shirt; "
+                "Hector, a man in his late 50s, wearing a charcoal gray textured suit jacket."
+            ),
+        )
+
+        self.assertNotIn("wardrobe-contradiction", codes(prompt, shot=1))
+
+    def test_the_names_do_not_hide_a_real_contradiction(self):
+        """The measured shape is still caught when one Subject really is dressed twice."""
+
+        prompt = healthy(
+            subject_definitions="<Subject 1> is Aria (S1). <Subject 2> is Roman (S2).",
+            first="<Subject 1> wears a green dress.",
+            second="Aria, seen again later, wearing a white shirt and a leather vest.",
+        )
+
+        self.assertIn("wardrobe-contradiction", codes(prompt, shot=1))
+
     def test_layering_is_not_a_second_outfit(self):
         # A sweater under a blazer, a shirt under a suit, a coat over a dress: measured on real
         # prompts, each of these was reported as two outfits before the garments were compared.
