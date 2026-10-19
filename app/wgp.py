@@ -93,6 +93,7 @@ from shared import model_dropdowns
 from collections import defaultdict
 from services.job_lifecycle import call_with_sticky_interrupt
 from services.generation_memory import classify_memory_error, cleanup_failed_generation, log_generation_memory, release_auxiliary_models
+from services import tts_model_modes
 
 # import torch._dynamo as dynamo
 # dynamo.config.recompile_limit = 2000   # default is 256
@@ -963,7 +964,7 @@ def validate_settings(state, model_type, single_prompt, inputs):
     motion_amplitude = inputs["motion_amplitude"]
     self_refiner_setting = inputs["self_refiner_setting"]
     self_refiner_plan = inputs["self_refiner_plan"]
-    model_mode = inputs["model_mode"]
+    model_mode = tts_model_modes.settings_value(inputs["model_mode"], model_def)
     medium = "Videos" if image_mode == 0 else "Images"
 
     if (

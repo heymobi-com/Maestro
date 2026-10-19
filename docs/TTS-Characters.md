@@ -36,6 +36,31 @@ from KugelAudio to H3 retains the first two slots; switching to Chatterbox retai
 the first slot. A preset-only model clears cloning slots. Output **Load settings**
 restores selected character IDs, speaker names, original filenames, and references.
 
+### The language, and why a clone used to fail before it started
+
+Qwen3 Base, Voice Design and Chatterbox publish their languages in the model's own
+`model_mode` control (`auto`, `english`, `spanish`, ...). That control is model-owned, and what
+it holds depends on the model that declares it: YuE2's composition planner and the inpaint
+pickers write **numbers** into the same field, and the Studio keeps one parameter object across
+model switches.
+
+Measured on 16 October 2026: a YuE2 song was generated, voice cloning was then attempted with
+Qwen3 Base, and every attempt failed in about eight seconds with
+`AttributeError: 'int' object has no attribute 'lower'`. The song had left `model_mode = 2`, and
+Qwen3 reads that field as a language. Eight consecutive attempts failed that way, across Qwen3
+Base, Voice Design and CustomVoice.
+
+Two halves now prevent it (`app/services/tts_model_modes.py`): where settings are validated, a
+`model_mode` the model does not declare -- a leftover number, a language it cannot speak, a
+stringified number -- becomes the model's own default (`auto`, or the first supported speaker
+for CustomVoice), so the whole run sees the repaired value; and inside the Qwen3 pipeline the
+value is normalised at the line that reads it, so a caller that validated nothing degrades to
+that default instead of losing the attempt. A model whose control holds numbers is left alone,
+which is what makes the repair safe to run for every generation.
+
+In the panel: the clone therefore uses **auto** language detection (that picker is the model's
+own control, and auto is the safe answer for a script in any language).
+
 ## Save a character from Speech
 
 Choose **Save a new character**, enter its name, and select an image or video plus

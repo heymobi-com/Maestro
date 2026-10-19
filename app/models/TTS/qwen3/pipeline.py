@@ -18,6 +18,7 @@ from transformers.generation import StoppingCriteria, StoppingCriteriaList
 
 from mmgp import offload
 from shared.utils import files_locator as fl
+from services import tts_model_modes
 
 from .. import qwen3_handler as qwen3_defs
 from .core.models.configuration_qwen3_tts import Qwen3TTSConfig
@@ -693,6 +694,8 @@ class Qwen3TTSPipeline:
         self._interrupt = False
         self._early_stop = False
 
+        # Another family's number is not a language: normalise before anything reads it as text.
+        model_mode = tts_model_modes.text_value(model_mode)
         text = _read_text_or_file(input_prompt, "Prompt")
         if not text.strip():
             raise ValueError("Prompt text cannot be empty for Qwen3 TTS.")
