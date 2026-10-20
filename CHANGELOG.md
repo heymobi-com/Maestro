@@ -3,6 +3,50 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [3.1.0] - 2026-10-19
+
+Public Main and Dev release. See the
+[v3.1.0 release notes](docs/RELEASE_NOTES_V3.1.0.md).
+
+- Restore H3 VAE x2 downloads from a verified replacement Hugging Face
+  revision after the old file URLs started returning 404. Keep the same
+  checkpoint size/SHA-256 checks and reuse existing downloads.
+- Align MOSS enhancement with the official caption/layout guidance: compile
+  top-left pixel drafts in code, preserve literal text/comments and artist tags,
+  and add character, multi-panel and collage layout controls.
+- Support mixed-precision H3 checkpoint exports with retained FP32 I/O and
+  compressed AdaLN weights, preserving their precision during loading. Missing
+  SafeTensors QKV metadata now requests an explicit layout choice. Keep optional
+  Turbo LoRA schedules separate from the base recipe and respect negated sampler advice.
+- Restore H3 References compatibility with explicitly declared legacy speaker labels
+  and repeated speakers within a clip, sharing ownership rules between generation
+  and prompt enhancement. Keep independent Subject/voice numbering and reject
+  ambiguous bindings; stop treating shot and production labels as character names.
+- Repair Viggle Animate and Face Refiner downloads after the upstream Hugging
+  Face repository removed older revisions. Reuse existing cached files.
+- Preserve H3's decoded 8-bit pixels in Face Refiner instead of applying its
+  legacy floating-point conversion twice, which washed out refined faces.
+- Enable compatible FLUX 3 Klein LoRAs for Distilled and Base, including
+  native/Diffusers naming conversion and per-step multiplier schedules; restore
+  the existing LoRAs & presets controls for these models.
+- Add the Flux 3 Klein Civitai browser filter for Distilled and Base tags and
+  route supported Civitai/Hugging Face LoRA imports to the shared `flux3_klein` folder.
+- Add the MOSS Image Civitai filter and native LoRA imports for Base and SFT,
+  with per-step multiplier schedules during generation.
+- Recognize Civitai's explicit Krea 2 Turbo label for checkpoint imports and
+  LoRAs, retaining checkpoint layout validation and the correct Turbo recipe.
+  Interpret supported NVFP4 packed tensor dimensions using verified scale
+  descriptors instead of rejecting them as a mismatched architecture.
+- Release Recast timeline tracking arrays before generation after their mask,
+  reference and shot files are saved. Record SCAIL-2 placement/workload settings
+  and actionable host-memory diagnostics without changing generation defaults.
+- Add MOSS Image 5B Base and SFT with public, pinned BF16/INT8 ConvRot
+  downloads, native text conditioning and Euler sampling. Image Generate gains a
+  MOSS layout editor with centered-pixel boxes, exact text fields and a dedicated
+  canvas-aware prompt-enhancement guide. SFT is enabled once in the image picker;
+  Base is available through Manage models. These models generate from text and
+  layouts; they do not accept reference images or masks.
+
 ## [3.0.0] - 2026-10-18
 
 Public Main and Dev release. Supersedes the unreleased

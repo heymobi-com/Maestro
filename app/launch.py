@@ -3088,6 +3088,13 @@ CIVIT_TO_LOCAL_ARCH = {
     "Flux.2 Klein 9B-base": "flux2_klein_9b",
     "Flux.2 Klein 4B": "flux2_klein_4b",
     "Flux.2 Klein 4B-base": "flux2_klein_4b",
+    # CivitAI's exact LoRA-capable Flux 3 labels. Plain "Flux.3" is
+    # checkpoint-only on CivitAI; both Klein variants share the native handler.
+    "Flux.3 Klein": "flux3_klein",
+    "Flux.3 Klein-base": "flux3_klein",
+    # MOSS Base and SFT share the native image-transformer LoRA layout.
+    "MOSS Image": "moss_image",
+    "MOSS Image Base": "moss_image",
     # LTX — CivitAI splits LTX 1 (LTXV), LTX-2 (LTXV2), and LTX-2.3
     # (LTXV 2.3) into distinct baseModel values. LTX-2 and LTX-2.3
     # share the ltx2 architecture on disk; LTX 1 has its own ltxv dir.
@@ -3102,6 +3109,7 @@ CIVIT_TO_LOCAL_ARCH = {
     "Qwen 2": "qwen_image_21_7B",
     # Krea 2
     "Krea 2": "krea2",
+    "Krea 2 Turbo": "krea2",
     # Other
     "ZImageTurbo": "z_image",
     "Mochi": "mocha",
@@ -3186,6 +3194,10 @@ HF_BASE_TO_LOCAL_DIR = {
     "black-forest-labs/FLUX.1-dev": "flux",
     "black-forest-labs/FLUX.1-schnell": "flux",
     "black-forest-labs/FLUX.2-dev": "flux2_dev",
+    "black-forest-labs/flux-3-image-klein": "flux3_klein",
+    "black-forest-labs/flux-3-image-klein-base": "flux3_klein",
+    "OpenMOSS-Team/MOSS-Image-Base": "moss_image",
+    "OpenMOSS-Team/MOSS-Image-SFT": "moss_image",
     "Freepik/flux.2-klein-guidance-9b": "flux2_klein_9b",
     "Freepik/flux.2-klein-guidance-4b": "flux2_klein_4b",
     "tencent/HunyuanVideo": "hunyuan",
@@ -3237,9 +3249,14 @@ CIVITAI_MODEL_FILTERS = [
     {"label": "Flux.2 Dev", "civitai_base": "Flux.2 D", "default_dir": "flux2"},
     {"label": "Flux.2 Klein 9B", "civitai_base": "Flux.2 Klein 9B,Flux.2 Klein 9B-base", "default_dir": "flux2_klein_9b"},
     {"label": "Flux.2 Klein 4B", "civitai_base": "Flux.2 Klein 4B,Flux.2 Klein 4B-base", "default_dir": "flux2_klein_4b"},
+    # CivitAI lists Flux.3 Klein and Flux.3 Klein-base separately; combine
+    # both LoRA-capable variants. Plain Flux.3 is checkpoint-only there.
+    {"label": "Flux.3 Klein", "civitai_base": "Flux.3 Klein,Flux.3 Klein-base", "default_dir": "flux3_klein"},
+    {"label": "MOSS Image", "civitai_base": "MOSS Image,MOSS Image Base", "default_dir": "moss_image"},
     {"label": "Qwen", "civitai_base": "Qwen", "default_dir": "qwen"},
     {"label": "Qwen Image 2.1", "civitai_base": "Qwen 2", "default_dir": "qwen21"},
-    {"label": "Krea 2", "civitai_base": "Krea 2", "default_dir": "krea2"},
+    {"label": "Krea 2", "civitai_base": "Krea 2,Krea 2 Turbo", "default_dir": "krea2"},
+    {"label": "Krea 2 Turbo", "civitai_base": "Krea 2 Turbo", "default_dir": "krea2"},
     {"label": "ZImageTurbo", "civitai_base": "ZImageTurbo", "default_dir": "z_image"},
 ]
 
@@ -6636,6 +6653,7 @@ def get_model_options(model_type: str):
         "minimax_h3_video_vae_choices": md.get("minimax_h3_video_vae_choices"),
         "minimax_h3_video_vae_default": "auto",
         "flux3_prompt_helper": md.get("flux3_prompt_helper", False),
+        "moss_image_prompt_helper": md.get("moss_image_prompt_helper", False),
         "ltx25_video_vae_choices": md.get("ltx25_video_vae_choices"),
         "ltx25_video_vae_default": md.get(
             "ltx25_video_vae_default",
@@ -9272,6 +9290,9 @@ async def _llm_enhance_prompt_payload(body: dict):
     needs_flux3_image_guide = (
         model_type.lower().startswith("flux3") and generation_mode == "image"
     )
+    needs_moss_image_guide = (
+        model_type.lower().startswith("moss_image") and generation_mode == "image"
+    )
     try:
         requested_window_count = max(1, int(body.get("window_count") or 1))
     except (TypeError, ValueError):
@@ -9294,6 +9315,7 @@ async def _llm_enhance_prompt_payload(body: dict):
         and not needs_h3_context_ir
         and not needs_ltx_window_plan
         and not needs_flux3_image_guide
+        and not needs_moss_image_guide
     ):
         try:
             # Support both single image_path and array image_paths
@@ -9314,6 +9336,8 @@ async def _llm_enhance_prompt_payload(body: dict):
             )
         elif needs_flux3_image_guide:
             print("[Enhance] FLUX 3 uses native image captions and reference bindings; using Maestro's model-specific LLM guide")
+        elif needs_moss_image_guide:
+            print("[Enhance] MOSS Image uses native captions and centered-pixel layouts; using Maestro's model-specific LLM guide")
 
     # Use our local LLM service
     from services import llm_service
@@ -9391,6 +9415,7 @@ async def _llm_enhance_prompt_payload(body: dict):
             raw_enhancer_mode=raw_enhancer_mode,
             reference_context=body.get("reference_context"),
             planning_style=str(body.get("planning_style") or "faithful"),
+            resolution=body.get("resolution"),
         )
         if needs_ltx_window_plan:
             from services.ltx_window_planner import (
@@ -20798,6 +20823,28 @@ async def recast_endpoint(request: Request):
                         f"{shot_manifest['frame_count']} exact output frames "
                         f"at {shot_manifest['fps']:.6g}fps."
                     )
+                if mapped_tracking is not None:
+                    from services.recast_tracking_memory import (
+                        release_recast_tracking_arrays,
+                    )
+
+                    released_arrays = release_recast_tracking_arrays(
+                        mapped_tracking,
+                        mapping_anchors,
+                    )
+                    # These locals are NumPy views into the arrays released
+                    # above. _ensure_source_scene_reference is already done
+                    # for this job; clear its closure cells before generation.
+                    mapping_anchors = None
+                    probe_frame = None
+                    probe_mask = None
+                    scene_anchor_frame = None
+                    scene_anchor_mask = None
+                    if released_arrays:
+                        print(
+                            "[Recast] Released host timeline arrays after "
+                            "reference/shot preparation and before generation."
+                        )
         except Exception as e:
             traceback.print_exc()
             if shot_temp_dir and os.path.isdir(shot_temp_dir):
@@ -23536,12 +23583,18 @@ def _apply_per_job_performance(job, raw_params):
             definition["_checkpoint_files"] = wgp.get_local_model_filename(selected_file) or selected_file
         except Exception:
             pass
-        plan = build_performance_plan(_performance_hardware(), wgp.server_config, definition, params,
+        performance_hardware = _performance_hardware()
+        plan = build_performance_plan(performance_hardware, wgp.server_config, definition, params,
                                      job.get("vram_adjustment"), output_type=output, profile=profile, cli=cli,
                                      available_ram_gb=stats.get("ram", {}).get("available_gb"),
                                      external_vram_gb=(stats.get("gpu", {}).get("vram_used_gb", 0)
                                                        if getattr(wgp, "wan_model", None) is None else 0),
                                      own_pinned_gb=pinned, history=_get_performance_history())
+        preload_mode, preload = preload_for_output(
+            wgp.server_config,
+            wgp.args,
+            output,
+        )
         if plan["applied"]:
             if _BASE_TRANSFORMER_BUDGET_MB is None:
                 _BASE_TRANSFORMER_BUDGET_MB = original_budget
@@ -23552,7 +23605,6 @@ def _apply_per_job_performance(job, raw_params):
                 plan["transformer_budget_mb"] = int(getattr(wgp.args, "transformer_budget", 0) or 0)
             raw_params["override_profile"] = plan["profile"]
         else:
-            _, preload = preload_for_output(wgp.server_config, wgp.args, output)
             plan["transformer_budget_mb"] = preload or int(getattr(wgp.args, "transformer_budget", 0) or 0)
         # Attention grouping is independent of model placement. An explicit
         # profile may coexist with Auto-owned head splitting for this job.
@@ -23565,6 +23617,37 @@ def _apply_per_job_performance(job, raw_params):
         if getattr(wgp, "wan_model", None) is not None:
             if getattr(wgp.wan_model, "_maestro_performance_placement", None) != signature:
                 wgp.reload_needed = True
+        try:
+            from services.scail2_diagnostics import (
+                collect_scail2_performance_diagnostic,
+                format_scail2_performance_summary,
+            )
+            diagnostic = collect_scail2_performance_diagnostic(
+                wgp=wgp,
+                model_definition=definition,
+                params=params,
+                plan=plan,
+                hardware=performance_hardware,
+                live_stats=stats,
+                own_pinned_gb=pinned,
+                settings=wgp.server_config,
+                preload_mode=preload_mode,
+                manual_preload_mb=preload,
+            )
+            if diagnostic:
+                plan["scail2_diagnostic"] = diagnostic["summary"]
+                for warning in diagnostic["warnings"]:
+                    if warning not in plan["warnings"]:
+                        plan["warnings"].append(warning)
+                print(format_scail2_performance_summary(
+                    diagnostic["summary"],
+                ))
+        except Exception as diagnostic_error:
+            # Read-only diagnostics are best effort and never block a render.
+            print(
+                "[SCAIL-2 Performance] Diagnostic unavailable "
+                f"({type(diagnostic_error).__name__})."
+            )
         job["performance_plan"] = plan
         _last_performance_plan = plan
         split_label = {0: "Off", 1: "Low", 2: "Medium", 3: "High"}.get(plan.get("attention_head_split"), "unchanged")
