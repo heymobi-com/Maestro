@@ -5,8 +5,12 @@ const {
 module.exports = async (kernel) => {
   const runtime = runtimeProfile(kernel)
   const samReadyMarker = "app/services/sam/env/.maestro-sam-ready"
+  // The stamp answers the question that matters: was this environment built for THIS
+  // code? "Already up to date" only says the pull brought nothing, so a merge done
+  // outside Pinokio skipped every install step while the code needed them (measured:
+  // 3.0.0's three new pins and a new kernel installer).
   const alreadyCurrentAndReady =
-    `{{/already up[- ]to[- ]date/i.test(input.stdout) && exists('${runtime.marker}') && exists('${runtime.flashMarker}') && exists('ui/dist/index.html') && exists('ui/dist/assets') && (!exists('app/services/sam/env') || exists('${samReadyMarker}')) ? 'uptodate' : 'build'}}`
+    `{{/stamp-current/i.test(input.stdout) && exists('${runtime.marker}') && exists('${runtime.flashMarker}') && exists('ui/dist/index.html') && exists('ui/dist/assets') && (!exists('app/services/sam/env') || exists('${samReadyMarker}')) ? 'uptodate' : 'build'}}`
   return {
     run: [{
     // Pull the latest launcher + app code (single monorepo, so this one
@@ -20,15 +24,22 @@ module.exports = async (kernel) => {
       message: "git pull"
     }
   }, {
-    // Branch on the git pull output (captured here as input.stdout — a
+    // Ask what the environment was last built for; its token decides the jump below,
+    // and the script exits 0 either way so an unreadable stamp means "build".
+    method: "shell.run",
+    params: {
+      venv: runtime.env,
+      venv_python: runtime.python,
+      path: "app",
+      message: "python scripts/runtime_stamp.py --check"
+    }
+  }, {
+    // Branch on the stamp check above (its stdout is input.stdout here — a
     // shell.run always returns its raw terminal content as stdout):
-    //   - already current  -> jump to "uptodate" (log a notice, then end)
-    //   - new commits found -> jump to "build"   (run the full update)
-    // Matches both the modern "Already up to date" and the older git
-    // "Already up-to-date" spelling, case-insensitively. If detection
-    // ever fails (e.g. empty stdout), the regex simply won't match and
-    // we fall through to "build" — the safe default is a full update,
-    // never a wrongly-skipped rebuild.
+    //   - stamp-current -> jump to "uptodate" (log a notice, then end)
+    //   - stamp-stale   -> jump to "build"      (run the full update)
+    // A missing or unreadable stamp prints a "stamp-stale: …" reason, so the
+    // safe default is always a full update and never a wrongly-skipped rebuild.
     method: "jump",
     params: {
       // An already-current checkout still enters the build path when either
@@ -165,6 +176,16 @@ module.exports = async (kernel) => {
     method: "script.start",
     params: {
       uri: "sam_install.js"
+    }
+    }, {
+    // Every install step above succeeded, so record what this environment now
+    // satisfies; the check at the top compares against it next time.
+    method: "shell.run",
+    params: {
+      venv: runtime.env,
+      venv_python: runtime.python,
+      path: "app",
+      message: "python scripts/runtime_stamp.py --write"
     }
     }]
   }

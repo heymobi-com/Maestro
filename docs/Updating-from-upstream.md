@@ -61,6 +61,27 @@ git checkout main && git merge --ff-only v241-merge
 git push fork main
 ```
 
+### After the merge: the environment is not the code
+
+A merge advances the tree; it does not install anything. Pinokio's **Update** is what
+installs, and it no longer skips that when the environment is older than the code
+(`app/scripts/runtime_stamp.py` records the commit and the dependency manifests in
+`app/.maestro-runtime-stamp`). Two habits keep that honest:
+
+- **Run Update once after any merge**, with Maestro closed, and let it finish. The first run
+  after a fresh clone or an old install lands on the build path on purpose, because no stamp
+  exists yet.
+- **If the merge touched `app/requirements.txt`, `ui/package-lock.json` or the install
+  scripts**, check the environment before calling the merge done. A green battery proves
+  nothing about a stale environment:
+
+  ```bash
+  cd app
+  python -m pip list --disable-pip-version-check | grep -Ei '^(torch|triton|numpy|mmgp|optimum)'
+  PYTHONPATH=. python scripts/runtime_preflight.py   # kernel status of the launch runtime
+  python scripts/runtime_stamp.py --check           # stamp-current, or why it is stale
+  ```
+
 `scripts/upstream_update_guard.py` needs no arguments to check the ratchet:
 
 - a shared file carrying **more** of our lines than its budget is a failure:
