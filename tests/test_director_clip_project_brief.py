@@ -352,11 +352,11 @@ class TheBlockingDoesNotRepeatTheWardrobeTests(unittest.TestCase):
 
     WARDROBE = "a fitted red mini dress and black heels"
 
-    def _planned(self):
+    def _planned(self, *, spatial_setup: str | None = None):
         shots = [
             {
                 "continuity_group": "loft_1",
-                "spatial_setup": f"Shot {index + 1} opens on the same loft.",
+                **({"spatial_setup": spatial_setup} if spatial_setup is not None else {}),
                 "subjects_on_screen": [{
                     "speaker_name": "Aria",
                     "visual_description": "a woman with glossy shoulder-length curls",
@@ -375,6 +375,22 @@ class TheBlockingDoesNotRepeatTheWardrobeTests(unittest.TestCase):
         opening = prompt.split("OPENING CONTINUITY:", 1)[1]
 
         self.assertIn("Aria, positioned seated center on the piano bench", opening)
+        self.assertNotIn(self.WARDROBE, opening)
+
+    def test_a_stated_setup_is_the_frame_zero_blocking_instead_of_the_position(self):
+        """v3.1.0 owns the opening when the shot states its own setup.
+
+        ``position_or_relation`` frequently describes a pose later in the shot ("already
+        climbing the chest strap"), and writing it into the opening told the renderer the clip
+        starts mid-action -- the reported jump to the already-in-progress frame. The blocks still
+        carry no wardrobe, which is what this module exists for.
+        """
+
+        prompt = str(self._planned(spatial_setup="Shot 1 opens on the same loft.")[0]["video_prompt"])
+        opening = prompt.split("OPENING CONTINUITY:", 1)[1]
+
+        self.assertIn("Shot 1 opens on the same loft", opening)
+        self.assertNotIn("positioned seated center", opening)
         self.assertNotIn(self.WARDROBE, opening)
 
     def test_the_final_block_is_blocking_too(self):

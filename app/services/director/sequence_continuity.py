@@ -347,6 +347,12 @@ def carry_opening_into_closing(
             continue
         if previous.get("physical_state"):
             continue
+        # A closing the shot states itself is the authored arrangement; borrowing the next
+        # opening may only fill one that says nothing. Measured on a reviewed two-shot sequence:
+        # shot 1's "remains standing on the grass" was replaced by the next clip's setup, so the
+        # clip changed where it ended to match where the following one began.
+        if str(previous.get("closing_blocking") or "").strip():
+            continue
         next_opening = opening_blocking[index] if index < len(opening_blocking) else ""
         if next_opening:
             previous["closing_blocking"] = next_opening

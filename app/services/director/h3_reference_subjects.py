@@ -25,9 +25,46 @@ from __future__ import annotations
 import re
 from typing import Any, Callable, Mapping, Sequence
 
-__all__ = ["planner_subject_for_role"]
+__all__ = ["carry_identity_bindings", "planner_subject_for_role"]
 
 _SLOT_TYPE = tuple[int, str, str]
+
+
+def carry_identity_bindings(
+    dropped: Mapping[int, int],
+    definitions: Mapping[int, str],
+    field: str,
+) -> str:
+    """Remove the collapsed duplicates from ``field``, keeping their picture bindings.
+
+    ``dropped`` maps each duplicate's subject number to the survivor it was collapsed into.
+    Dropping an appended identity definition must not drop the reference it carried: upstream
+    rebuilds the definitions from the manifest, but a reviewed prompt our compiler passes through
+    verbatim keeps only the surviving line, so the picture ended up bound to nobody and the final
+    binding check refused the prompt. Measured on a reviewed "<Subject 2> is Northern Kingdom
+    Dragon ..." plus the appended "<Subject 3> ... come from <Picture 2>".
+    """
+
+    carried: dict[str, str] = {}
+    for duplicate, survivor in dropped.items():
+        tags = [
+            tag for tag in re.findall(r"<Picture\s+\d+>", definitions[duplicate], re.I)
+            if tag.casefold() not in definitions[survivor].casefold()
+        ]
+        if not tags:
+            continue
+        clause = "; facial, bodily, and character identity come from " + ", ".join(tags)
+        definition = definitions[survivor].rstrip()
+        carried[definition] = (
+            definition[:-1] + clause + "." if definition.endswith(".")
+            else definition + clause + "."
+        )
+    cleaned = field
+    for number in dropped:
+        cleaned = cleaned.replace(definitions[number], "", 1)
+    for original, updated in carried.items():
+        cleaned = cleaned.replace(original, updated, 1)
+    return cleaned
 
 
 def planner_subject_for_role(

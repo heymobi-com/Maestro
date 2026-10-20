@@ -20,7 +20,10 @@ from services.dialogue_timing import (
 )
 from services.director import audio_driven_transcript as _transcript
 from services.director import performance_expression as _expression
-from services.director.h3_reference_subjects import planner_subject_for_role
+from services.director.h3_reference_subjects import (
+    carry_identity_bindings,
+    planner_subject_for_role,
+)
 from services.director.h3_single_shot_times import strip_loose_cut_times
 from services.director.h3_subject_rows import (
     merge_subject_rows_for_the_same_speaker as _merge_subject_rows_for_the_same_speaker,
@@ -5075,9 +5078,8 @@ def _collapse_ref2va_compiler_identity_duplicates(
         return prompt
     surviving = [number for number in definitions if number not in replacements]
     renumbered = {number: index + 1 for index, number in enumerate(surviving)}
-    cleaned_field = field
-    for number in replacements:
-        cleaned_field = cleaned_field.replace(definitions[number], "", 1)
+    # Dropping a duplicate identity must not drop the reference it carried (see the helper).
+    cleaned_field = carry_identity_bindings(replacements, definitions, field)
     cleaned = prompt.replace(field, cleaned_field.strip(), 1)
     return re.sub(
         r"<Subject\s+(\d+)>",

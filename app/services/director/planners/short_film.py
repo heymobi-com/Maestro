@@ -4737,11 +4737,11 @@ def _prepare_h3_prompt_only_continuity(shot_dicts: list[dict]) -> list[dict]:
                 {**physical_state, "closing": []}, include_transitions=False,
             )
         elif spatial_setup:
-            # Ours: the setup is the frame-zero state and the positions still say who stands
-            # where inside it. Keeping both is what a hand-off to the next clip can name.
-            opening_detail = (
-                f"{spatial_setup}. {subjects_detail}" if subjects_detail else spatial_setup
-            )
+            # The setup is the frame-zero blocking, and ``position_or_relation`` often describes a
+            # later pose inside the shot ("on the Dragon's chest strap, climbing"). Appending it
+            # here told the renderer the clip STARTS mid-action, which is the reported jump to the
+            # already-in-progress frame; the static setup alone is the hand-off a next clip names.
+            opening_detail = spatial_setup
         else:
             opening_detail = subjects_detail
         raw["video_prompt"] = _insert_h3_visual_detail(
