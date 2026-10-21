@@ -233,7 +233,7 @@ export function DirectorH3Optimizations() {
         </div>
       )}
 
-      {turboOption && (
+      {turboOption && !fusedTurbo && (
         <div className={`rounded-lg border px-3 py-2.5 ${
           turboSelected
             ? 'border-accent-blue/50 bg-accent-blue/10'

@@ -15,6 +15,10 @@ import {
 } from '../lib/directorGalleryGroups'
 import { directorH3SlaEnabled, directorH3VedaEnabled, normalizeH3Attention } from '../lib/h3Attention'
 import {
+  isH3FusedTurboModel,
+  withoutBakedAccelerationAdapters,
+} from '../lib/h3Loras'
+import {
   modelOptionsForSelectedModel,
   sanitizeH3VaeUpsampling,
 } from '../lib/h3VaeUpsampling'
@@ -10913,6 +10917,22 @@ export const useStore = create<AppState>((set, get) => ({
     ) && get().params.input_video_strength !== 1.0) {
       get().setParam('input_video_strength', 1.0)
     }
+    if (isH3FusedTurboModel(modelType)) {
+      // Director keeps its LoRA selection per mode, so the previous model's
+      // acceleration adapter would otherwise travel into a checkpoint whose
+      // Turbo is already baked in, and the backend rejects the whole job.
+      const selected = get().savedLoraPerMode.video
+      const cleaned = withoutBakedAccelerationAdapters(selected)
+      if (cleaned && cleaned !== selected) {
+        get().directorSetLora(
+          'video',
+          cleaned.activated_loras,
+          cleaned.loras_multipliers,
+          cleaned.loraWeights,
+          cleaned.availableLoras,
+        )
+      }
+    }
     get().loadModelOptions(modelType)
     const current = get()
     if (
@@ -14856,7 +14876,11 @@ export const useStore = create<AppState>((set, get) => ({
             loraWeights: {},
             availableLoras: [],
           }
-        : savedLoraPerMode.video || {},
+        : (
+            isH3FusedTurboModel(selectedVideoModel, directorVideoOptions)
+              ? withoutBakedAccelerationAdapters(savedLoraPerMode.video)
+              : savedLoraPerMode.video
+          ) || {},
       video_spatial_upsampling: sanitizeH3VaeUpsampling(
         directorVideoSpatialUpsampling,
         directorVideoOptions,

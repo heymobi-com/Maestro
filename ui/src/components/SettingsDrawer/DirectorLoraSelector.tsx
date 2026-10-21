@@ -8,6 +8,7 @@ import { LoraDisplayNameEditor } from './LoraDisplayNameEditor'
 import type { LoraDates } from './LoraSelector'
 import type { LoraRecommendedWeights } from '../../types'
 import { getLoraDisplayName, getLoraSecondaryLabel, indexLoraDisplayNames, LORA_DISPLAY_NAME_CHANGED_EVENT, type LoraDisplayNameMap } from '../../lib/loraDisplayNames'
+import { isH3BakedAccelerationAdapter, isH3FusedTurboModel } from '../../lib/h3Loras'
 
 function phaseWeights(values: number[] | undefined, phases: number): number[] {
   return Array.from({ length: phases }, (_, index) => {
@@ -90,8 +91,15 @@ export function DirectorLoraSelector({ mode, modelType }: {
   modelType: string
 }) {
   const savedLora = useStore(s => s.savedLoraPerMode[mode])
+  const storeModelOptions = useStore(s => s.modelOptions)
   const directorSetLora = useStore(s => s.directorSetLora)
   const openBrowser = useStore(s => s.setLoraBrowserOpen)
+  // A checkpoint with Turbo fused into its transformer rejects acceleration
+  // adapters, so they must not be offered or submitted for it.
+  const fusedTurbo = isH3FusedTurboModel(
+    modelType,
+    storeModelOptions?.model_type === modelType ? storeModelOptions : null,
+  )
 
   const [availableLoras, setAvailableLoras] = useState<string[]>(savedLora?.availableLoras || [])
   const [activatedLoras, setActivatedLoras] = useState<string[]>(savedLora?.activated_loras || [])
@@ -138,15 +146,18 @@ export function DirectorLoraSelector({ mode, modelType }: {
       // Zero means no classifier-free guidance schedule (e.g. H3), not no
       // LoRA strength. Match Studio's minimum of one editable weight.
       const newPhases = Math.max(1, data.guidance_max_phases ?? 1)
-      setAvailableLoras(data.loras)
+      const selectable = fusedTurbo
+        ? data.loras.filter(name => !isH3BakedAccelerationAdapter(name))
+        : data.loras
+      setAvailableLoras(selectable)
       setPhases(newPhases)
       const saved = useStore.getState().savedLoraPerMode[mode]
       const selected = saved?.activated_loras || []
       const restored = restoreWeights(selected, saved?.loraWeights || {}, saved?.loras_multipliers)
-      const valid = selected.filter(name => data.loras.includes(name))
+      const valid = selected.filter(name => selectable.includes(name))
       const adjustedWeights = Object.fromEntries(valid.map(name => [name, phaseWeights(restored[name], newPhases)]))
       const multipliers = serializeDirectorLoraMultipliers(valid, adjustedWeights)
-      directorSetLora(mode, valid, multipliers, adjustedWeights, data.loras)
+      directorSetLora(mode, valid, multipliers, adjustedWeights, selectable)
       setActivatedLoras(valid)
       setLoraWeights(adjustedWeights)
       setLoading(false)
@@ -154,7 +165,7 @@ export function DirectorLoraSelector({ mode, modelType }: {
       if (!cancelled) { setAvailableLoras([]); setLoading(false) }
     })
     return () => { cancelled = true }
-  }, [modelType, mode, directorSetLora])
+  }, [modelType, mode, directorSetLora, fusedTurbo])
 
   // Load weight recommendations and guide status
   useEffect(() => {

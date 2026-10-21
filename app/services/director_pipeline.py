@@ -9060,6 +9060,69 @@ def _audit_prompts_before_generating(pid: str, clip_plans: list[dict]) -> None:
     print(f"{label} " + format_audit_report(audit, limit=5))
 
 
+def _strip_baked_acceleration_loras(
+    pid: str,
+    video_model: str,
+    video_loras: dict,
+    model_def: dict | None = None,
+) -> dict:
+    """Drop acceleration adapters a fused H3 checkpoint cannot stack.
+
+    Director keeps its LoRA selection per mode, not per model, so switching the
+    video model leaves the previous model's Turbo preset selected. The fused
+    checkpoints bake Turbo into the transformer and reject every acceleration
+    adapter, which failed all eight queued tasks at validation before any GPU
+    work ("Task 8 failed validation"). Only adapters the model's own policy
+    refuses are removed, the same stale-selection repair as the file-existence
+    filter beside this call, and the reason is recorded for the UI.
+    """
+
+    definition = model_def
+    if definition is None:
+        try:
+            definition = _wgp.get_model_def(video_model) or {}
+        except Exception:
+            definition = {}
+    activated = list(video_loras.get("activated_loras", []) or [])
+    if not definition.get("minimax_h3_fused_turbo") or not activated:
+        return video_loras
+    from models.minimax_h3.fused_turbo import fused_h3_lora_incompatibility
+
+    multipliers = (video_loras.get("loras_multipliers", "") or "").split()
+    kept: list[str] = []
+    kept_multipliers: list[str] = []
+    dropped: list[str] = []
+    for index, name in enumerate(activated):
+        try:
+            resolved = _wgp.resolve_lora_path(video_model, name)
+        except Exception:
+            resolved = name
+        if fused_h3_lora_incompatibility(resolved) is None:
+            kept.append(name)
+            if index < len(multipliers):
+                kept_multipliers.append(multipliers[index])
+        else:
+            dropped.append(os.path.basename(name))
+    if not dropped:
+        return video_loras
+    warning = (
+        f"Skipped {len(dropped)} acceleration LoRA(s) that {video_model} cannot "
+        f"stack because Turbo is already baked in: {dropped}."
+    )
+    print(f"[Pipeline {pid}] {warning}")
+    prior = _pipelines.get(pid, {}).get("lora_warnings", []) or []
+    _update_pipeline(pid, lora_warnings=[*prior, warning])
+    weights = video_loras.get("loraWeights") or {}
+    return {
+        "activated_loras": kept,
+        "loras_multipliers": " ".join(kept_multipliers),
+        "loraWeights": {
+            name: value for name, value in weights.items() if name in kept
+        },
+        "availableLoras": video_loras.get("availableLoras") or [],
+    }
+
+
 def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                           planned_clips: list[dict], clip_images: list[str],
                           clip_keyframes: Optional[list[list[str]]] = None,
@@ -9141,6 +9204,20 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
             fps = model_def["fps"]
     except Exception:
         pass
+
+    # A fused checkpoint bakes Turbo into its transformer and rejects every
+    # acceleration adapter. Director keeps its LoRA selection per mode, so
+    # switching the video model leaves the previous model's Turbo preset
+    # selected and every queued task fails validation before any GPU work.
+    # Drop only those adapters -- the same stale-selection repair as above --
+    # and record why, so a retry does not need the user to find the setting.
+    try:
+        video_loras = _strip_baked_acceleration_loras(
+            pid, video_model, video_loras, model_def,
+        )
+    except Exception as _e:
+        print(f"[Pipeline {pid}] Fused Turbo LoRA filter skipped: {_e}")
+
     _normalize_director_media_strengths(params, model_def=model_def)
     video_params = dict(params.get("video_params") or {})
     director_strategy = video_strategy(model_def)

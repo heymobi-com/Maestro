@@ -252,6 +252,56 @@ class TestFusedH3Definitions(unittest.TestCase):
                 body["activated_loras"].append("MiniMax-H3-FL2VA-Acc-8Step.safetensors")
                 self.assertIn("cannot use", family_handler.validate_generative_settings(architecture, md, body))
 
+    def test_a_model_switch_drops_the_previous_models_turbo_adapter(self):
+        """Director keeps LoRAs per mode; the fused checkpoint refuses them.
+
+        Measured on a real run: the video model was switched to
+        ``minimax_h3_ref2va_fused_turbo`` while the previous model's Turbo preset
+        stayed selected, and all eight queued tasks failed validation before any
+        GPU work ("Task 8 failed validation").
+        """
+
+        from services.director_pipeline import _strip_baked_acceleration_loras
+
+        blob = {
+            "activated_loras": [
+                "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+                "character.safetensors",
+                "MiniMax-H3-Ref2VA-Acc-8Step.safetensors",
+            ],
+            "loras_multipliers": "1.00 0.35 1.00",
+            "loraWeights": {
+                "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors": [1],
+                "character.safetensors": [0.35],
+                "MiniMax-H3-Ref2VA-Acc-8Step.safetensors": [1],
+            },
+            "availableLoras": ["character.safetensors"],
+        }
+
+        cleaned = _strip_baked_acceleration_loras(
+            "test", "minimax_h3_ref2va_fused_turbo", blob,
+            {"minimax_h3_fused_turbo": True},
+        )
+
+        self.assertEqual(cleaned["activated_loras"], ["character.safetensors"])
+        self.assertEqual(cleaned["loras_multipliers"], "0.35")
+        self.assertEqual(cleaned["loraWeights"], {"character.safetensors": [0.35]})
+
+    def test_a_non_fused_model_keeps_the_users_selection(self):
+        from services.director_pipeline import _strip_baked_acceleration_loras
+
+        blob = {
+            "activated_loras": ["minimax_h3_turbo_v4_step600_ema.safetensors"],
+            "loras_multipliers": "1.00",
+            "loraWeights": {"minimax_h3_turbo_v4_step600_ema.safetensors": [1]},
+            "availableLoras": ["minimax_h3_turbo_v4_step600_ema.safetensors"],
+        }
+
+        self.assertIs(
+            _strip_baked_acceleration_loras("test", "minimax_h3_ref2va", blob, {}),
+            blob,
+        )
+
     def test_attribution_and_ui_contracts_are_present(self):
         notice = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
         ui = (
