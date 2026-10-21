@@ -14,6 +14,7 @@ import re
 from typing import Any, Iterable, Optional, Sequence
 
 from .h3_dialogue import h3_dialogue_tag
+from .h3_field_layout import restore_h3_field_layout
 
 
 LONG_FORM_STORY_BIBLE_REVISION = 2
@@ -1480,7 +1481,9 @@ def sanitize_long_form_shot_dicts(
                     prompt,
                     flags=re.IGNORECASE,
                 )
-            shot[field] = re.sub(r"\s+", " ", prompt).strip()
+            shot[field] = restore_h3_field_layout(
+                re.sub(r"\s+", " ", prompt).strip()
+            )
         cleaned_windows: list[Any] = []
         for prompt in shot.get("window_prompts") or []:
             if not isinstance(prompt, str):
@@ -1513,7 +1516,9 @@ def sanitize_long_form_shot_dicts(
                     prompt,
                     flags=re.IGNORECASE,
                 )
-            cleaned_windows.append(re.sub(r"\s+", " ", prompt).strip())
+            cleaned_windows.append(restore_h3_field_layout(
+                re.sub(r"\s+", " ", prompt).strip()
+            ))
         if "window_prompts" in shot:
             shot["window_prompts"] = cleaned_windows
         if unsupported_subjects:

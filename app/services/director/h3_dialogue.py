@@ -25,6 +25,7 @@ from services.director.h3_reference_subjects import (
     planner_subject_for_role,
 )
 from services.director.h3_single_shot_times import strip_loose_cut_times
+from services.director.h3_field_layout import restore_h3_field_layout
 from services.director.h3_subject_rows import (
     merge_subject_rows_for_the_same_speaker as _merge_subject_rows_for_the_same_speaker,
     split_multi_speaker_subject_rows as _split_multi_speaker_subject_rows,
@@ -5802,7 +5803,7 @@ def compile_h3_official_prompt(
         raise H3DialogueContractError(f"Unknown MiniMax H3 prompt mode: {mode}")
     # Repair a corrupted fragment from another script that a planner glued into
     # the middle of a Latin word, before it is copied into any field.
-    prompt = repair_glued_foreign_script(prompt)
+    prompt = restore_h3_field_layout(repair_glued_foreign_script(prompt))
     registry = speaker_registry if isinstance(speaker_registry, Mapping) else {}
     reviewed_definitions: dict[int, str] = {}
     if mode == "ref2va":
@@ -6749,7 +6750,12 @@ def compile_h3_clip_plans(
             # line could no longer be resolved ('MiniMax H3 Omni could not
             # determine which referenced character speaks ...'). Their text is
             # authoritative, so it is used as the prompt instead of as input.
-            prompt = str(source_prompt)
+            #
+            # A shot repair collapses whitespace across the whole prompt, which
+            # also deletes the boundaries between the six fields; the renderer
+            # reads the cast from a line-anchored subject_definitions and refused
+            # every line of a flattened prompt. The layout is restored here.
+            prompt = restore_h3_field_layout(str(source_prompt))
             required = _h3_plan_context_anchors(plan)
             if required:
                 anchored = _ensure_h3_prompt_anchors(prompt, required)
