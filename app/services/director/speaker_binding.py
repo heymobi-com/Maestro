@@ -463,7 +463,7 @@ def cast_section_for_prompt(
     planner reads and the voice chosen for a label come from the same statement.
     """
 
-    from ..voice_gender import declared_gender_for_labels
+    from .voice_gender import declared_gender_for_labels
 
     vocabulary = dict(vocabulary or {})
     if not vocabulary:

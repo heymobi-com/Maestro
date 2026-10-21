@@ -17,6 +17,7 @@ from services.director.speaker_binding import (  # noqa: E402
     SPEAKER_LABEL_RULES,
     bind_dialogue_speakers,
     canonical_speaker_label,
+    cast_section_for_prompt,
     cast_vocabulary,
     describe_cast,
     format_speaker,
@@ -460,6 +461,18 @@ class TestRealProjectRegression(unittest.TestCase):
         self.assertTrue(labels.issubset(set(order.values())))
         for label in labels:
             self.assertRegex(label, r"^\(S\d+\)$")
+
+
+class TestCastSectionImport(unittest.TestCase):
+    def test_cast_section_renders_inside_the_director_package(self):
+        # The gender helper is imported lazily, so only this call proves the cast block
+        # can resolve it; a wrong relative import surfaces as a startup failure mid-run.
+        section = cast_section_for_prompt(
+            "Ana is a woman and Luis is a man.",
+            {"(S1)": "Ana", "(S2)": "Luis"},
+        )
+        self.assertIn("(S1) Ana", section)
+        self.assertIn("(S2) Luis", section)
 
 
 if __name__ == "__main__":
