@@ -5489,12 +5489,73 @@ def _h3_body_subject_bindings(body: str) -> dict[int, str]:
     return bindings
 
 
+_REF2VA_ROLE_SPEAKER_RE = re.compile(r"\(\s*S\s*(\d+)\s*\)", re.IGNORECASE)
+
+
+def _ref2va_reference_speaker_pairings(
+    references: Sequence[Mapping[str, Any]] | None,
+    subjects: Sequence[Any] | None,
+    dialogue_beats: Sequence[Any] | None,
+) -> dict[int, str]:
+    """The ``(Sx)`` each Subject already has a statement for, as ``{slot: "S2"}``.
+
+    A reference role is authored by the user and may state the label beside the name
+    ("Valeria (S1)"). The renderer only accepts a bare ``(Sx)`` cue when the prompt's
+    definitions pair it with a Subject, and a plan whose rows carry names but no labels
+    produced neither -- so three spoken lines could not be attributed at all.
+
+    When exactly one participant is left unlabelled and exactly one speaker label used by
+    the clip is left unclaimed, that is the remaining pairing. Anything less certain is
+    left unsaid: the renderer refuses a guess rather than hand a line to the wrong voice.
+    """
+
+    subjects = list(subjects or [])
+    slots = [
+        _planner_subject_slot(subject, position)[0]
+        for position, subject in enumerate(subjects, start=1)
+    ]
+    pairings: dict[int, str] = {}
+    conflicts: set[int] = set()
+    for reference in references or []:
+        role = _normalized_space(_field(reference, "role", ""))
+        match = _REF2VA_ROLE_SPEAKER_RE.search(role)
+        if not match:
+            continue
+        index = _mapped_ref2va_subject(role, subjects)
+        if index is None:
+            continue
+        slot = slots[index]
+        stated = f"S{int(match.group(1))}"
+        if slot in pairings and pairings[slot] != stated:
+            conflicts.add(slot)
+            continue
+        pairings[slot] = stated
+    for slot in conflicts:
+        pairings.pop(slot, None)
+
+    used: set[int] = set()
+    for beat in dialogue_beats or []:
+        match = re.fullmatch(
+            r"\(\s*S(\d+)\s*\)",
+            _normalized_space(_field(beat, "speaker_id", "")),
+            re.IGNORECASE,
+        )
+        if match:
+            used.add(int(match.group(1)))
+    unclaimed = sorted(used - {int(value[1:]) for value in pairings.values()})
+    unlabelled = [slot for slot in slots if slot not in pairings]
+    if len(unlabelled) == 1 and len(unclaimed) == 1:
+        pairings[unlabelled[0]] = f"S{unclaimed[0]}"
+    return pairings
+
+
 def _ref2va_subject_definitions(
     subjects: Sequence[Any],
     registry: Mapping[str, Any],
     source_bindings: Mapping[int, Sequence[str]] | None = None,
     body: str = "",
     project_context: str = "",
+    speaker_pairings: Mapping[int, str] | None = None,
 ) -> list[str]:
     """Emit one definition per participant, numbered as the project numbers them.
 
@@ -5509,6 +5570,7 @@ def _ref2va_subject_definitions(
     """
 
     source_bindings = source_bindings or {}
+    speaker_pairings = speaker_pairings or {}
     body_bindings = _h3_body_subject_bindings(body)
     lock = project_subject_lock(project_context)
     rows: list[dict[str, Any]] = []
@@ -5528,8 +5590,11 @@ def _ref2va_subject_definitions(
             _speaker_registry_entry(registry, character_id or speaker_name)
             or _speaker_registry_entry(registry, name)
         )
-        speaker = body_bindings.get(slot) or (
-            entry[0].strip("()") if entry and entry[0] else inline_speaker
+        speaker = (
+            body_bindings.get(slot)
+            or (entry[0].strip("()") if entry and entry[0] else "")
+            or speaker_pairings.get(slot, "")
+            or inline_speaker
         )
         # Maestro writes "<Subject N>" itself, so a copy left in the planner's
         # description would duplicate it, and a corrupted label such as
@@ -5866,6 +5931,11 @@ def compile_h3_official_prompt(
             subject_sources,
             body=body,
             project_context=project_context,
+            speaker_pairings=_ref2va_reference_speaker_pairings(
+                references if mode == "ref2va" else None,
+                subjects or [],
+                dialogue_beats,
+            ),
         )
         for index, reviewed in reviewed_definitions.items():
             missing_sources = [

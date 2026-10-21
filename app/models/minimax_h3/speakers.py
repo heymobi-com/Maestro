@@ -776,8 +776,11 @@ _REF2VA_SUBJECT_DEFINITIONS_RE = re.compile(
     r"integrated_multimodal_description|overall_soundscape|"
     r"non_diegetic_music)\s*:|\Z)"
 )
+# The compiler writes the identity first and the label after it -- "<Subject 1> is
+# Valeria (S1)" -- while a planner-authored head puts the label directly beside the tag.
+# Reading only the latter shape left the declared speaker unproven in compiled prompts.
 _REF2VA_SUBJECT_MARKER_RE = re.compile(
-    r"<Subject\s+(\d+)>\s*\(S(\d+)\)", re.IGNORECASE,
+    r"<Subject\s+(\d+)>\s*(?:is\s+[^\n()<>.;]{1,80}?)?\s*\(S(\d+)\)", re.IGNORECASE,
 )
 _REF2VA_SPEAKER_MARKER_RE = re.compile(r"\(S(\d+)\)", re.IGNORECASE)
 _REF2VA_CLIP_HEADING_RE = re.compile(

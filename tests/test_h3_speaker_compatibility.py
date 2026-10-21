@@ -17,6 +17,7 @@ from models.minimax_h3.speakers import (
     _resolve_ref2va_dialogue_owner_name,
     resolve_ref2va_dialogue_owners,
 )
+from services.director.h3_dialogue import compile_h3_official_prompt
 
 
 REFERENCES = [
@@ -228,6 +229,58 @@ class H3SpeakerCompatibilityTests(unittest.TestCase):
         paths = [item["path"] for item in scoped]
         self.assertIn("sam.wav", paths)
         self.assertNotIn("alex.wav", paths)
+
+
+    def test_compiled_definitions_pair_each_label_so_bare_cues_resolve(self):
+        """A names-only cast must still declare which Subject owns each ``(Sx)``.
+
+        Measured on Director short-film-audio: the planner wrote the participants as
+        "Valeria (woman in navy blazer)" and "Ricardo (man in grey sweater)", the reference
+        role named Valeria as (S1), and every spoken line compiled to "(S2) speaks ...".
+        No definition paired a label with a Subject, so the renderer refused the whole
+        shot with "could not determine which referenced character speaks".
+        """
+
+        subjects = [
+            {
+                "visual_description": "Valeria (woman in navy blazer, white top)",
+                "position_or_relation": "foreground left",
+            },
+            {
+                "visual_description": "Ricardo (man in grey crewneck sweater, glasses)",
+                "position_or_relation": "foreground right",
+            },
+        ]
+        references = [
+            {"type": "image", "role": "Valeria (S1)", "image_intent": "identity"},
+            {"type": "audio", "role": "Valeria (S1)", "audio_intent": "voice"},
+            {"type": "image", "role": "Ricardo", "image_intent": "identity"},
+            {"type": "audio", "role": "Ricardo", "audio_intent": "voice"},
+        ]
+        prompt, _ = compile_h3_official_prompt(
+            "Valeria (woman in navy blazer) and Ricardo (man in grey sweater) stand on a "
+            "rooftop terrace at night, facing each other.",
+            subjects,
+            [
+                {"speaker_id": "(S2)", "spoken_text": "Entonces la torre habrá ganado."},
+                {"speaker_id": "(S1)", "spoken_text": "Aún así quiero intentarlo."},
+            ],
+            mode="ref2va",
+            references=references,
+            default_language="Spanish",
+        )
+
+        self.assertIn("<Subject 1> is Valeria (S1)", prompt)
+        self.assertIn("<Subject 2> is Ricardo (S2)", prompt)
+        self.assertEqual(
+            resolve_ref2va_dialogue_owners(
+                prompt,
+                dialogue_spans(prompt),
+                {"valeria": 1, "ricardo": 2},
+                {1, 2},
+            ),
+            [(2, ""), (1, "")],
+        )
 
 
 if __name__ == "__main__":
