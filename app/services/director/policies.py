@@ -117,12 +117,16 @@ def format_dialogue_for_video(shot: ShotPlan, plan: Optional[ProductionPlan] = N
 
     lines = []
     for beat in shot.dialogue_beats:
-        # Build speaker description
+        # Build speaker description. A beat keyed by a speaker label such as
+        # "(S1)" has no character profile, and naming that speaker "a person"
+        # loses the only binding the line has.
         speaker_desc = "a person"
-        if beat.speaker_id and plan:
-            char = plan.get_character(beat.speaker_id)
+        if beat.speaker_id:
+            char = plan.get_character(beat.speaker_id) if plan else None
             if char:
                 speaker_desc = describe_character(char, include_wardrobe=False)
+            elif str(beat.speaker_id).strip():
+                speaker_desc = str(beat.speaker_id).strip()
 
         # Build the line
         parts = [f'{speaker_desc} says "{beat.spoken_text}"']

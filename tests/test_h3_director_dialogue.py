@@ -164,6 +164,53 @@ class TestH3DirectorDialogueCompiler(unittest.TestCase):
         self.assertNotIn("<d><d>", compiled)
         self.assertEqual(validate_h3_vocal_contract(compiled, self.beats[:1]), [])
 
+    def test_renderer_quoted_dialogue_is_removed_once_exact_lines_are_tagged(self):
+        source = (
+            "STYLE: cinematic | ACTION: Joey leans in. | "
+            'DIALOGUE: a person says "So, when Chandler tried to cook that '
+            'thing?", casual and exaggerated. a person says "It was not mush, '
+            'Joey.", sharp. | CAMERA: subtle push-in | ENDING: freeze frame.'
+        )
+
+        compiled, _ = compile_h3_official_prompt(
+            source, self.subjects, self.beats, mode="t2va",
+        )
+
+        visual = compiled.split("integrated_multimodal_description:", 1)[1]
+        visual = visual.split("overall_soundscape:", 1)[0]
+        self.assertNotIn("a person says", visual.casefold())
+        self.assertNotIn("DIALOGUE:", visual)
+        self.assertIn("ACTION: Joey leans in.", visual)
+        self.assertIn("CAMERA: subtle push-in", visual)
+        self.assertEqual(visual.count("So, when Chandler tried to cook"), 1)
+        self.assertEqual(visual.count("It was not mush, Joey."), 1)
+        self.assertEqual(
+            validate_h3_prompt_contract(
+                compiled, self.beats, mode="t2va", subjects=self.subjects,
+            ),
+            [],
+        )
+
+    def test_renderer_quoted_dialogue_is_removed_from_a_silent_shot(self):
+        source = (
+            'ACTION: Joey leans in. | DIALOGUE: a person says "Not in this '
+            'shot.", casual. | CAMERA: subtle push-in'
+        )
+
+        compiled, _ = compile_h3_official_prompt(
+            source, self.subjects, [], mode="t2va",
+        )
+
+        self.assertNotIn("a person says", compiled.casefold())
+        self.assertNotIn("Not in this shot", compiled)
+        self.assertIn("No character speaks", compiled)
+        self.assertEqual(
+            validate_h3_prompt_contract(
+                compiled, [], mode="t2va", subjects=self.subjects,
+            ),
+            [],
+        )
+
     def test_missing_tags_are_inserted_when_beat_words_are_not_in_prompt(self):
         prompt = (
             "A tense exchange unfolds in a small apartment kitchen. "

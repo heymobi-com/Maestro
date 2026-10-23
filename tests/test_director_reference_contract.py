@@ -101,6 +101,46 @@ class DirectorReferenceContractTests(unittest.TestCase):
         self.assertIn('<Subject 2> is Dragon', prompt)
         self.assertNotIn('<Subject 3>', prompt)
 
+    def test_unpaired_action_subject_uses_project_subject_lock(self):
+        project_context = (
+            'SUBJECT LOCK: <Subject 1> is ALWAYS Valeria. '
+            '<Subject 2> is ALWAYS Ricardo.'
+        )
+        prompt, _ = compile_h3_official_prompt(
+            '[Shot 1] <Subject 1> Valeria looks toward <Subject 2> Ricardo.',
+            [{'speaker_name': 'Valeria', 'visual_description': 'Valeria in a blue suit.'}],
+            [],
+            mode='ref2va',
+            project_context=project_context,
+        )
+        self.assertIn('<Subject 2> is Ricardo', prompt)
+        self.assertEqual(
+            validate_h3_prompt_contract(
+                prompt, mode='ref2va', subjects=self.subjects[:1],
+            ),
+            [],
+        )
+
+    def test_identity_picture_bound_to_an_undefined_slot_still_defines_it(self):
+        subjects = [{'speaker_name': 'young woman', 'visual_description': 'the young woman in navy blazer'}]
+        refs = [
+            {'type': 'image', 'role': 'Valeria (S1), the young woman', 'image_intent': 'identity'},
+            {'type': 'image', 'role': 'Ricardo (S2), the mature man', 'image_intent': 'identity'},
+        ]
+        project_context = (
+            'SUBJECT LOCK (critical, non-negotiable): '
+            '<Subject 1> is ALWAYS <Valeria>. <Subject 2> is ALWAYS <Ricardo>.'
+        )
+        prompt, _ = compile_h3_official_prompt(
+            'The young woman leans toward the man.', subjects, [],
+            mode='ref2va', references=refs, project_context=project_context,
+        )
+        self.assertIn('<Subject 2> is Ricardo', prompt)
+        self.assertEqual(
+            validate_h3_prompt_contract(prompt, mode='ref2va', subjects=subjects, references=refs),
+            [],
+        )
+
     def test_validator_rejects_duplicate_reference_identity(self):
         prompt, _ = compile_h3_official_prompt('Kitten rides Dragon.', self.subjects, [], mode='ref2va', references=self.refs)
         broken = prompt.replace('summary:', '<Subject 3> is Kitten from <Picture 1>.\n\nsummary:', 1)

@@ -176,6 +176,24 @@ _H3_TIMED_SHOT_MARKER_RE = re.compile(
     + r"\b)",
     re.IGNORECASE,
 )
+
+# The LTX-style renderers write a shot's lines as quoted prose
+# (``DIALOGUE: a person says "..."``) before the compiler emits the exact tagged
+# block. A second, unlabelled copy of every line lets the model follow the copy
+# that names no speaker, which is how a line lands on the wrong voice.
+_H3_PLANNER_DIALOGUE_FIELD_RE = re.compile(
+    r"(?i)(?:^|(?<=[\s|;]))\s*DIALOGUE\s*:\s*(?P<content>.*?)"
+    r"(?=\s*(?:[|;]\s*)?(?:STYLE|ACTION|PERFORMANCE|CAMERA|ENDING|AUDIO|"
+    r"SOUNDSCAPE|SETTING|LIGHTING|MOOD)\s*:|$)",
+    re.DOTALL,
+)
+# Anchored to the start of the section on purpose: the compiler's own canonical
+# sentence (``Dialogue: Valeria (S1) speaks ... <d>...</d>``) must never match.
+_H3_QUOTED_SPEECH_RE = re.compile(
+    r"(?i)^\s*[\w'’.-]+(?:\s+[\w'’.-]+){0,5}\s+"
+    r"(?:says?|said|speaks?|spoke|asks?|replies?|answers?|whispers?|"
+    r"shouts?|yells?|calls?|utters?|recites?|tells?)\s*[:,—–-]?\s*[\"“]"
+)
 _H3_SHOT_MARKER_RE = re.compile(r"\[Shot\s+(?P<number>\d+)\]", re.IGNORECASE)
 _H3_SHOT_REFERENCE_PREFIX_RE = re.compile(
     r"\b(?:throughout|during|within|from|appears\s+in)\s*$",
@@ -883,6 +901,40 @@ def _strip_music_mentions_from_soundscape(
         ):
             kept.append(clause)
     return ", ".join(kept)
+
+
+def _strip_planner_quoted_dialogue(value: Any) -> str:
+    """Remove the renderer's quoted ``DIALOGUE: ... says "..."`` prose.
+
+    Structured beats are compiled separately into the canonical tagged block.
+    Keeping the quoted copy states every line twice, and the copy that reads
+    "a person says" names no participant, so the generator can bind the line to
+    the wrong speaker.
+    """
+
+    text = str(value or "")
+    if "dialogue:" not in text.casefold():
+        return text
+    pieces: list[str] = []
+    cursor = 0
+    removed = False
+    for match in _H3_PLANNER_DIALOGUE_FIELD_RE.finditer(text):
+        # Only a section that actually quotes speech is the renderer's
+        # dialogue field; project context can legitimately contain the word.
+        if not _H3_QUOTED_SPEECH_RE.match(match.group("content")):
+            continue
+        pieces.append(text[cursor:match.start()])
+        cursor = match.end()
+        removed = True
+    if not removed:
+        return text
+    pieces.append(text[cursor:])
+    text = " ".join(pieces)
+    text = re.sub(r"^\s*(?:\|\s*)+", "", text)
+    text = re.sub(r"(?:\s*\|\s*)+$", "", text)
+    text = re.sub(r"(?:\s*\|\s*){2,}", " | ", text)
+    text = re.sub(r"\s+([,.;:])", r"\1", text)
+    return _normalized_space(text)
 
 
 def _strip_forbidden_dialogue_blocks(value: Any) -> str:
@@ -4555,6 +4607,10 @@ def _compile_official_dialogue(
     # recognize as a speaker mark; render every label with parentheses, and
     # drop corrupted <Subject ...> tags while keeping Maestro's own labels.
     body = _clean_malformed_subject_tags(_normalize_speaker_brackets(body))
+    # A line exists in H3 only inside a tagged block. The renderers also write
+    # each line as quoted prose with no stable speaker ("a person says ..."),
+    # and that copy competes with the tagged one for the assignment.
+    body = _strip_planner_quoted_dialogue(body)
     if has_driving_audio and not valid_beats:
         # The mapped audio is authoritative. LLM-authored vocal tags are both
         # unnecessary and actively harmful here: they can compete with the
@@ -5376,8 +5432,13 @@ def _reference_relationships(
 #     - <Subject 1> es SIEMPRE Valeria. <Subject 2> es SIEMPRE Ricardo.
 # It is the authority on which participant is which Subject, so it is parsed here and used
 # when the compiled definitions are numbered.
+# Planners decorate the locked name inconsistently -- ``Valeria``,
+# ``<Valeria>``, ``"Valeria"`` -- so the decoration is accepted and dropped.
+# Without this the lock parsed to nothing and every identity bound only by a
+# reference picture lost its name.
 _SUBJECT_LOCK_RE = re.compile(
     r"<Subject\s*(\d+)>\s*(?:es\s+SIEMPRE|is\s+ALWAYS)\s+"
+    r"[<\"'“‘*]?"
     r"([A-Za-z\u00c1\u00c9\u00cd\u00d3\u00da\u00dc\u00d1"
     r"\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc\u00f1]+)",
     re.IGNORECASE,
@@ -5557,6 +5618,7 @@ def _ref2va_subject_definitions(
     body: str = "",
     project_context: str = "",
     speaker_pairings: Mapping[int, str] | None = None,
+    authored_text: str = "",
 ) -> list[str]:
     """Emit one definition per participant, numbered as the project numbers them.
 
@@ -5637,14 +5699,32 @@ def _ref2va_subject_definitions(
         seen[slot] = len(rows)
         rows.append({
             "slot": slot,
-            "name": "",
+            "name": _clean_h3_metadata(lock.get(slot, ""), 80),
             "speaker": body_bindings.get(slot, ""),
             "details": list(source_bindings[slot]),
         })
 
-    # A label the body already uses but no row declared -- a hand-edited prompt, or a plan
-    # whose rows an edit cleared -- still has to be defined, or validation rejects the prompt
-    # for using an undefined subject.
+    for slot, name in lock.items():
+        if slot in seen and not rows[seen[slot]]["name"]:
+            rows[seen[slot]]["name"] = _clean_h3_metadata(name, 80)
+
+    # A label the authored text already uses but no row declared -- a hand-edited
+    # prompt, or a plan whose rows an edit cleared -- still has to be defined, or
+    # validation rejects the prompt for using an undefined subject. Read the
+    # authored text, not the compiled body: the body also carries the injected
+    # project context, whose SUBJECT LOCK rules name every slot, and defining a
+    # slot that no action uses states the cast twice.
+    for match in _H3_SUBJECT_SLOT_RE.finditer(authored_text or body):
+        slot = int(match.group(1))
+        if slot in seen or slot not in lock:
+            continue
+        seen[slot] = len(rows)
+        rows.append({
+            "slot": slot,
+            "name": _clean_h3_metadata(lock[slot], 80),
+            "speaker": body_bindings.get(slot) or speaker_pairings.get(slot, ""),
+            "details": [],
+        })
     for slot in sorted(body_bindings):
         if slot in seen:
             continue
@@ -5663,6 +5743,12 @@ def _ref2va_subject_definitions(
             label = f"{label} is {row['name']}"
         if row["speaker"]:
             label = f"{label} ({row['speaker']})"
+        if not row["name"]:
+            # Every definition must say what the Subject is. A participant bound
+            # only by an identity picture can arrive without a name, and
+            # emitting "<Subject 2> (S2): ..." left the label undefined to the
+            # contract while the action text already used it.
+            label = f"{label} is the visible character in its reference"
         details = "; ".join(row["details"])
         definitions.append(f"{label}" + (f": {details}." if details else "."))
     return definitions
@@ -5937,6 +6023,7 @@ def compile_h3_official_prompt(
                 subjects or [],
                 dialogue_beats,
             ),
+            authored_text=prompt,
         )
         for index, reviewed in reviewed_definitions.items():
             missing_sources = [
