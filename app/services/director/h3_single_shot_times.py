@@ -32,9 +32,24 @@ __all__ = ["strip_loose_cut_times"]
 # reconciled with anything.
 _LOOSE_MARKER = re.compile(
     r"(?P<label>\[\s*Shot\s+\d+\s*\]\s*)?"
-    r"\s*\bAt\s+(?:MM:|\d{1,2}:)\d{2}(?:\.\d{1,3})?\s*(?=[,.;:]|\s|$)",
+    r"\s*\bAt\s+(?P<time>(?:MM:|\d{1,2}:)\d{2}(?:\.\d{1,3})?)\s*(?=[,.;:]|\s|$)",
     re.IGNORECASE,
 )
+_LOCAL_TIME_RE = re.compile(r"(?P<minutes>\d{1,2}):(?P<seconds>\d{2})(?:\.(?P<fraction>\d{1,3}))?")
+
+
+def _local_seconds(value: str) -> float | None:
+    """Read ``MM:SS[.mmm]`` as seconds; ``MM:`` placeholders are unknown."""
+
+    match = _LOCAL_TIME_RE.fullmatch(str(value or "").strip())
+    if not match:
+        return None
+    fraction = match.group("fraction") or ""
+    return (
+        int(match.group("minutes")) * 60
+        + int(match.group("seconds"))
+        + (int(fraction) / (10 ** len(fraction)) if fraction else 0.0)
+    )
 _CLEANUP = (
     (re.compile(r"[ \t]{2,}"), " "),
     # The marker sat between a sentence and its continuation: "<Picture 1>. At MM:04.000,
@@ -59,10 +74,19 @@ _CUE_PREFIX_RE = re.compile(
 _DIALOGUE_BLOCK_RE = re.compile(r"<d>.*?</d>", re.DOTALL)
 
 
-def strip_loose_cut_times(body: str) -> tuple[str, int]:
+def strip_loose_cut_times(
+    body: str,
+    duration_seconds: float | None = None,
+) -> tuple[str, int]:
     """Remove timestamps that would read as a cut inside a one-shot body.
 
     Returns the text and how many markers were removed, so a caller can report them.
+
+    ``duration_seconds`` turns a labelled marker past the end of the clip into a
+    removal as well. A planner that keeps the film's own clock writes
+    ``[Shot 3] At 00:10.400`` into a 5.167-second clip, where no second shot can
+    exist; the renderer would either cut early or refuse the shot, and the clip
+    is one continuous shot either way.
     """
 
     text = str(body or "")
@@ -76,11 +100,19 @@ def strip_loose_cut_times(body: str) -> tuple[str, int]:
     ]
     removed = 0
 
+    def _beyond_clip(match: re.Match[str]) -> bool:
+        if duration_seconds is None:
+            return False
+        value = _local_seconds(match.group("time"))
+        if value is None:
+            return False
+        return value > max(0.0, float(duration_seconds)) + 0.05
+
     def _drop(match: re.Match[str]) -> str:
         nonlocal removed
-        if match.group("label"):
-            return match.group(0)
         if any(start <= match.start() < end for start, end in spoken_spans):
+            return match.group(0)
+        if match.group("label") and not _beyond_clip(match):
             return match.group(0)
         if _CUE_PREFIX_RE.search(text[max(0, match.start() - 48):match.start()]):
             return match.group(0)

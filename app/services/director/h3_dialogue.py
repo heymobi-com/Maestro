@@ -6089,7 +6089,9 @@ def compile_h3_official_prompt(
         body, _ = _align_h3_time_markers(body, audio_start_seconds)
         # After alignment: it needs the ``[Shot N] At ...`` shape this removes, and a
         # loose ``At MM:SS.mmm`` would otherwise read as a cut inside the one shot.
-        body = strip_loose_cut_times(_single_shot_body(body))[0]
+        # The clip's duration also decides a labelled marker the planner took from
+        # the film's clock: no second shot can sit past the end of this clip.
+        body = strip_loose_cut_times(_single_shot_body(body), duration_seconds)[0]
         subject_definitions = _ref2va_subject_definitions(
             subjects or [],
             registry,
@@ -6199,7 +6201,9 @@ def compile_h3_official_prompt(
         )
         # Before the shot numbers are read, so a clip-local header cannot inherit the
         # planner's film-global number, and a loose timestamp cannot read as a cut.
-        compiled_body = strip_loose_cut_times(_single_shot_body(compiled_body))[0]
+        compiled_body = strip_loose_cut_times(
+            _single_shot_body(compiled_body), duration_seconds,
+        )[0]
         compiled_body = _normalize_h3_compiled_visual_shots(compiled_body)
         shot_numbers = [
             int(marker.group("number"))

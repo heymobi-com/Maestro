@@ -15,6 +15,7 @@ These cases are ours, so they live in their own file.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import unittest
 
@@ -92,6 +93,30 @@ class OrdinaryTimingProseIsLeftAloneTests(unittest.TestCase):
 
 
 class TheCompilerUsesItTests(unittest.TestCase):
+    def test_a_labelled_marker_past_the_clip_end_is_removed(self):
+        """The planner's film clock is not a cut that can happen in this clip."""
+
+        body = (
+            "[Shot 1] S2 speaks to camera. "
+            "[Shot 3] At 00:10.400, the camera orbits."
+        )
+
+        cleaned, removed = strip_loose_cut_times(body, duration_seconds=5.167)
+
+        self.assertEqual(removed, 1)
+        self.assertNotIn("00:10.400", cleaned)
+        self.assertNotIn("[Shot 3]", cleaned)
+        self.assertIn("S2 speaks to camera", cleaned)
+        self.assertIn("the camera orbits", cleaned)
+
+    def test_a_labelled_marker_inside_the_clip_is_kept(self):
+        body = "[Shot 1] S2 speaks to camera. [Shot 2] At 00:03.000, he turns."
+
+        cleaned, removed = strip_loose_cut_times(body, duration_seconds=5.167)
+
+        self.assertEqual(removed, 0)
+        self.assertIn("[Shot 2] At 00:03.000", cleaned)
+
     def test_both_compile_paths_strip_the_marker(self):
         """The ref2va body and the compiled body both have to pass through it."""
 
@@ -101,7 +126,10 @@ class TheCompilerUsesItTests(unittest.TestCase):
         ) as handle:
             source = handle.read()
 
-        self.assertEqual(source.count("strip_loose_cut_times(_single_shot_body("), 2)
+        self.assertEqual(
+            len(re.findall(r"strip_loose_cut_times\(\s*_single_shot_body\(", source)),
+            2,
+        )
         self.assertIn(
             "from services.director.h3_single_shot_times import strip_loose_cut_times",
             source,
