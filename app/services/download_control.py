@@ -6,6 +6,7 @@ from contextvars import ContextVar
 from functools import wraps
 import importlib
 import inspect
+import os
 import sys
 import threading
 import time
@@ -28,19 +29,43 @@ _TERMINAL = {"completed", "failed", "cancelled"}
 
 
 class DownloadControl:
-    def __init__(self):
+    def __init__(self, owner: str = "explicit"):
         self.download_id = uuid.uuid4().hex
+        # "job" marks a transfer a queued generation started on its own: it is
+        # cancelled with that job, while a download the user asked for in
+        # Settings keeps running.
+        self.owner = owner
         self._lock = threading.RLock()
         self._cancelled = threading.Event()
         self._status = "downloading"
         self._sealed = False
         self._native_transfers = 0
+        self._active_transfers = 0
         self._responses = set()
+        self._partial_paths = set()
         self.ended_at = None
 
     @property
     def cancel_requested(self):
         return self._cancelled.is_set()
+
+    @property
+    def transferring(self):
+        """Is a transfer actually in flight right now?"""
+        with self._lock:
+            return self._active_transfers > 0
+
+    @contextmanager
+    def transfer(self):
+        """Mark the span in which a cancelled control can interrupt bytes."""
+
+        with self._lock:
+            self._active_transfers += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._active_transfers -= 1
 
     def check(self):
         if self.cancel_requested:
@@ -83,6 +108,34 @@ class DownloadControl:
             responses = tuple(self._responses)
             self._responses.clear()
         self._close_responses(responses)
+
+    def track_partial(self, path):
+        """Remember a half-written file so a cancelled job transfer can remove it.
+
+        Hugging Face writes ``*.incomplete`` beside the target and resumes it on
+        the next attempt. A download a job started for itself is one nobody will
+        use once the job is gone, so its bytes are removed instead of quietly
+        consuming the disk; a download the user asked for keeps its partial file
+        so the next attempt resumes it.
+        """
+
+        if not path:
+            return
+        with self._lock:
+            self._partial_paths.add(str(path))
+
+    def discard_partials(self):
+        with self._lock:
+            paths = tuple(self._partial_paths)
+            self._partial_paths.clear()
+        for path in paths:
+            try:
+                os.unlink(path)
+                print(f"[Downloads] Removed partial file after cancel: {path}")
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                print(f"[Downloads] Could not remove partial file {path}: {exc}")
 
     def seal(self):
         """Commit to installing verified bytes; subsequent cancellation loses."""
@@ -167,10 +220,11 @@ class DownloadControl:
         @wraps(original_read)
         def read(*args, **kwargs):
             try:
-                self.check()
-                result = original_read(*args, **kwargs)
-                self.check()
-                return result
+                with self.transfer():
+                    self.check()
+                    result = original_read(*args, **kwargs)
+                    self.check()
+                    return result
             except Exception:
                 self.check()
                 raise
@@ -179,8 +233,8 @@ class DownloadControl:
         return response
 
 
-def create_download_control():
-    control = DownloadControl()
+def create_download_control(owner: str = "explicit"):
+    control = DownloadControl(owner)
     now = time.time()
     with _controls_lock:
         for key, existing in tuple(_controls.items()):
@@ -193,6 +247,31 @@ def create_download_control():
 def find_download_control(download_id):
     with _controls_lock:
         return _controls.get(download_id)
+
+
+def cancel_active_downloads(owner: str | None = None) -> int:
+    """Cancel in-flight transfers, optionally only those owned by ``owner``.
+
+    A queued job that is cancelled while it fetches a checkpoint must stop that
+    fetch: otherwise the queue waits for a model nobody is going to use.
+    """
+
+    with _controls_lock:
+        candidates = [
+            control for control in _controls.values()
+            if control.snapshot()["status"] == "downloading"
+            and control.transferring
+            and (owner is None or control.owner == owner)
+        ]
+    cancelled = 0
+    for control in candidates:
+        try:
+            snapshot = control.request_cancel()
+        except ValueError:
+            continue
+        if snapshot["status"] == "cancelling":
+            cancelled += 1
+    return cancelled
 
 
 def current_download_control():
@@ -219,6 +298,28 @@ def download_scope(control):
         yield control
     finally:
         control.close_responses()
+        _current_download.reset(token)
+
+
+@contextmanager
+def job_download_scope():
+    """Make every transfer a queued job starts cancellable and job-owned.
+
+    A generation that switches to a model that is not on disk downloads it
+    before the first frame. Without this scope that transfer had no owner: the
+    banner could not offer Cancel, and cancelling the job left the download
+    running while the queue waited for a model nobody would use.
+    """
+
+    if current_download_control() is not None:
+        yield None
+        return
+    control = create_download_control(owner="job")
+    token = _current_download.set(control)
+    try:
+        yield control
+    finally:
+        control.finish("completed")
         _current_download.reset(token)
 
 
@@ -278,7 +379,8 @@ def install_huggingface_cancellation():
             os.close(descriptor)
             keep_temporary = False
             try:
-                _, headers = original_urlretrieve(url, temporary, report, data)
+                with control.transfer():
+                    _, headers = original_urlretrieve(url, temporary, report, data)
                 with control.publication():
                     if filename is None:
                         keep_temporary = True
@@ -312,26 +414,40 @@ def install_huggingface_cancellation():
         control = current_download_control()
         if control is None:
             return original_tmp(*args, **kwargs)
-        control.check()
-        # Bind the installed helper's signature, which accepts positional
-        # arguments in some supported HF versions.
-        bound = tmp_signature.bind(*args, **kwargs)
-        size = bound.arguments.get("expected_size", kwargs.get("expected_size"))
-        limit = getattr(module.constants, "MAX_HTTP_DOWNLOAD_SIZE", 50 * 1024**3)
-        if size is not None and size > limit:
-            with control.native_transfer():
-                return original_tmp(*args, **kwargs)
-        token = _http_hf_transfer.set(True)
-        try:
-            if "xet_file_data" in tmp_signature.parameters:
-                # Use the same signed URL through HTTP without falsely
-                # warning that the installed hf_xet package is missing.
-                bound.arguments["xet_file_data"] = None
-            result = original_tmp(*bound.args, **bound.kwargs)
-            control.check()
-            return result
-        finally:
-            _http_hf_transfer.reset(token)
+        with control.transfer():
+            try:
+                control.check()
+                # Bind the installed helper's signature, which accepts
+                # positional arguments in some supported HF versions.
+                bound = tmp_signature.bind(*args, **kwargs)
+                control.track_partial(bound.arguments.get("incomplete_path"))
+                size = bound.arguments.get("expected_size", kwargs.get("expected_size"))
+                limit = getattr(module.constants, "MAX_HTTP_DOWNLOAD_SIZE", 50 * 1024**3)
+                if size is not None and size > limit:
+                    with control.native_transfer():
+                        return original_tmp(*args, **kwargs)
+                token = _http_hf_transfer.set(True)
+                try:
+                    if "xet_file_data" in tmp_signature.parameters:
+                        # Use the same signed URL through HTTP without falsely
+                        # warning that the installed hf_xet package is missing.
+                        bound.arguments["xet_file_data"] = None
+                    result = original_tmp(*bound.args, **bound.kwargs)
+                    control.check()
+                    return result
+                finally:
+                    _http_hf_transfer.reset(token)
+            except Exception as error:
+                if control.cancel_requested:
+                    # Closing the response makes the underlying read raise its
+                    # own error, so the cancellation is what gets reported. A
+                    # job's transfer is discarded because nobody wants that
+                    # model; a download the user asked for keeps its partial
+                    # file so the next attempt resumes it.
+                    if control.owner == "job":
+                        control.discard_partials()
+                    raise DownloadCancelled("Download cancelled.") from error
+                raise
 
     @wraps(original_xet_available)
     def xet_available():

@@ -174,6 +174,20 @@ class TestJobLifecycle(unittest.TestCase):
         self.assertFalse(try_start(job))
         self.assertEqual(job["status"], "cancelled")
 
+    def test_cancel_stops_the_model_download_the_job_started(self):
+        from services import download_control
+
+        job = _job()
+        job["status"] = "running"
+        with download_control.job_download_scope():
+            # The transfer will be in flight when the queue cancels the job.
+            with download_control.current_download_control().transfer():
+                self.assertTrue(request_cancel(job).changed)
+                self.assertTrue(
+                    download_control.current_download_control().cancel_requested,
+                    "cancelling a job must stop the checkpoint it is fetching",
+                )
+
     def test_held_job_only_runs_after_explicit_release(self):
         job = {"id": "held-1", "status": "held", "message": "Ready"}
         self.assertFalse(try_start(job))

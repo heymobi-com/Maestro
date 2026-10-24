@@ -370,7 +370,16 @@ def request_cancel(
 
         job["status"] = "cancelled"
 
-        return CancelResult(True, was_running, abort_signalled)
+    # Outside the lifecycle lock: a transfer a job started for itself must stop
+    # too, or the queue keeps waiting on a checkpoint nobody will use. Downloads
+    # the user asked for in Settings are owned differently and keep running.
+    try:
+        from .download_control import cancel_active_downloads
+        cancel_active_downloads("job")
+    except Exception:
+        pass
+
+    return CancelResult(True, was_running, abort_signalled)
 
 
 def finish_job(

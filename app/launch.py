@@ -67,10 +67,12 @@ sys.argv = _wgp_argv
 print("[Maestro] Installing download stall protection...")
 from services import safe_download  # noqa: F401 (side-effect import)
 from services.download_control import (
+    DownloadCancelled,
     check_download_cancelled,
     create_download_control,
     download_scope,
     find_download_control,
+    job_download_scope,
     seal_download,
 )
 from services.checkpoint_compatibility import (
@@ -26242,6 +26244,10 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
     with ExitStack() as media_resources, (nullcontext(True) if _slot_owned else generation_slot(_gen_lock, job)) as acquired:
         if not acquired:
             return False
+        # A model this job has to fetch is downloaded inside this scope: the
+        # banner gets a Cancel action, and cancelling the job stops the
+        # transfer instead of leaving the queue waiting for an unused model.
+        media_resources.enter_context(job_download_scope())
         performance_monitor = None
         performance_completed = False
         try:
@@ -27602,7 +27608,24 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                             expected_args = set(inspect.signature(wgp.generate_video).parameters.keys())
                             filtered_params = {k: v for k, v in params.items() if k in expected_args}
                             plugin_data = task.get('plugin_data', {})
-                            wgp.generate_video(task, send_cmd, plugin_data=plugin_data, **filtered_params)
+                            # The engine fetches a missing model on this worker
+                            # thread before it can render. Own that transfer so
+                            # the downloads banner can cancel it and so
+                            # cancelling the job stops it, instead of the queue
+                            # waiting for a checkpoint nobody will use.
+                            with job_download_scope():
+                                wgp.generate_video(task, send_cmd, plugin_data=plugin_data, **filtered_params)
+                        except DownloadCancelled:
+                            # The checkpoint this job needs was cancelled, so the
+                            # job stops too: retrying would only restart the
+                            # same transfer. Whatever queued behind it can run.
+                            print("\n  [ERROR] The model download was cancelled.")
+                            if not is_cancel_requested(job):
+                                request_cancel(job)
+                            send_cmd(
+                                "error",
+                                "The model download was cancelled, so this job stopped.",
+                            )
                         except Exception as e:
                             print(f"\n  [ERROR] {e}")
                             traceback.print_exc()
@@ -28926,6 +28949,12 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
             )
             return success and job.get("status") == "completed"
 
+        except DownloadCancelled:
+            # The model this job was fetching was stopped: by cancelling the
+            # job, or from the downloads banner. The job cannot run without it,
+            # and that is a cancellation, not a crash to report.
+            finish_job(job, "cancelled", message="Cancelled")
+            return False
         except Exception as e:
             traceback.print_exc()
             failure_updates = {
