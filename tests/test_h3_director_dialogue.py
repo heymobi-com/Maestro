@@ -211,6 +211,37 @@ class TestH3DirectorDialogueCompiler(unittest.TestCase):
             [],
         )
 
+    def test_brief_rules_are_not_read_as_this_shots_speech_request(self):
+        project_context = (
+            'AUDIO-DRIVEN GENERATION: video is driven by the provided audio track. '
+            'Sync lip movements to the audio exactly. Only the person currently '
+            'speaking moves their lips. The other subject keeps their mouth closed.'
+        )
+
+        compiled, _ = compile_h3_official_prompt(
+            '[Shot 1] She waits by the window.', self.subjects, [], mode='ref2va',
+            duration_seconds=5.0, project_context=project_context,
+        )
+
+        self.assertEqual(compiled.count('<d>'), 0)
+        self.assertEqual(
+            validate_h3_prompt_contract(
+                compiled, [], mode='ref2va', subjects=self.subjects,
+                duration_seconds=5.0, project_context=project_context,
+            ),
+            [],
+        )
+
+    def test_a_real_shot_level_speech_instruction_is_still_refused(self):
+        project_context = 'AUDIO-DRIVEN GENERATION: only the person currently speaking moves their lips.'
+
+        with self.assertRaises(H3DialogueContractError):
+            compile_h3_official_prompt(
+                '[Shot 1] Joey says: hello there.', self.subjects, [], mode='ref2va',
+                duration_seconds=5.0, project_context=project_context,
+                audio_policy={'generated_speech_allowed': False},
+            )
+
     def test_brief_dialogue_placeholders_do_not_add_blocks_to_every_shot(self):
         project_context = (
             'PODCAST BIBLE. Script lines use <d>[Spanish] ...</d> placeholders, '

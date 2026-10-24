@@ -957,6 +957,22 @@ def _strip_h3_dialogue_blocks(value: Any) -> str:
     return _normalized_space(cleaned)
 
 
+def _h3_injected_project_context(project_context: Any) -> str:
+    """The exact project-brief prose a compiled shot carries.
+
+    Computed once so the audio-policy scan can mask the same text it injected:
+    the brief states film-wide rules, and they are not this shot's speech.
+    """
+
+    context = _normalized_space(
+        pack_project_context(_clip_context(normalize_h3_text(project_context))),
+    )
+    # Dialogue belongs to the shot that speaks it. A brief may template its
+    # lines with empty <d> placeholders, and those were injected into every
+    # shot as extra dialogue blocks.
+    return _strip_h3_dialogue_blocks(context)
+
+
 def _strip_forbidden_dialogue_blocks(value: Any) -> str:
     """Remove planner-authored tags and only the speech lead-in attached to them."""
 
@@ -991,10 +1007,26 @@ def _audio_policy_violations(
     dialogue_beats: Sequence[Any] | None = None,
     dialogue_manifest_authoritative: bool = False,
     has_driving_audio: bool = False,
+    ignore_regions: Sequence[str] | None = None,
 ) -> list[str]:
-    """Find final prompt instructions that contradict explicit audio permissions."""
+    """Find final prompt instructions that contradict explicit audio permissions.
+
+    ``ignore_regions`` names prose that travels with every shot rather than
+    instructing this one -- the project brief. A brief states film-wide rules
+    such as "only the person currently speaking moves their lips", and reading
+    that as this shot's own speech request refused every silent shot in a
+    podcast. The mask keeps offsets unchanged so the scan still reports where
+    a real instruction sits.
+    """
 
     text = normalize_h3_text(prompt)
+    for region in ignore_regions or ():
+        region = normalize_h3_text(region).strip()
+        if len(region) < 24:
+            # Too short to be an unambiguous region; masking it could hide a
+            # genuine instruction.
+            continue
+        text = text.replace(region, " " * len(region))
     errors: list[str] = []
     speech_forbidden = (
         _audio_policy_flag(audio_policy, "generated_speech_allowed") is False
@@ -3466,13 +3498,7 @@ def _source_prompt_parts(
 
     plan = audio_plan if isinstance(audio_plan, Mapping) else {}
     audio_mode = _normalized_space(_field(plan, "mode", "")).casefold()
-    context = _normalized_space(
-        pack_project_context(_clip_context(normalize_h3_text(project_context))),
-    )
-    # Dialogue belongs to the shot that speaks it. A brief may template its
-    # lines with empty <d> placeholders, and those were injected into every
-    # shot as extra dialogue blocks.
-    context = _strip_h3_dialogue_blocks(context)
+    context = _h3_injected_project_context(project_context)
     # The single-shot guard is decided here but is NOT conditional on the
     # context: it used to share this branch, so every shot whose body looked
     # like it already carried the context lost the guard with it. 113 of a real
@@ -5968,6 +5994,8 @@ def compile_h3_official_prompt(
             dialogue_beats=dialogue_beats,
             dialogue_manifest_authoritative=dialogue_manifest_authoritative,
             has_driving_audio=has_driving_audio,
+            ignore_regions=[_h3_injected_project_context(project_context)]
+            if project_context else None,
         )
         if violations:
             raise H3DialogueContractError(
@@ -6216,6 +6244,8 @@ def compile_h3_official_prompt(
         dialogue_beats=dialogue_beats,
         dialogue_manifest_authoritative=dialogue_manifest_authoritative,
         has_driving_audio=has_driving_audio,
+        ignore_regions=[_h3_injected_project_context(project_context)]
+        if project_context else None,
     )
     if policy_errors:
         raise H3DialogueContractError(
@@ -6297,6 +6327,7 @@ def validate_h3_prompt_contract(
     audio_policy: Mapping[str, Any] | None = None,
     dialogue_manifest_authoritative: bool = False,
     has_driving_audio: bool = False,
+    project_context: str = "",
 ) -> list[str]:
     """Validate the official field order plus Maestro's exact dialogue data."""
 
@@ -6316,6 +6347,10 @@ def validate_h3_prompt_contract(
         dialogue_beats=dialogue_beats,
         dialogue_manifest_authoritative=dialogue_manifest_authoritative,
         has_driving_audio=has_driving_audio,
+        # The brief travels with every shot; its film-wide rules are not this
+        # shot's own speech request.
+        ignore_regions=[_h3_injected_project_context(project_context)]
+        if project_context else None,
     ))
     positions: list[int] = []
     for field in expected:
@@ -7029,6 +7064,7 @@ def compile_h3_clip_plans(
             audio_policy=audio_policy,
             dialogue_manifest_authoritative=dialogue_manifest_authoritative,
             has_driving_audio=transcript_only[index],
+            project_context=plan.get("_director_project_context") or "",
         )
         if errors:
             from services.director.h3_prompt_shape import describe
