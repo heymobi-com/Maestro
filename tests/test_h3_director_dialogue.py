@@ -211,6 +211,50 @@ class TestH3DirectorDialogueCompiler(unittest.TestCase):
             [],
         )
 
+    def test_brief_dialogue_placeholders_do_not_add_blocks_to_every_shot(self):
+        project_context = (
+            'PODCAST BIBLE. Script lines use <d>[Spanish] ...</d> placeholders, '
+            'and the host fills them per episode with <d>[Spanish] ...</d> too.'
+        )
+        beats = [{'speaker_id': 'S1', 'spoken_text': 'Pues a ver, normalmente pensamos en el poder.'}]
+
+        compiled, _ = compile_h3_official_prompt(
+            '[Shot 1] S1 leans forward and speaks.', self.subjects, beats,
+            mode='ref2va', duration_seconds=5.17, project_context=project_context,
+        )
+
+        visual = compiled.split('detailed_description:', 1)[1]
+        self.assertEqual(visual.count('<d>'), 1)
+        self.assertIn('Pues a ver', visual)
+        self.assertEqual(
+            validate_h3_prompt_contract(
+                compiled, beats, mode='ref2va', subjects=self.subjects,
+                duration_seconds=5.17,
+            ),
+            [],
+        )
+
+    def test_interleaved_podcast_speakers_keep_one_block_each(self):
+        beats = [
+            {'speaker_id': 'S2', 'spoken_text': 'Claro, si. Un ejercito en formacion.'},
+            {'speaker_id': 'S1', 'spoken_text': 'Exacto. O una boveda de lingotes de oro.'},
+        ]
+
+        compiled, _ = compile_h3_official_prompt(
+            '[Shot 1] The two hosts trade a line each.', self.subjects, beats,
+            mode='ref2va', duration_seconds=5.17,
+        )
+
+        visual = compiled.split('detailed_description:', 1)[1]
+        self.assertEqual(visual.count('<d>'), 2)
+        self.assertEqual(
+            validate_h3_prompt_contract(
+                compiled, beats, mode='ref2va', subjects=self.subjects,
+                duration_seconds=5.17,
+            ),
+            [],
+        )
+
     def test_missing_tags_are_inserted_when_beat_words_are_not_in_prompt(self):
         prompt = (
             "A tense exchange unfolds in a small apartment kitchen. "

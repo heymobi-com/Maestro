@@ -937,6 +937,26 @@ def _strip_planner_quoted_dialogue(value: Any) -> str:
     return _normalized_space(text)
 
 
+def _strip_h3_dialogue_blocks(value: Any) -> str:
+    """Remove dialogue spans from text that must not carry speech.
+
+    The project context is reference prose injected into every shot. A podcast
+    brief that templates its lines with ``<d>[Spanish] ...</d>`` placeholders
+    therefore repeated those blocks in every shot, where they sat beside the
+    shot's own canonical line: three blocks for one beat, and the contract
+    refused the whole render.
+    """
+
+    text = str(value or "")
+    spans, _malformed = _dialogue_spans(text)
+    if not spans:
+        return text
+    cleaned = _replace_spans(text, spans, [""] * len(spans))
+    cleaned = re.sub(r"\s+([,.;:])", r"\1", cleaned)
+    cleaned = re.sub(r"\(\s*\)|\[\s*\]", " ", cleaned)
+    return _normalized_space(cleaned)
+
+
 def _strip_forbidden_dialogue_blocks(value: Any) -> str:
     """Remove planner-authored tags and only the speech lead-in attached to them."""
 
@@ -3449,6 +3469,10 @@ def _source_prompt_parts(
     context = _normalized_space(
         pack_project_context(_clip_context(normalize_h3_text(project_context))),
     )
+    # Dialogue belongs to the shot that speaks it. A brief may template its
+    # lines with empty <d> placeholders, and those were injected into every
+    # shot as extra dialogue blocks.
+    context = _strip_h3_dialogue_blocks(context)
     # The single-shot guard is decided here but is NOT conditional on the
     # context: it used to share this branch, so every shot whose body looked
     # like it already carried the context lost the guard with it. 113 of a real
@@ -6004,6 +6028,12 @@ def compile_h3_official_prompt(
         existing_blocks = []
     if mode == "ref2va":
         style_opening, body = _split_ref2va_style_opening(body)
+        # The opening is compiler-owned framing (style and project context) and
+        # is re-attached after the vocal compiler has emitted the shot's exact
+        # lines. A dialogue block left here is a second copy the model can
+        # speak, and the contract counts it as an unexpected block.
+        if _has_spoken_beats(dialogue_beats):
+            style_opening = _strip_h3_dialogue_blocks(style_opening)
         # Bind visual prose before inserting compiler-owned vocal directions.
         # Otherwise the inserted labels alter those exact canonical sentences
         # and a second preflight can no longer remove/rebuild them once.
