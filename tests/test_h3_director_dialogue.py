@@ -253,6 +253,30 @@ class TestH3DirectorDialogueCompiler(unittest.TestCase):
             [],
         )
 
+    def test_a_driven_shot_keeps_its_lip_sync_direction_without_lines(self):
+        """The render path must treat a driven shot as driven, not as silent."""
+
+        plan = {
+            'video_prompt': '[Shot 1] He speaks; lip sync accurate throughout.',
+            '_director_h3_source_prompt': '[Shot 1] He speaks; lip sync accurate throughout.',
+            '_director_dialogue_beats': [],
+            '_director_subjects_on_screen': [{'speaker_name': 'Joey', 'visual_description': 'man in grey suit'}],
+            '_director_duration_sec': 5.0,
+            '_director_project_context': (
+                'AUDIO-DRIVEN GENERATION: only the person currently speaking moves their lips.'
+            ),
+            '_director_audio_plan': {'mode': 'audio_driven', 'timing_anchor': 'audio'},
+            '_director_dialogue_manifest_authoritative': True,
+            '_director_h3_prompt_mode': 'ref2va',
+            '_director_h3_model_family': 'ref2va',
+        }
+
+        compiled = compile_h3_clip_plans(
+            [plan], prompt_modes=['ref2va'], durations=[5.0],
+        )
+
+        self.assertEqual(compiled[0]['video_prompt'].count('<d>'), 0)
+
     def test_a_real_shot_level_speech_instruction_is_still_refused(self):
         project_context = 'AUDIO-DRIVEN GENERATION: only the person currently speaking moves their lips.'
 

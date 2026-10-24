@@ -7065,6 +7065,14 @@ def compile_h3_clip_plans(
         plan["_director_vocal_contract"] = contract
         plan["_director_h3_prompt_mode"] = mode
         plan["_director_speaker_registry"] = registry
+        # A driven shot's mouth follows the supplied track, so "lip sync
+        # accurate" and "only the speaking person moves their lips" are this
+        # shot's own direction, not a request for generated speech. The
+        # compiler already treats these modes as driven; the validator has to
+        # agree or it refuses every dialogue-free shot in a driven project.
+        driven_mode = _normalized_space(
+            _field(plan.get("_director_audio_plan") or {}, "mode", "")
+        ).casefold() in {"audio_driven", "music_driven"}
         errors = validate_h3_prompt_contract(
             prompt,
             speech_beats,
@@ -7075,7 +7083,7 @@ def compile_h3_clip_plans(
             duration_seconds=duration,
             audio_policy=audio_policy,
             dialogue_manifest_authoritative=dialogue_manifest_authoritative,
-            has_driving_audio=transcript_only[index],
+            has_driving_audio=transcript_only[index] or driven_mode,
             project_context=plan.get("_director_project_context") or "",
         )
         if errors:
