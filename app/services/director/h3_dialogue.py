@@ -6468,7 +6468,14 @@ def validate_h3_prompt_contract(
         numbers = [int(match[1]) for match in definitions]
         if len(numbers) != len(set(numbers)):
             errors.append("Ref2VA defines the same subject number more than once")
-        undefined = set(int(value) for value in re.findall(r"<Subject\s+(\d+)>", visual, re.I)) - set(numbers)
+        # The brief names the film's whole cast; a close-up declares only who is
+        # on screen. Reading its Subject labels as this shot's action refused a
+        # one-person shot because the brief also mentioned <Subject 2>.
+        action_text = visual
+        brief_prose = _h3_injected_project_context(project_context).strip()
+        if len(brief_prose) >= 24:
+            action_text = visual.replace(brief_prose, " " * len(brief_prose))
+        undefined = set(int(value) for value in re.findall(r"<Subject\s+(\d+)>", action_text, re.I)) - set(numbers)
         if undefined:
             errors.append("Ref2VA visual action uses undefined subjects: " + ", ".join(str(number) for number in sorted(undefined)))
         picture_no = 0
@@ -6951,6 +6958,7 @@ def compile_h3_clip_plans(
                 references=plan.get("_director_h3_reference_manifest") or [],
                 subjects=plan.get("_director_subjects_on_screen") or [],
                 context_anchors=_h3_plan_context_anchors(plan),
+                project_context=plan.get("_director_project_context") or "",
             )
             continue
         mode = (

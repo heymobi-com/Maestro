@@ -232,6 +232,27 @@ class TestH3DirectorDialogueCompiler(unittest.TestCase):
             [],
         )
 
+    def test_brief_cast_labels_do_not_require_a_definition_in_a_one_person_shot(self):
+        project_context = (
+            'SUBJECT DEFINITIONS: <Subject 1> (S1): FEMALE, cream A-line dress. '
+            '<Subject 2> (S2): MALE, dark grey suit. Never show a third person.'
+        )
+        subjects = [{'visual_description': 'S1, the woman in the cream A-line dress.'}]
+
+        compiled, _ = compile_h3_official_prompt(
+            '[Shot 1] S1 stands still and meets the camera.', subjects, [],
+            mode='ref2va', duration_seconds=5.0, project_context=project_context,
+        )
+
+        self.assertIn('<Subject 1> is', compiled.split('summary:')[0])
+        self.assertEqual(
+            validate_h3_prompt_contract(
+                compiled, [], mode='ref2va', subjects=subjects,
+                duration_seconds=5.0, project_context=project_context,
+            ),
+            [],
+        )
+
     def test_a_real_shot_level_speech_instruction_is_still_refused(self):
         project_context = 'AUDIO-DRIVEN GENERATION: only the person currently speaking moves their lips.'
 
