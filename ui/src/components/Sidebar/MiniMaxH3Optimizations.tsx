@@ -3,6 +3,7 @@ import { AlertTriangle, ChevronDown, Gauge, Layers, Zap } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import type { ModelOptions } from '../../types'
 import { InfoTooltip } from './InfoTooltip'
+import { H3SetupGuide } from './H3SetupGuide'
 import { readPersistentDisclosure, writePersistentDisclosure } from '../../lib/persistentDisclosure'
 
 const H3_OPTIMIZATIONS_EXPANDED_KEY = 'maestro-h3-optimizations-expanded'
@@ -252,6 +253,9 @@ export function MiniMaxH3Optimizations() {
 
           {expanded && (
             <div className="divide-y divide-border/60">
+            <div className="px-3 py-2">
+              <H3SetupGuide />
+            </div>
             {checkpointBlocksSpeedEngines && (
               <div className="flex items-start gap-2 px-3 py-2">
                 <Gauge size={13} className="mt-0.5 shrink-0 text-text-muted" />

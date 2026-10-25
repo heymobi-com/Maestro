@@ -4,6 +4,7 @@ import { fetchModelOptions } from '../../api/client'
 import { DEFAULT_DIRECTOR_VIDEO_MODEL, useStore } from '../../stores/useStore'
 import type { ModelOptions } from '../../types'
 import { InfoTooltip } from './InfoTooltip'
+import { H3SetupGuide } from './H3SetupGuide'
 import { directorH3SlaEnabled, directorH3VedaEnabled } from '../../lib/h3Attention'
 
 /**
@@ -134,6 +135,15 @@ export function DirectorH3Optimizations() {
     ?? 25
   )
   const fusedTurbo = modelOptions?.minimax_h3_fused_turbo === true
+  // A checkpoint-level refusal is not a runtime problem: hide the engine
+  // instead of offering a switch that can only fail after a full model load.
+  const blockedByCheckpoint = (
+    status?: { checkpoint?: string } | null,
+  ) => Boolean(status?.checkpoint)
+  const solBlocked = blockedByCheckpoint(solStatus)
+  const slaBlocked = blockedByCheckpoint(slaStatus)
+  const vedaBlocked = blockedByCheckpoint(vedaStatus)
+  const speedEnginesBlocked = solBlocked || slaBlocked || vedaBlocked
   const activeCount = [turboSelected, solSelected, slaSelected, vedaSelected, cacheSelected].filter(Boolean).length
   const defaultSteps = modelOptions?.minimax_h3_turbo?.unaccelerated_steps
     ?? modelOptions?.default_num_inference_steps
@@ -217,6 +227,18 @@ export function DirectorH3Optimizations() {
         )}
       </div>
 
+      <H3SetupGuide />
+
+      {speedEnginesBlocked && (
+        <div className="flex items-start gap-2 rounded-lg border border-border bg-bg-tertiary/40 px-3 py-2">
+          <Gauge size={13} className="mt-0.5 shrink-0 text-text-muted" />
+          <span className="min-w-0 text-[9px] leading-relaxed text-text-muted">
+            Attention is automatic. This model cannot use the fast attention
+            engines, so Maestro runs the compatible one. Nothing to choose here.
+          </span>
+        </div>
+      )}
+
       {fusedTurbo && (
         <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2.5">
           <div className="flex items-start gap-2.5">
@@ -258,7 +280,7 @@ export function DirectorH3Optimizations() {
             </span>
             <InfoTooltip
               label="About Director H3 Turbo"
-              text={selectedTurboPreset?.description || turboOption.guide}
+              text={`${selectedTurboPreset?.description || turboOption.guide}\n\nWhere: H3 Optimizations, this panel. Fewer steps means a shot finishes sooner.`}
             />
           </label>
           {turboPresets.length > 1 && (
@@ -281,7 +303,7 @@ export function DirectorH3Optimizations() {
         </div>
       )}
 
-      {modelOptions?.sol_attention && (
+      {modelOptions?.sol_attention && !solBlocked && (
         <div className={`rounded-lg border px-3 py-2.5 ${
           solSelected
             ? 'border-accent-blue/50 bg-accent-blue/10'
@@ -310,14 +332,14 @@ export function DirectorH3Optimizations() {
             <InfoTooltip
               label="About Director H3 Sol Engine"
               text={solStatus?.supported
-                ? 'Uses H3-aware sparse attention for every newly generated Director shot. Unsupported calls fall back automatically.'
+                ? 'Uses H3-aware sparse attention for every newly generated Director shot. Unsupported calls fall back automatically.\n\nWhere: H3 Optimizations, this panel. Optional speed engine.'
                 : solStatus?.reason || 'Sol Engine is unavailable in this runtime.'}
             />
           </label>
         </div>
       )}
 
-      {modelOptions?.sla_attention && (
+      {modelOptions?.sla_attention && !slaBlocked && (
         <div className={`rounded-lg border px-3 py-2.5 ${
           slaSelected
             ? 'border-accent-blue/50 bg-accent-blue/10'
@@ -348,15 +370,15 @@ export function DirectorH3Optimizations() {
               label="About Director H3 SLA"
               text={slaStatus?.supported
                 ? slaExperimental
-                  ? 'Uses 90% block-sparse attention for newly generated Full or Pruned H3 shots. Off by default; compare motion, reference fidelity and audio quality. The first use compiles Triton kernels; reference and audio prefix rows stay protected.'
-                  : 'Runs the fused checkpoint with its published 90% block-sparse SLA recipe. The first use compiles and caches Triton kernels.'
+                  ? 'Uses 90% block-sparse attention for newly generated Full or Pruned H3 shots. Off by default; compare motion, reference fidelity and audio quality. The first use compiles Triton kernels; reference and audio prefix rows stay protected.\n\nWhere: H3 Optimizations, this panel. Optional speed engine.'
+                  : 'Runs the fused checkpoint with its published 90% block-sparse SLA recipe. The first use compiles and caches Triton kernels.\n\nWhere: H3 Optimizations, this panel.'
                 : `${slaStatus?.reason || 'SLA is unavailable in this runtime.'} Maestro will use dense attention without failing the generation.`}
             />
           </label>
         </div>
       )}
 
-      {modelOptions?.veda_attention === true && (
+      {modelOptions?.veda_attention === true && !vedaBlocked && (
         <div className={`rounded-lg border px-3 py-2.5 ${
           vedaSelected
             ? 'border-accent-blue/50 bg-accent-blue/10'
@@ -389,7 +411,7 @@ export function DirectorH3Optimizations() {
             <InfoTooltip
               label="About Director H3 Veda Sparse Attention"
               text={vedaStatus?.supported
-                ? 'Uses the existing H3 model with a Veda predictor downloaded on first use (about 281 MB for INT8 ConvRot or 551 MB for BF16). Compare motion, reference fidelity, and audio quality on new Director shots.'
+                ? 'Uses the existing H3 model with a Veda predictor downloaded on first use (about 281 MB for INT8 ConvRot or 551 MB for BF16). Compare motion, reference fidelity, and audio quality on new Director shots.\n\nWhere: H3 Optimizations, this panel. Optional speed engine.'
                 : `${vedaStatus?.reason || 'Veda is unavailable in this runtime.'} The toggle is disabled on unsupported hardware.`}
             />
           </label>
@@ -416,7 +438,7 @@ export function DirectorH3Optimizations() {
             </span>
             <InfoTooltip
               label="About Director First Block Cache"
-              text="Reuses stable transformer work after warmup. It is most effective on longer, higher-step H3 runs and can be combined with Turbo and Sol Engine."
+              text="Reuses stable transformer work after warmup. It is most effective on longer, higher-step H3 runs and can be combined with Turbo and Sol Engine.\n\nWhere: H3 Optimizations, this panel. Safe to leave off."
             />
           </label>
           {cacheSelected && (

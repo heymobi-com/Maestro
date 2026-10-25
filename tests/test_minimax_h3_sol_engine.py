@@ -300,6 +300,9 @@ class TestSolAttentionRouting(unittest.TestCase):
         panel = (
             ROOT / "ui" / "src" / "components" / "Sidebar" / "MiniMaxH3Optimizations.tsx"
         ).read_text(encoding="utf-8")
+        director = (
+            ROOT / "ui" / "src" / "components" / "Sidebar" / "DirectorH3Optimizations.tsx"
+        ).read_text(encoding="utf-8")
 
         self.assertIn(
             '_HALF_PRECISION_ATTENTION_MODES = ("sol", "sla", "veda", "sage", "sage2", "sage3")',
@@ -310,11 +313,33 @@ class TestSolAttentionRouting(unittest.TestCase):
         self.assertIn("using dense SDPA attention for this generation.", engine)
         # The same fact reaches the sidebar as a per-engine reason.
         self.assertIn('"checkpoint": _dense_only_checkpoint', launch)
-        # A mode the model cannot run is not offered at all.
+        # A mode the model cannot run is not offered at all, in both panels.
         self.assertIn("!solCheck.blocked", panel)
         self.assertIn("!slaCheck.blocked", panel)
         self.assertIn("!vedaCheck.blocked", panel)
         self.assertIn("Attention is automatic.", panel)
+        self.assertIn("!solBlocked", director)
+        self.assertIn("!slaBlocked", director)
+        self.assertIn("!vedaBlocked", director)
+        self.assertIn("Attention is automatic.", director)
+
+    def test_the_h3_panels_explain_what_to_change_and_where(self):
+        guide = (
+            ROOT / "ui" / "src" / "components" / "Sidebar" / "H3SetupGuide.tsx"
+        ).read_text(encoding="utf-8")
+        panel = (
+            ROOT / "ui" / "src" / "components" / "Sidebar" / "MiniMaxH3Optimizations.tsx"
+        ).read_text(encoding="utf-8")
+        director = (
+            ROOT / "ui" / "src" / "components" / "Sidebar" / "DirectorH3Optimizations.tsx"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("What to turn on, and where it is", guide)
+        self.assertIn("Director Advanced", guide)
+        self.assertIn("Inputs", guide)
+        self.assertIn("H3SetupGuide", panel)
+        self.assertIn("H3SetupGuide", director)
+        self.assertIn("Where: H3 Optimizations", director)
 
     def test_fp32_refusal_falls_back_to_dense_sdpa_not_to_sage(self):
         """An INT8 ConvRot checkpoint computes in FP32; Sage cannot take it."""
