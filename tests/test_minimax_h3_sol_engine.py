@@ -310,8 +310,11 @@ class TestSolAttentionRouting(unittest.TestCase):
         self.assertIn("using dense SDPA attention for this generation.", engine)
         # The same fact reaches the sidebar as a per-engine reason.
         self.assertIn('"checkpoint": _dense_only_checkpoint', launch)
-        self.assertIn("Not compatible with this checkpoint", panel)
-        self.assertIn("disabled={!slaSupported}", panel)
+        # A mode the model cannot run is not offered at all.
+        self.assertIn("!solCheck.blocked", panel)
+        self.assertIn("!slaCheck.blocked", panel)
+        self.assertIn("!vedaCheck.blocked", panel)
+        self.assertIn("Attention is automatic.", panel)
 
     def test_fp32_refusal_falls_back_to_dense_sdpa_not_to_sage(self):
         """An INT8 ConvRot checkpoint computes in FP32; Sage cannot take it."""
