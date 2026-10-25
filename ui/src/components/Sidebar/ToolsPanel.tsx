@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Wrench, Upload, X, Film, Image as ImageIcon, Mic, Play } from 'lucide-react'
+import { Wrench, Upload, X, Film, Image as ImageIcon, Mic, Play, Users } from 'lucide-react'
 import { useStore } from '../../stores/useStore'
 import * as api from '../../api/client'
 import { MediaFlowPanel } from './MediaFlowPanel'
@@ -153,6 +153,19 @@ export function ToolsPanel({
         <div className="flex items-center gap-1.5 text-[11px] text-text-muted uppercase tracking-wider mb-2">
           <Wrench size={12} /> Tools — post-process any clip
         </div>
+        {/* Characters live behind the LoRA browser's third tab; a direct entry
+            keeps editing a picture or voice from requiring a Director run. */}
+        <button
+          type="button"
+          onClick={() => useStore.getState().setLoraBrowserOpen(true, undefined, 'character')}
+          className="mb-2 flex w-full items-center gap-2 rounded-lg border border-border bg-bg-tertiary/60 px-2.5 py-2 text-left text-[11px] text-text-secondary transition-colors hover:border-accent-blue/40 hover:text-text-primary"
+        >
+          <Users size={13} className="shrink-0 text-text-muted" />
+          <span className="min-w-0 flex-1">
+            <span className="block font-medium text-text-primary">Characters</span>
+            <span className="block text-[10px] text-text-muted">Edit a saved picture, voice or name</span>
+          </span>
+        </button>
         {/* Tool selector */}
         <div className="flex bg-bg-tertiary rounded-lg p-0.5 border border-border">
           {([['upscale', 'Upscale'], ['film_grain', 'Film Grain'], ['revoice', 'Revoice']] as const).map(([val, label]) => (

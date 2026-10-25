@@ -1885,8 +1885,9 @@ interface AppState {
 
   loraBrowserOpen: boolean
   loraBrowserArch: string | null
+  loraBrowserKind: 'lora' | 'checkpoint' | 'character' | null
   loraBrowserDefaultDir: string | null
-  setLoraBrowserOpen: (open: boolean, arch?: string) => void
+  setLoraBrowserOpen: (open: boolean, arch?: string, kind?: 'lora' | 'checkpoint' | 'character') => void
   setLoraBrowserDefaultDir: (dir: string | null) => void
   civitSearchResults: CivitAIModel[]
   civitSearchCursor: string | null
@@ -5288,11 +5289,12 @@ export const useStore = create<AppState>((set, get) => ({
 
   loraBrowserOpen: false,
   loraBrowserArch: null,
+  loraBrowserKind: null,
   loraBrowserDefaultDir: null,
   setLoraBrowserDefaultDir: (dir) => set({ loraBrowserDefaultDir: dir }),
-  setLoraBrowserOpen: (open, arch) => {
+  setLoraBrowserOpen: (open, arch, kind) => {
     if (open) {
-      set({ loraBrowserOpen: true, loraBrowserArch: arch || null, civitSearchResults: [], civitSearchCursor: null, civitSelectedModel: null })
+      set({ loraBrowserOpen: true, loraBrowserArch: arch || null, loraBrowserKind: kind || null, civitSearchResults: [], civitSearchCursor: null, civitSelectedModel: null })
       // Adopt downloads started by URL imports, recipes, or another browser
       // session instead of assuming this store initiated every transfer.
       get().pollCivitAIDownloads()

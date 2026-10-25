@@ -455,6 +455,104 @@ def attach_character_voice(character_id: str, voice_path: str) -> dict:
         "filename": source.name, "duration_seconds": duration})
 
 
+def update_character(
+    character_id: str,
+    *,
+    name: str | None = None,
+    visual_path: str | None = None,
+    visual_type: str | None = None,
+    voice_path: str | None = None,
+    use_video_voice: bool = False,
+) -> dict:
+    """Change a saved character in place, keeping its id.
+
+    Director plans, presets, and face-refiner mappings store the character id,
+    so editing must never create a second record: the same id keeps pointing at
+    the new picture, voice, or name.
+    """
+
+    record = _get_character_record(character_id)
+    directory = _character_directory(character_id)
+    changes: dict = {}
+
+    if name is not None:
+        clean_name = " ".join(str(name).strip().split())[:120]
+        if not clean_name:
+            raise ValueError("Give this character a name.")
+        changes["name"] = clean_name
+
+    kind = str((record.get("visual") or {}).get("type") or "image")
+    if visual_path:
+        new_kind = str(visual_type or kind).strip().lower()
+        if new_kind not in {"image", "video"}:
+            raise ValueError("A saved character needs an image or video reference.")
+        source = _source_path(
+            visual_path,
+            _IMAGE_EXTENSIONS if new_kind == "image" else _VIDEO_EXTENSIONS,
+        )
+        source_duration = _probe_duration(source) if new_kind == "video" else None
+        if new_kind == "video" and source_duration is not None and source_duration < 2.0:
+            raise ValueError(
+                f"The character video is {source_duration:.2f}s; MiniMax H3 Omni requires at least 2 seconds."
+            )
+        previous = directory / str((record.get("visual") or {}).get("storage_name") or "")
+        destination = directory / f"visual{source.suffix.lower()}"
+        shutil.copy2(source, destination)
+        if previous.is_file() and previous.name != destination.name:
+            previous.unlink()
+        changes["visual"] = {
+            "type": new_kind,
+            "path": str(destination),
+            "storage_name": destination.name,
+            "filename": source.name,
+            "duration_seconds": source_duration,
+            "has_audio": _video_has_audio(destination) if new_kind == "video" else False,
+        }
+        # Views and any stored latent belong to the replaced media.
+        changes["image_views"] = None
+        changes["refmod"] = None
+        reference = directory / "reference.safetensors"
+        if reference.is_file():
+            reference.unlink()
+        kind = new_kind
+
+    if voice_path:
+        source = _source_path(voice_path, _AUDIO_EXTENSIONS)
+        duration = _probe_duration(source)
+        if duration is None or duration < 2:
+            raise ValueError("Choose at least two seconds of readable voice audio.")
+        previous_voice = directory / str((record.get("voice") or {}).get("storage_name") or "")
+        destination = directory / f"voice{source.suffix.lower()}"
+        shutil.copy2(source, destination)
+        if previous_voice.is_file() and previous_voice.name != destination.name:
+            previous_voice.unlink()
+        changes["voice"] = {
+            "storage_name": destination.name,
+            "filename": source.name,
+            "duration_seconds": duration,
+        }
+    elif use_video_voice:
+        if kind != "video":
+            raise ValueError("Only a video character reference can supply its own voice.")
+        visual = directory / str(changes.get("visual", record.get("visual") or {}).get("storage_name") or "")
+        if not visual.is_file():
+            raise ValueError("Replace the character reference video first.")
+        destination = directory / "voice.wav"
+        _extract_voice(visual, destination)
+        duration = _probe_duration(destination)
+        if duration is None or duration < 2:
+            raise ValueError("That video has no usable voice track.")
+        changes["voice"] = {
+            "storage_name": destination.name,
+            "filename": f"{changes.get('name') or record.get('name') or 'character'} voice.wav",
+            "duration_seconds": duration,
+        }
+
+    if not changes:
+        return _public_record(record)
+    return _update_character(character_id, **changes)
+
+
 def create_character(
     *,
     name: str,

@@ -2013,6 +2013,28 @@ export async function createCharacter(params: {
   return res.json()
 }
 
+export async function updateCharacter(
+  characterId: string,
+  params: {
+    name?: string
+    visual_path?: string
+    visual_type?: 'image' | 'video'
+    voice_path?: string
+    use_video_voice?: boolean
+  },
+): Promise<SavedOmniCharacter> {
+  const res = await fetch(`${BASE}/api/v1/characters/${encodeURIComponent(characterId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Character update failed' }))
+    throw new Error(error.detail || 'Character update failed')
+  }
+  return res.json()
+}
+
 export async function deleteCharacter(characterId: string): Promise<void> {
   const res = await fetch(`${BASE}/api/v1/characters/${encodeURIComponent(characterId)}`, {
     method: 'DELETE',

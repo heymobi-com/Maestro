@@ -9992,6 +9992,31 @@ async def create_saved_character(request: Request):
     return character
 
 
+@api.patch("/api/v1/characters/{character_id}")
+async def update_saved_character(character_id: str, request: Request):
+    """Edit a saved character in place, keeping its id for existing plans."""
+    from services.character_library import update_character
+
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Send the character fields to change.")
+    try:
+        character = await asyncio.to_thread(
+            update_character,
+            character_id,
+            name=body.get("name"),
+            visual_path=body.get("visual_path") or None,
+            visual_type=body.get("visual_type") or None,
+            voice_path=body.get("voice_path") or None,
+            use_video_voice=body.get("use_video_voice") is True,
+        )
+    except ValueError as error:
+        message = str(error)
+        status = 404 if "not found" in message.lower() else 400
+        raise HTTPException(status_code=status, detail=message) from error
+    return character
+
+
 @api.delete("/api/v1/characters/{character_id}")
 def delete_saved_character(character_id: str):
     from services.character_library import delete_character

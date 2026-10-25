@@ -71,6 +71,12 @@ export function LoraBrowser() {
   // LoRA (adapter) vs Checkpoint (full model) browse mode. Checkpoint mode
   // searches CivitAI Checkpoints and imports them as finetune model variants.
   const [browseKind, setBrowseKind] = useState<'lora' | 'checkpoint' | 'character'>('lora')
+  // Opening the browser from a Characters entry point lands on that tab
+  // instead of making the user find it inside the LoRA browser.
+  const requestedKind = useStore(s => s.loraBrowserKind)
+  useEffect(() => {
+    if (open && requestedKind) setBrowseKind(requestedKind)
+  }, [open, requestedKind])
   // Sticky across sessions (localStorage) — the master nsfw_mode gate below
   // still applies, so a persisted "on" is inert until Mature Mode is enabled.
   const [nsfw, setNsfw] = useState(() => {
