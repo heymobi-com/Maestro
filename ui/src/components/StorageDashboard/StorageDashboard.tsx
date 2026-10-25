@@ -3,8 +3,9 @@ import { X, HardDrive, Loader2, Trash2, RefreshCw, Copy, Boxes, FolderOpen, Film
 import { useStore } from '../../stores/useStore'
 import {
   fetchStorageUsage, fetchStorageDuplicates, reclaimDuplicate, removeLinkedDuplicate,
+  fetchStorageVariants, deleteStorageVariants,
   deleteModel, deleteLoraFile, deleteWorkspace as apiDeleteWorkspace,
-  type StorageUsage, type StorageDuplicate,
+  type StorageUsage, type StorageDuplicate, type StorageVariantGroup,
 } from '../../api/client'
 import { formatBytes } from '../../lib/format'
 
@@ -22,6 +23,8 @@ export function StorageDashboard() {
   const [usageLoading, setUsageLoading] = useState(false)
   const [dupes, setDupes] = useState<{ duplicates: StorageDuplicate[]; conflicts: StorageDuplicate[]; total_reclaimable_bytes: number } | null>(null)
   const [dupesLoading, setDupesLoading] = useState(false)
+  const [variants, setVariants] = useState<{ groups: StorageVariantGroup[]; total_reclaimable_bytes: number } | null>(null)
+  const [variantsLoading, setVariantsLoading] = useState(false)
   const [confirmKey, setConfirmKey] = useState<string | null>(null)
   const [busyKey, setBusyKey] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -40,6 +43,18 @@ export function StorageDashboard() {
   useEffect(() => {
     if (open) loadUsage()
   }, [open, loadUsage])
+
+  const scanVariants = useCallback(async () => {
+    setVariantsLoading(true)
+    setError(null)
+    try {
+      setVariants(await fetchStorageVariants())
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setVariantsLoading(false)
+    }
+  }, [])
 
   const scanDupes = useCallback(async () => {
     setDupesLoading(true)
@@ -130,6 +145,63 @@ export function StorageDashboard() {
             </div>
           ))}
         </div>
+
+        {/* Model variants of the same model */}
+        <section>
+          <div className="flex items-center gap-2 mb-2">
+            <h2 className="text-xs font-medium text-text-primary uppercase tracking-wider">Duplicate model variants</h2>
+            <button
+              onClick={scanVariants}
+              disabled={variantsLoading}
+              className="flex items-center gap-1 px-2 py-1 text-[10px] rounded border border-border text-text-secondary hover:text-text-primary transition-colors disabled:opacity-50"
+            >
+              {variantsLoading ? <Loader2 size={10} className="animate-spin" /> : <RefreshCw size={10} />}
+              Scan
+            </button>
+            <span className="text-[10px] text-text-muted">
+              two precisions of the same model on disk — the one your settings load is always kept
+            </span>
+          </div>
+          {variants && variants.groups.length === 0 && (
+            <div className="text-xs text-text-muted py-2">
+              No duplicate variants — each model keeps a single copy.
+            </div>
+          )}
+          {variants && variants.groups.length > 0 && (
+            <div className="rounded-lg border border-border overflow-hidden">
+              {variants.groups.map(group => (
+                <div key={group.group} className="border-b border-border last:border-b-0">
+                  <div className="flex items-center gap-2 px-3 py-1.5 text-xs bg-bg-tertiary/40">
+                    <span className="truncate text-text-primary flex-1 min-w-0" title={group.group}>{group.label}</span>
+                    <span className="text-text-muted shrink-0">{formatBytes(group.reclaimable_bytes)} spare</span>
+                    {rowBtn(`variants:${group.group}`, `Free ${formatBytes(group.reclaimable_bytes)}`, async () => {
+                      const spare = group.variants.filter(v => v.removable).map(v => v.filename)
+                      await deleteStorageVariants(spare)
+                      setVariants(prev => prev ? {
+                        groups: prev.groups.filter(g => g.group !== group.group),
+                        total_reclaimable_bytes: prev.total_reclaimable_bytes - group.reclaimable_bytes,
+                      } : prev)
+                    })}
+                  </div>
+                  {group.variants.map(variant => (
+                    <div key={variant.filename} className="flex items-center gap-2 px-3 py-1 text-[10px] text-text-secondary hover:bg-bg-hover">
+                      <span className={`px-1 py-0.5 rounded uppercase text-[9px] shrink-0 ${
+                        variant.removable ? 'bg-bg-tertiary text-text-muted' : 'bg-accent-blue/15 text-accent-blue'
+                      }`}>
+                        {variant.removable ? 'spare' : 'in use'}
+                      </span>
+                      <span className="truncate flex-1 min-w-0" title={`${variant.filename}\n${variant.models.join(', ')}`}>
+                        {variant.filename}
+                        <span className="ml-1 text-text-muted">({variant.models.join(', ')})</span>
+                      </span>
+                      <span className="tabular-nums shrink-0">{formatBytes(variant.size_bytes)}</span>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
 
         {/* Duplicates */}
         <section>

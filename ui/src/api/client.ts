@@ -3029,6 +3029,50 @@ export async function fetchStorageDuplicates(): Promise<{ duplicates: StorageDup
   return res.json()
 }
 
+export interface StorageVariant {
+  filename: string
+  size_bytes: number
+  removable: boolean
+  /** Model entries in the registry that resolve to this file. */
+  models: string[]
+  path?: string | null
+}
+
+export interface StorageVariantGroup {
+  group: string
+  /** Family name the user recognises, e.g. "minimax_h3". */
+  label: string
+  /** The copy kept: the one an in-use model loads. */
+  keep: { filename: string; size_bytes: number; models: string[] }
+  variants: StorageVariant[]
+  reclaimable_bytes: number
+}
+
+export async function fetchStorageVariants(): Promise<{
+  groups: StorageVariantGroup[]
+  total_reclaimable_bytes: number
+}> {
+  const res = await fetch(`${BASE}/api/v1/storage/variants`)
+  if (!res.ok) throw new Error('Failed to group model variants')
+  return res.json()
+}
+
+export async function deleteStorageVariants(filenames: string[]): Promise<{
+  freed_bytes: number
+  deleted: string[]
+}> {
+  const res = await fetch(`${BASE}/api/v1/storage/variants/delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ filenames }),
+  })
+  if (!res.ok) {
+    const payload = await res.json().catch(() => ({ detail: 'Failed to delete the spare variants' }))
+    throw new Error(payload.detail || 'Failed to delete the spare variants')
+  }
+  return res.json()
+}
+
 export async function reclaimDuplicate(path: string): Promise<{ freed_bytes: number }> {
   const res = await fetch(`${BASE}/api/v1/storage/duplicates/reclaim`, {
     method: 'POST',
