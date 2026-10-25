@@ -11172,10 +11172,42 @@ def _enqueue_deferred_generation_preparation(body: dict) -> dict:
     }
 
 
+def _model_download_confirmation(body: dict):
+    """Ask before a weights download the browser has not confirmed yet.
+
+    Every transformer variant is several gigabytes, so a request that would
+    fetch one is stopped here, before a job is queued, and the browser shows
+    the variant that is already installed as the alternative. A resubmission
+    carrying ``confirm_model_download`` proceeds normally.
+    """
+
+    if not isinstance(body, dict):
+        return None
+    if body.pop("confirm_model_download", False) is True:
+        return None
+    model_type = str(body.get("model_type") or "")
+    if not model_type:
+        return None
+    try:
+        info = wgp.get_model_download_confirmation(model_type)
+    except Exception:
+        return None
+    if not info:
+        return None
+    return {
+        "detail": info.get("message") or "This generation would download a model.",
+        "code": "model_download_confirmation",
+        **info,
+    }
+
+
 @api.post("/api/v1/generate")
 async def generate(request: Request):
     """Submit a generation job. Returns immediately with a job_id."""
     body = await request.json()
+    confirmation = _model_download_confirmation(body)
+    if confirmation is not None:
+        return JSONResponse(status_code=409, content=confirmation)
     if _generation_request_uses_serial_auto_planner(body):
         with _studio_submission_lock:
             submission_id = str(body.get("_client_submission_id") or "")

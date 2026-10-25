@@ -3840,6 +3840,54 @@ def get_local_model_filename(model_filename, use_locator = True, extra_paths = N
     return local_model_filename
 
 
+def get_model_download_confirmation(model_type):
+    """Describe a weights download this request would trigger, if any.
+
+    Returns ``None`` when the variant the current settings ask for is already
+    installed. Otherwise the caller asks the user before spending minutes on a
+    multi-gigabyte fetch, and can show the variant that *is* installed.
+    """
+
+    model_def = get_model_def(model_type) or {}
+    if not model_def:
+        return None
+    save_quantized = args.save_quantized and model_def is not None
+    try:
+        primary = get_model_filename(
+            model_type=model_type,
+            quantization="" if save_quantized else transformer_quantization,
+            dtype_policy=transformer_dtype_policy,
+        )
+    except Exception:
+        return None
+    if not primary or len(primary) == 0:
+        return None
+    if get_local_model_filename(primary) is not None:
+        return None
+    wanted = os.path.basename(str(primary))
+    alternatives = []
+    for url in model_def.get("URLs") or []:
+        name = os.path.basename(str(url)) if isinstance(url, str) else ""
+        if not name or name == wanted:
+            continue
+        located = get_local_model_filename(name)
+        if not located:
+            continue
+        try:
+            size_gb = os.path.getsize(located) / (1024 ** 3)
+        except OSError:
+            size_gb = 0.0
+        alternatives.append({"filename": name, "size_gb": round(size_gb, 2)})
+    from services.model_downloads import describe_download
+
+    return describe_download(
+        model_name=get_model_name(model_type) or model_type,
+        download_filename=wanted,
+        quantization=str(transformer_quantization or "bf16"),
+        local_alternatives=alternatives,
+    )
+
+
 def get_compatible_local_model_filename(
     model_filename,
     model_type,

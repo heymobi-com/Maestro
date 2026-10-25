@@ -244,6 +244,19 @@ export async function submitGeneration(
       _queue_mode: holdForQueue ? 'held' : 'now',
     }),
   })
+  if (res.status === 409) {
+    // A missing model variant costs gigabytes. Ask once, naming the variant
+    // that is already installed, instead of fetching it silently.
+    const payload = await res.json().catch(() => null)
+    const confirmation = payload?.code === 'model_download_confirmation' ? payload : null
+    if (confirmation) {
+      if (!window.confirm(`${confirmation.detail}\n\nDownload it now?`)) {
+        throw new Error('Generation cancelled: the model download was not confirmed.')
+      }
+      return submitGeneration({ ...params, confirm_model_download: true }, holdForQueue)
+    }
+    throw new Error(payload?.detail || 'Generation failed')
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Generation failed' }))
     throw new Error(err.detail || 'Generation failed')
