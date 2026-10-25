@@ -7076,6 +7076,15 @@ async def update_system_config(request: Request):
     # Apply runtime side effects where possible
     if "attention_mode" in updated:
         wgp.attention_mode = updated["attention_mode"]
+    if "transformer_quantization" in updated:
+        # Every filename resolution reads this module global, so a saved change
+        # that stops here keeps asking for the previous variant and can start a
+        # multi-gigabyte download the user believes they already avoided.
+        wgp.transformer_quantization = str(updated["transformer_quantization"])
+        wgp.reload_needed = True
+    if "text_encoder_quantization" in updated:
+        wgp.text_encoder_quantization = str(updated["text_encoder_quantization"])
+        wgp.reload_needed = True
     if "vae_config" in updated:
         wgp.vae_config = updated["vae_config"]
     if "compile" in updated:

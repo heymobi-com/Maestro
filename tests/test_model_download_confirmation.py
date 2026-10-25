@@ -5,9 +5,11 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from pathlib import Path
 
 
 APP_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app"))
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)
 
@@ -59,6 +61,20 @@ class DownloadConfirmationMessageTests(unittest.TestCase):
             should_confirm_missing_variant(
                 [{"filename": "other_int8.safetensors", "size_gb": 6.0}],
             )
+        )
+
+    def test_saving_the_quantization_reaches_the_running_process(self):
+        """Saving a variant must not wait for a restart to take effect."""
+
+        launch = (Path(ROOT) / "app" / "launch.py").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'wgp.transformer_quantization = str(updated["transformer_quantization"])',
+            launch,
+        )
+        self.assertIn(
+            'wgp.text_encoder_quantization = str(updated["text_encoder_quantization"])',
+            launch,
         )
 
 
