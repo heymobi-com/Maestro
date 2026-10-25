@@ -73,6 +73,16 @@ export function MiniMaxH3Optimizations() {
   const vedaStatus = modelOptions?.veda_attention_status
   const vedaSupported = vedaStatus?.supported === true
   const vedaExperimental = modelOptions?.veda_attention_experimental === true
+
+  // A checkpoint-level refusal is not something a runtime install can fix, so
+  // say which mix is wrong instead of offering the option and failing later.
+  const check = (status?: { checkpoint?: string; reason?: string | null } | null) => ({
+    blocked: !!status?.checkpoint,
+    reason: status?.checkpoint ? (status.reason || 'Not compatible with the selected checkpoint.') : '',
+  })
+  const solCheck = check(modelOptions?.sol_attention_status)
+  const slaCheck = check(modelOptions?.sla_attention_status)
+  const vedaCheck = check(vedaStatus)
   const activeCount = [turboEnabled, solEnabled, slaEnabled, vedaEnabled, cacheEnabled].filter(Boolean).length
 
   if (!isH3 && !advisory) return null
@@ -168,7 +178,9 @@ export function MiniMaxH3Optimizations() {
 
   const solHelp = solSupported
     ? 'Uses H3-aware sparse attention with exact reference and audio conditioning. Its compiled kernels are cached across restarts, and unsupported calls fall back automatically.'
-    : `${modelOptions?.sol_attention_status?.reason || 'Sol Engine is unavailable in this runtime.'} On supported hardware, run Maestro's normal Pinokio Update to install or repair the H3 performance runtime.`
+    : solCheck.blocked
+      ? solCheck.reason
+      : `${modelOptions?.sol_attention_status?.reason || 'Sol Engine is unavailable in this runtime.'} On supported hardware, run Maestro's normal Pinokio Update to install or repair the H3 performance runtime.`
 
   return (
     <div className="space-y-2">
@@ -313,7 +325,7 @@ export function MiniMaxH3Optimizations() {
                 }`}>
                   <input
                     type="checkbox"
-                    checked={solEnabled}
+                    checked={solEnabled && solSupported}
                     disabled={!solSupported}
                     onChange={event => setParam(
                       'override_attention',
@@ -325,7 +337,9 @@ export function MiniMaxH3Optimizations() {
                   <span className="min-w-0">
                     <span className="block text-[11px] font-medium text-text-primary">Sol Engine</span>
                     <span className="block text-[9px] text-text-muted">
-                      {solSupported ? 'H3 sparse attention' : 'Unavailable in this runtime'}
+                      {solCheck.blocked
+                        ? 'Not compatible with this checkpoint'
+                        : solSupported ? 'H3 sparse attention' : 'Unavailable in this runtime'}
                     </span>
                   </span>
                 </label>
@@ -336,11 +350,14 @@ export function MiniMaxH3Optimizations() {
             {modelOptions?.sla_attention && (
               <div className={`flex items-center gap-2 px-3 py-2 transition-colors ${
                 slaEnabled ? 'bg-accent-blue/10' : ''
-              }`}>
-                <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 select-none">
+              } ${slaSupported ? '' : 'opacity-65'}`}>
+                <label className={`flex min-w-0 flex-1 items-center gap-2.5 select-none ${
+                  slaSupported ? 'cursor-pointer' : 'cursor-not-allowed'
+                }`}>
                   <input
                     type="checkbox"
-                    checked={slaEnabled}
+                    checked={slaEnabled && slaSupported}
+                    disabled={!slaSupported}
                     onChange={event => setParam(
                       'override_attention',
                       event.target.checked ? 'sla' : modelOptions.sla_attention_default ? 'sdpa' : '',
@@ -353,9 +370,11 @@ export function MiniMaxH3Optimizations() {
                       SLA Sparse Attention{slaExperimental ? ' — Experimental' : ''}
                     </span>
                     <span className="block text-[9px] text-text-muted">
-                      {slaSupported
-                        ? slaExperimental ? 'Optional acceleration; compare motion and audio' : 'Published FastH3 sparse recipe'
-                        : 'Safe dense fallback when unavailable'}
+                      {slaCheck.blocked
+                        ? 'Not compatible with this checkpoint'
+                        : slaSupported
+                          ? slaExperimental ? 'Optional acceleration; compare motion and audio' : 'Published FastH3 sparse recipe'
+                          : 'Safe dense fallback when unavailable'}
                     </span>
                   </span>
                 </label>
@@ -365,7 +384,9 @@ export function MiniMaxH3Optimizations() {
                     ? slaExperimental
                       ? 'Uses 90% block-sparse attention on this Full or Pruned checkpoint. Off by default; speed, motion, reference fidelity and audio quality need comparison. The first use compiles Triton kernels. Reference and audio prefix rows stay protected.'
                       : 'Uses the checkpoint author\'s 90% block-sparse SLA recipe. The first use compiles and caches Triton kernels; reference and audio prefix rows stay protected.'
-                    : `${modelOptions?.sla_attention_status?.reason || 'SLA is unavailable in this runtime.'} Maestro will automatically use dense attention.`}
+                    : slaCheck.blocked
+                      ? slaCheck.reason
+                      : `${modelOptions?.sla_attention_status?.reason || 'SLA is unavailable in this runtime.'} Maestro will automatically use dense attention.`}
                 />
               </div>
             )}
@@ -379,7 +400,7 @@ export function MiniMaxH3Optimizations() {
                 }`}>
                   <input
                     type="checkbox"
-                    checked={vedaEnabled}
+                    checked={vedaEnabled && vedaSupported}
                     disabled={!vedaSupported}
                     onChange={event => setParam(
                       'override_attention',
@@ -393,9 +414,11 @@ export function MiniMaxH3Optimizations() {
                       Veda Sparse Attention{vedaExperimental ? ' — Experimental' : ''}
                     </span>
                     <span className="block text-[9px] text-text-muted">
-                      {vedaSupported
-                        ? 'First use downloads a predictor; compare quality'
-                        : vedaStatus?.reason || 'Unavailable in this runtime'}
+                      {vedaCheck.blocked
+                        ? 'Not compatible with this checkpoint'
+                        : vedaSupported
+                          ? 'First use downloads a predictor; compare quality'
+                          : vedaStatus?.reason || 'Unavailable in this runtime'}
                     </span>
                   </span>
                 </label>
@@ -403,7 +426,9 @@ export function MiniMaxH3Optimizations() {
                   label="About H3 Veda Sparse Attention"
                   text={vedaSupported
                     ? 'Uses the existing H3 model with a Veda predictor downloaded on first use (about 281 MB for INT8 ConvRot or 551 MB for BF16). Compare motion, reference fidelity, and audio quality.'
-                    : `${vedaStatus?.reason || 'Veda is unavailable in this runtime.'} The toggle is disabled on unsupported hardware.`}
+                    : vedaCheck.blocked
+                      ? vedaCheck.reason
+                      : `${vedaStatus?.reason || 'Veda is unavailable in this runtime.'} The toggle is disabled on unsupported hardware.`}
                 />
               </div>
             )}

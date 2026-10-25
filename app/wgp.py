@@ -3269,6 +3269,32 @@ def get_transformer_dtype(model_type, transformer_dtype_policy):
     else:
         return torch.bfloat16
 
+
+# Sparsity engines that run FP16/BF16 kernels only. Sol, SLA and Veda reject
+# FP32 outright, and the Sage implementations assert on it.
+_HALF_PRECISION_ATTENTION_MODES = ("sol", "sla", "veda", "sage", "sage2", "sage3")
+
+
+def _h3_checkpoint_quantization_label(model_type):
+    """Quantization label of the checkpoint this model would actually load."""
+
+    try:
+        model_def = get_model_def(model_type) or {}
+        if not str(model_def.get("architecture") or "").startswith("minimax_h3"):
+            return ""
+        save_quantized = args.save_quantized and model_def is not None
+        primary = get_model_filename(
+            model_type=model_type,
+            quantization="" if save_quantized else transformer_quantization,
+            dtype_policy=transformer_dtype_policy,
+        )
+        if not primary or len(primary) == 0:
+            return ""
+        local = get_compatible_local_model_filename(primary, model_type, file_type=0) or primary
+        return quant_router.detect_quantization_label_from_filename(local) or ""
+    except Exception:
+        return ""
+
 def get_settings_file_name(model_type):
     return  os.path.join(args.settings, model_type + "_settings.json")
 
@@ -8307,6 +8333,25 @@ def generate_video(
         send_cmd("info", f"You have selected attention mode '{attn}'. However it is not installed or supported on your system. You should either install it or switch to the default 'sdpa' attention.")
         send_cmd("exit")
         return True
+
+    if attn in _HALF_PRECISION_ATTENTION_MODES:
+        _quant_label = _h3_checkpoint_quantization_label(model_type)
+        if _quant_label == "INT8 ConvRot":
+            # These kernels reject anything but FP16/BF16, and this checkpoint
+            # keeps its activations in FP32. Refusing here costs a line in the
+            # log; discovering it mid-render costs a full model load per clip.
+            print(
+                "[MiniMax H3] Sol Engine, SLA, Veda and Sage need FP16/BF16 "
+                f"activations, but the {_quant_label} checkpoint computes in "
+                "FP32; using dense SDPA attention for this generation."
+            )
+            send_cmd(
+                "info",
+                f"'{attn}' attention needs FP16/BF16 activations and this INT8 "
+                "ConvRot checkpoint computes in FP32. This generation uses "
+                "dense SDPA attention instead.",
+            )
+            attn = "sdpa"
     
     # Track whether user selected auto aspect (resolution was "auto*") vs fixed (e.g. "1280x720")
     _auto_aspect = not resolution or "x" not in resolution or resolution.startswith("auto")

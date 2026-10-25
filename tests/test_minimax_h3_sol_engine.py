@@ -292,6 +292,27 @@ class TestSolAttentionRouting(unittest.TestCase):
         self.assertTrue(policy._runtime_failed)
         self.assertFalse(policy.enabled)
 
+    def test_an_int8_convrot_checkpoint_hides_half_precision_engines(self):
+        """The sidebar must not offer a mix that can only fail mid-render."""
+
+        engine = (APP / "wgp.py").read_text(encoding="utf-8")
+        launch = (APP / "launch.py").read_text(encoding="utf-8")
+        panel = (
+            ROOT / "ui" / "src" / "components" / "Sidebar" / "MiniMaxH3Optimizations.tsx"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            '_HALF_PRECISION_ATTENTION_MODES = ("sol", "sla", "veda", "sage", "sage2", "sage3")',
+            engine,
+        )
+        self.assertIn("def _h3_checkpoint_quantization_label(", engine)
+        # Pre-flight refusal, before any checkpoint is loaded.
+        self.assertIn("using dense SDPA attention for this generation.", engine)
+        # The same fact reaches the sidebar as a per-engine reason.
+        self.assertIn('"checkpoint": _dense_only_checkpoint', launch)
+        self.assertIn("Not compatible with this checkpoint", panel)
+        self.assertIn("disabled={!slaSupported}", panel)
+
     def test_fp32_refusal_falls_back_to_dense_sdpa_not_to_sage(self):
         """An INT8 ConvRot checkpoint computes in FP32; Sage cannot take it."""
 

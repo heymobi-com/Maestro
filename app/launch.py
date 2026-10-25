@@ -6569,6 +6569,31 @@ def get_model_options(model_type: str):
                 "reason": f"H3 Veda runtime detection failed: {error}",
             }
 
+    # Sol, SLA and Veda run FP16/BF16 kernels only, while an INT8 ConvRot H3
+    # checkpoint computes FP32 activations. Report the mix here so the sidebar
+    # cannot invite a combination that only fails after the model has loaded.
+    try:
+        _dense_only_checkpoint = wgp._h3_checkpoint_quantization_label(model_type)
+    except Exception:
+        _dense_only_checkpoint = ""
+    if _dense_only_checkpoint:
+        _dense_only_reason = (
+            f"This {_dense_only_checkpoint} checkpoint computes activations in "
+            "FP32, and these engines only accept FP16/BF16. Generation uses "
+            "dense SDPA attention instead."
+        )
+        for _attention_status in (
+            _sol_attention_status,
+            _sla_attention_status,
+            _veda_attention_status,
+        ):
+            if isinstance(_attention_status, dict):
+                _attention_status.update({
+                    "supported": False,
+                    "reason": _dense_only_reason,
+                    "checkpoint": _dense_only_checkpoint,
+                })
+
     return {
         "model_type": model_type,
         "architecture": md.get("architecture", model_type),

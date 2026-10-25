@@ -963,6 +963,8 @@ export interface ModelOptions {
     installed: boolean
     supported: boolean
     reason?: string | null
+    /** Quantization label when the selected checkpoint cannot run this engine. */
+    checkpoint?: string
     capability?: string
     triton_version?: string | null
     minimum_triton?: string
@@ -974,6 +976,7 @@ export interface ModelOptions {
     installed: boolean
     supported: boolean
     reason?: string | null
+    checkpoint?: string
     capability?: string
     triton_version?: string | null
     first_run_compiles_kernels?: boolean
@@ -986,6 +989,7 @@ export interface ModelOptions {
     installed: boolean
     supported: boolean
     reason?: string | null
+    checkpoint?: string
     capability?: string
     triton_version?: string | null
     minimum_triton?: string
