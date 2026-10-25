@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import { Check, Mic, MoreHorizontal, Plus, Search, Trash2, UserRound, X } from 'lucide-react'
+import { Check, Mic, MoreHorizontal, Pencil, Plus, Search, Trash2, UserRound, X } from 'lucide-react'
 import type { SavedOmniCharacter } from '../../types'
 import { characterDisplayName } from '../../lib/characters'
 import { ExportCharacterButton } from './CharacterFileActions'
+import { CharacterEditDialog } from './CharacterEditDialog'
 
 interface Props {
   characters: SavedOmniCharacter[]
@@ -16,6 +17,7 @@ interface Props {
 export function ReferenceCharacterPicker({ characters, addedIds, disabled, onAdd, onDelete, scroll = true }: Props) {
   const [query, setQuery] = useState('')
   const [optionsId, setOptionsId] = useState<string | null>(null)
+  const [editing, setEditing] = useState<SavedOmniCharacter | null>(null)
   const optionsCard = useRef<HTMLElement>(null)
 
   useEffect(() => {
@@ -105,6 +107,11 @@ export function ReferenceCharacterPicker({ characters, addedIds, disabled, onAdd
             </button>
             {optionsOpen && <div id={`character-actions-${character.id}`} role="group" aria-label={`Actions for ${name}`}
               className="absolute inset-x-1.5 top-12 z-20 space-y-0.5 rounded-lg border border-border bg-bg-secondary p-1 shadow-xl">
+              <button type="button" disabled={disabled}
+                onClick={() => { setOptionsId(null); setEditing(character) }}
+                className="flex min-h-10 w-full items-center gap-2 rounded-md px-2 text-xs text-text-primary hover:bg-bg-hover disabled:opacity-40">
+                <Pencil size={13} className="shrink-0" /> Edit picture, voice or name
+              </button>
               <ExportCharacterButton character={character} disabled={disabled}
                 className="flex min-h-10 w-full items-center gap-2 rounded-md px-2 text-xs text-text-primary hover:bg-bg-hover disabled:opacity-40" />
               <button type="button" disabled={disabled} onClick={() => { setOptionsId(null); onDelete(character) }}
@@ -117,5 +124,6 @@ export function ReferenceCharacterPicker({ characters, addedIds, disabled, onAdd
       </div>
       {visible.length === 0 && <p role="status" className="px-3 py-7 text-center text-xs text-text-muted">No matching characters. Try another name.</p>}
     </div>
+    <CharacterEditDialog character={editing} onClose={() => setEditing(null)} />
   </div>
 }

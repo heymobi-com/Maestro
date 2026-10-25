@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+﻿import { useCallback, useEffect, useState } from 'react'
 import { Loader2, RefreshCw, Search, Trash2 } from 'lucide-react'
 import * as api from '../../api/client'
 import type { SavedOmniCharacter } from '../../types'
@@ -6,6 +6,7 @@ import { useStore } from '../../stores/useStore'
 import { characterDisplayName } from '../../lib/characters'
 import { CharacterVoiceButton, ExportCharacterButton, ImportCharacterButton } from './CharacterFileActions'
 import { CharacterImagesButton } from './CharacterImages'
+import { CharacterEditDialog } from './CharacterEditDialog'
 
 const REFMOD_COLLECTION_URL = 'https://huggingface.co/malcolmrey/minimaxh3/tree/main'
 
@@ -27,13 +28,7 @@ export function CharacterBrowser() {
   // Editing replaces the media in place: Director plans, presets and
   // face-refiner mappings all store the character id, so delete-and-reupload
   // silently broke every existing reference.
-  const [editingId, setEditingId] = useState<string | null>(null)
-  const [editName, setEditName] = useState('')
-  const [editVisual, setEditVisual] = useState<{ path: string; type: 'image' | 'video' } | null>(null)
-  const [editVoicePath, setEditVoicePath] = useState('')
-  const [editUseVideoVoice, setEditUseVideoVoice] = useState(false)
-  const [editBusy, setEditBusy] = useState(false)
-  const [editError, setEditError] = useState('')
+  const [editing, setEditing] = useState<SavedOmniCharacter | null>(null)
   const refresh = useCallback(() => {
     setLoading(true)
     setError('')
@@ -99,52 +94,11 @@ export function CharacterBrowser() {
     finally { setConfirmDelete(null) }
   }
 
-  const startEdit = (character: SavedOmniCharacter) => {
-    setEditingId(character.id)
-    setEditName(character.name)
-    setEditVisual(null)
-    setEditVoicePath('')
-    setEditUseVideoVoice(false)
-    setEditError('')
-  }
-  const pickVisual = async (file: File) => {
-    setEditBusy(true)
-    setEditError('')
-    try {
-      const uploaded = await api.uploadImage(file)
-      setEditVisual({ path: uploaded.path, type: file.type.startsWith('video/') ? 'video' : 'image' })
-    } catch (err) {
-      setEditError(err instanceof Error ? err.message : 'Could not upload that file.')
-    } finally { setEditBusy(false) }
-  }
-  const pickVoice = async (file: File) => {
-    setEditBusy(true)
-    setEditError('')
-    try {
-      const uploaded = await api.uploadAudio(file)
-      setEditVoicePath(uploaded.path)
-    } catch (err) {
-      setEditError(err instanceof Error ? err.message : 'Could not upload that voice.')
-    } finally { setEditBusy(false) }
-  }
-  const saveEdit = async (character: SavedOmniCharacter) => {
-    setEditBusy(true)
-    setEditError('')
-    try {
-      await api.updateCharacter(character.id, {
-        name: editName.trim() !== character.name ? editName : undefined,
-        visual_path: editVisual?.path,
-        visual_type: editVisual?.type,
-        voice_path: editVoicePath || undefined,
-        use_video_voice: editUseVideoVoice,
-      })
-      window.dispatchEvent(new Event('maestro-characters-changed'))
-      setEditingId(null)
-    } catch (err) {
-      setEditError(err instanceof Error ? err.message : 'Could not save the character.')
-    } finally { setEditBusy(false) }
-  }
-  const visible = characters.filter(character => {    if (filter === 'voice' && !character.voice) return false
+  const startEdit = (character: SavedOmniCharacter) => setEditing(character)
+
+
+  const visible = characters.filter(character => {
+    if (filter === 'voice' && !character.voice) return false
     if (filter === 'refmod' && !character.refmod) return false
     if (filter === 'no_voice' && character.voice) return false
     return `${characterDisplayName(character.name)} ${character.name} ${character.description || ''}`.toLowerCase().includes(query.toLowerCase())
@@ -182,7 +136,7 @@ export function CharacterBrowser() {
         </div>
         {files.length > 0 && <div className="space-y-2">
           {files.length > 1 && <input aria-label="Filter remote character files" value={fileSearch} onChange={event => setFileSearch(event.target.value)}
-            placeholder={`Search ${files.length} files…`} className="w-full min-w-0 rounded border border-border bg-bg-primary px-2 py-1.5 text-base sm:text-xs text-text-primary" />}
+            placeholder={`Search ${files.length} filesâ€¦`} className="w-full min-w-0 rounded border border-border bg-bg-primary px-2 py-1.5 text-base sm:text-xs text-text-primary" />}
           <select aria-label="Character file to import" value={filename} disabled={importing}
             onChange={event => setFilename(event.target.value)} className="w-full min-w-0 rounded border border-border bg-bg-primary px-2 py-2 text-base sm:text-xs text-text-primary">
             <option value="">Choose a character / RefMod file</option>
@@ -200,7 +154,7 @@ export function CharacterBrowser() {
     <div className="flex flex-wrap items-center gap-2">
       <div className="relative min-w-0 flex-1 basis-44">
         <Search size={13} className="absolute left-2 top-2.5 text-text-muted" />
-        <input aria-label="Search saved characters" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search characters…"
+        <input aria-label="Search saved characters" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search charactersâ€¦"
           className="w-full rounded-lg border border-border bg-bg-secondary py-2 pl-7 pr-2 text-base sm:text-xs text-text-primary" />
       </div>
       <select aria-label="Character filter" value={filter} onChange={event => setFilter(event.target.value)}
@@ -211,7 +165,7 @@ export function CharacterBrowser() {
       <button type="button" onClick={refresh} aria-label="Refresh characters" className="p-2 text-text-muted"><RefreshCw size={14} /></button>
     </div>
     {error && <p role="alert" className="text-xs text-indicator-error">{error}</p>}
-    {loading && characters.length === 0 && <p role="status" className="text-xs text-text-muted">Loading characters…</p>}
+    {loading && characters.length === 0 && <p role="status" className="text-xs text-text-muted">Loading charactersâ€¦</p>}
     {!loading && visible.length === 0 && <p className="text-xs text-text-muted">{characters.length ? 'No characters match this filter.' : 'No saved characters yet. Import a file above or save a character in Reference mode.'}</p>}
     <div className="grid grid-cols-1 min-[420px]:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
       {visible.map(character => <article key={character.id} className="min-w-0 overflow-hidden rounded-xl border border-border bg-bg-secondary">
@@ -220,60 +174,15 @@ export function CharacterBrowser() {
           : <video key={character.updated_at} src={character.visual.url} poster={character.visual.thumbnail_url} aria-label={`${characterDisplayName(character.name)} video preview`} controls muted playsInline preload="none" className="w-full aspect-video bg-bg-primary" />}
         <div className="p-3 space-y-2">
           <div className="flex gap-2 items-start"><h3 className="min-w-0 flex-1 text-sm font-medium text-text-primary break-words">{characterDisplayName(character.name)}</h3>
-            <button type="button" onClick={() => (editingId === character.id ? setEditingId(null) : startEdit(character))}
+            <button type="button" onClick={() => startEdit(character)}
               aria-label={`Edit ${characterDisplayName(character.name)}`} className="text-[10px] text-text-muted hover:text-accent-blue">
-              {editingId === character.id ? 'Close' : 'Edit'}
+              Edit
             </button>
             <button type="button" onClick={() => void remove(character)} aria-label={`Delete ${characterDisplayName(character.name)}`} className="text-text-muted hover:text-indicator-error text-[10px]">
               {confirmDelete === character.id ? 'Confirm delete' : <Trash2 size={12} />}
             </button>
           </div>
-          {editingId === character.id ? (
-            <div className="space-y-2 rounded-lg border border-border bg-bg-tertiary/40 p-2">
-              <label className="block text-[10px] text-text-secondary">
-                Name
-                <input value={editName} onChange={event => setEditName(event.target.value)} disabled={editBusy}
-                  className="mt-1 w-full rounded border border-border bg-bg-primary px-2 py-1.5 text-base sm:text-xs text-text-primary" />
-              </label>
-              <label className="block text-[10px] text-text-secondary">
-                Replace the picture or video
-                <input type="file" accept="image/*,video/*" disabled={editBusy}
-                  onChange={event => { const file = event.target.files?.[0]; if (file) void pickVisual(file) }}
-                  className="mt-1 w-full text-[10px] text-text-secondary file:mr-2 file:rounded file:border-0 file:bg-bg-tertiary file:px-2 file:py-1 file:text-text-primary" />
-              </label>
-              {editVisual && (
-                <p className="text-[10px] text-accent-blue">
-                  New {editVisual.type} ready: {(editVisual.path.split(/[\\/]/).pop())}
-                </p>
-              )}
-              <label className="block text-[10px] text-text-secondary">
-                Replace the voice (2 seconds or more)
-                <input type="file" accept="audio/*" disabled={editBusy}
-                  onChange={event => { const file = event.target.files?.[0]; if (file) void pickVoice(file) }}
-                  className="mt-1 w-full text-[10px] text-text-secondary file:mr-2 file:rounded file:border-0 file:bg-bg-tertiary file:px-2 file:py-1 file:text-text-primary" />
-              </label>
-              {editVoicePath && <p className="text-[10px] text-accent-blue">New voice ready: {editVoicePath.split(/[\\/]/).pop()}</p>}
-              {(editVisual?.type === 'video' || (!editVisual && character.visual.type === 'video')) && (
-                <label className="flex items-center gap-2 text-[10px] text-text-secondary">
-                  <input type="checkbox" checked={editUseVideoVoice} disabled={editBusy}
-                    onChange={event => setEditUseVideoVoice(event.target.checked)} className="accent-accent-blue" />
-                  Use the video&apos;s own voice
-                </label>
-              )}
-              {editError && <p role="alert" className="text-[10px] text-indicator-error">{editError}</p>}
-              <div className="flex gap-2">
-                <button type="button" onClick={() => void saveEdit(character)} disabled={editBusy}
-                  className="rounded bg-accent-blue px-2.5 py-1.5 text-[10px] font-medium text-white disabled:opacity-40">
-                  {editBusy ? 'Saving…' : 'Save changes'}
-                </button>
-                <button type="button" onClick={() => setEditingId(null)} disabled={editBusy}
-                  className="rounded border border-border px-2.5 py-1.5 text-[10px] text-text-secondary disabled:opacity-40">
-                  Cancel
-                </button>
-              </div>
-            </div>
-          ) : null}
-          <p className="text-[10px] text-text-muted">{character.refmod ? 'H3 RefMod' : 'Saved reference'} · {character.voice ? 'With voice' : 'No voice'}</p>
+          <p className="text-[10px] text-text-muted">{(character.refmod ? 'H3 RefMod' : 'Saved reference')} · {character.voice ? 'With voice' : 'No voice'}</p>
           <CharacterImagesButton character={character} />
           {character.description && <p className="text-[11px] text-text-secondary line-clamp-3 break-words">{character.description}</p>}
           {character.voice && <audio key={character.updated_at} controls preload="none" src={character.voice.url} aria-label={`${characterDisplayName(character.name)} voice preview`} className="w-full h-8" />}
@@ -281,6 +190,7 @@ export function CharacterBrowser() {
         </div>
       </article>)}
     </div>
+    <CharacterEditDialog character={editing} onClose={() => setEditing(null)} />
   </div>
   </section>
 }

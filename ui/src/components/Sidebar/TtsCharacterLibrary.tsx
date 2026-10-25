@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
-import { ChevronDown, Loader2, Plus, RefreshCw, UserPlus, UserRound } from 'lucide-react'
+import { ChevronDown, Loader2, Pencil, Plus, RefreshCw, UserPlus, UserRound } from 'lucide-react'
 import * as api from '../../api/client'
 import type { SavedOmniCharacter } from '../../types'
 import { characterDisplayName } from '../../lib/characters'
 import { ExportCharacterButton, ImportCharacterButton } from '../Characters/CharacterFileActions'
+import { CharacterEditDialog } from '../Characters/CharacterEditDialog'
 import { CharacterToolbarItem, SidebarDialog } from './SidebarPanels'
 
 export function TtsCharacterLibrary({ onSelect, onCharactersChange, selectedIds, canAdd, disabled, switchToClone }: {
@@ -20,6 +21,7 @@ export function TtsCharacterLibrary({ onSelect, onCharactersChange, selectedIds,
   const [error, setError] = useState('')
   const [refresh, setRefresh] = useState(0)
   const [formOpen, setFormOpen] = useState(false)
+  const [editing, setEditing] = useState<SavedOmniCharacter | null>(null)
   const [name, setName] = useState('')
   const [visual, setVisual] = useState<File | null>(null)
   const [voice, setVoice] = useState<File | null>(null)
@@ -113,7 +115,14 @@ export function TtsCharacterLibrary({ onSelect, onCharactersChange, selectedIds,
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-[10px] font-medium text-text-primary" title={characterDisplayName(character.name)}>{characterDisplayName(character.name)}</div>
                     <div className="text-[9px] text-text-muted">{character.voice ? 'Saved voice' : 'No saved voice reference'}</div>
-                    <ExportCharacterButton character={character} />
+                    <div className="flex items-center gap-2">
+                      <ExportCharacterButton character={character} />
+                      <button type="button" aria-label={`Edit ${characterDisplayName(character.name)}`}
+                        onClick={() => setEditing(character)}
+                        className="inline-flex items-center gap-1 text-[10px] text-text-muted hover:text-accent-blue">
+                        <Pencil size={10} /> Edit
+                      </button>
+                    </div>
                   </div>
                   <button type="button" aria-label={`${switchToClone ? 'Use Qwen3 Voice Cloning with' : 'Add voice for'} ${characterDisplayName(character.name)}`}
                     disabled={disabled || saving || selected || !character.voice?.path || !canAdd}
@@ -156,6 +165,7 @@ export function TtsCharacterLibrary({ onSelect, onCharactersChange, selectedIds,
           {error && <p role="alert" className="text-[10px] text-indicator-error">{error}</p>}
         </div>
       </SidebarDialog>
+      <CharacterEditDialog character={editing} onClose={() => setEditing(null)} />
     </>
   )
 }
