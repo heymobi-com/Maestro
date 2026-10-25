@@ -9,6 +9,28 @@ SOL_ATTN_TAU = 1.0
 SOL_ATTN_THRESH_TYPE = "diag"
 SOL_ATTN_MIN_TOKENS = 8192
 
+_HALF_DTYPES = (torch.float16, torch.bfloat16)
+
+
+def _dense_attention(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
+    """Dense attention in whatever dtype the projections actually produced.
+
+    Sol and Sage both reject anything but FP16/BF16, but an INT8 ConvRot H3
+    checkpoint runs its activations in FP32: the checkpoint stores FP32 biases
+    and the model locks its heads to FP32, so every projection keeps FP32.
+    Asking the global Sage backend after Sol refuses those tensors turns a
+    recoverable kernel mismatch into a failed shot that reloads the whole
+    model for every clip, so pick SDPA for them exactly as the model's own
+    dense path does.
+    """
+
+    from shared.attention import pay_attention, sdpa_wrapper
+
+    qkv = [query, key, value]
+    if query.dtype in _HALF_DTYPES:
+        return pay_attention(qkv, recycle_q=True)
+    return sdpa_wrapper(qkv, int(query.shape[1]))
+
 
 class MiniMaxH3SolAttention:
     """Apply Sol only to eligible H3 DiT attention and retain dense fallback.
@@ -27,13 +49,16 @@ class MiniMaxH3SolAttention:
         self._fallback_announced = False
         self.sink_tokens = 0
 
-    def _fallback(self, reason: Exception | str) -> None:
+    def _fallback(self, reason: Exception | str, dtype: torch.dtype | None = None) -> None:
         self.enabled = False
         self._runtime_failed = True
         if not self._fallback_announced:
-            from shared.attention import get_default_attention_mode
+            if dtype is not None and dtype not in _HALF_DTYPES:
+                dense = "SDPA (this checkpoint computes in FP32)"
+            else:
+                from shared.attention import get_default_attention_mode
 
-            dense = get_default_attention_mode()
+                dense = get_default_attention_mode()
             print(
                 "[MiniMax H3] Sol Engine could not run "
                 f"({reason}); falling back to {dense}."
@@ -156,7 +181,7 @@ class MiniMaxH3SolAttention:
                 query = value = prepared = None
             return output
         except Exception as error:  # preserve the existing process-wide dense recovery
-            self._fallback(error)
+            self._fallback(error, x.dtype)
             linear_input = output = project = key = value = query = prepared = None
             qkv = [
                 projection(x).view(batch, tokens, heads, head_dim)
@@ -166,12 +191,11 @@ class MiniMaxH3SolAttention:
             return self(qkv, False)
 
     def __call__(self, qkv_list, use_sol: bool):
-        from shared.attention import pay_attention
-
-        if not use_sol:
-            return pay_attention(qkv_list, recycle_q=True)
-
         query, key, value = qkv_list
+        if not use_sol:
+            qkv_list.clear()
+            return _dense_attention(query, key, value)
+
         try:
             from shared.sol_attn import sol_attn
 
@@ -186,8 +210,9 @@ class MiniMaxH3SolAttention:
                 int8_qk=True,
             )
         except Exception as error:  # first-run compilation can fail safely
-            self._fallback(error)
-            return pay_attention(qkv_list, recycle_q=True)
+            self._fallback(error, query.dtype)
+            qkv_list.clear()
+            return _dense_attention(query, key, value)
         qkv_list.clear()
         return output
 

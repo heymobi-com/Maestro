@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 import unittest
+from contextlib import contextmanager
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -142,6 +143,30 @@ class TestSolAttentionRouting(unittest.TestCase):
 
         cls.torch = torch
 
+    @staticmethod
+    @contextmanager
+    def _fake_sol_kernel(sol_attn):
+        """Stand in for the bundled kernel without importing it.
+
+        ``shared.sol_attn`` pulls in Triton and CUDA extensions, so replacing
+        the module entry for one call keeps this test runnable on a CPU-only
+        box while leaving ``sys.modules`` exactly as it was.
+        """
+
+        import types
+
+        module = types.ModuleType("shared.sol_attn")
+        module.sol_attn = sol_attn
+        saved = sys.modules.get("shared.sol_attn")
+        sys.modules["shared.sol_attn"] = module
+        try:
+            yield module
+        finally:
+            if saved is None:
+                sys.modules.pop("shared.sol_attn", None)
+            else:
+                sys.modules["shared.sol_attn"] = saved
+
     def test_main_h3_blocks_share_sol_policy_but_refiner_does_not(self):
         from models.minimax_h3.transformer import MiniMaxH3Transformer
 
@@ -266,6 +291,58 @@ class TestSolAttentionRouting(unittest.TestCase):
 
         self.assertTrue(policy._runtime_failed)
         self.assertFalse(policy.enabled)
+
+    def test_fp32_refusal_falls_back_to_dense_sdpa_not_to_sage(self):
+        """An INT8 ConvRot checkpoint computes in FP32; Sage cannot take it."""
+
+        from unittest import mock
+
+        from models.minimax_h3.sol_attention import MiniMaxH3SolAttention
+
+        torch = self.torch
+        policy = MiniMaxH3SolAttention()
+        policy.enabled = True
+        policy.sink_tokens = 0
+        qkv = [torch.randn(1, 4, 2, 4) for _ in range(3)]
+
+        def refuse(*_args, **_kwargs):
+            raise TypeError("q, k, and v must use torch.bfloat16")
+
+        with self._fake_sol_kernel(refuse), mock.patch(
+            "shared.attention.pay_attention",
+            side_effect=AssertionError("Sage needs torch.float16 or torch.bfloat16"),
+        ), torch.inference_mode():
+            output = policy(qkv, True)
+
+        self.assertEqual(tuple(output.shape), (1, 4, 2, 4))
+        self.assertEqual(output.dtype, torch.float32)
+        self.assertEqual(qkv, [], "the consumed Q/K/V must be released")
+        self.assertTrue(policy._runtime_failed)
+        self.assertFalse(policy.enabled)
+        self.assertFalse(torch.isnan(output).any())
+
+    def test_half_precision_dense_fallback_keeps_the_shared_backend(self):
+        from unittest import mock
+
+        from models.minimax_h3.sol_attention import MiniMaxH3SolAttention
+
+        torch = self.torch
+        policy = MiniMaxH3SolAttention()
+        policy.enabled = True
+        policy.sink_tokens = 0
+        qkv = [torch.randn(1, 4, 2, 4, dtype=torch.bfloat16) for _ in range(3)]
+        marker = torch.zeros(1, 4, 2, 4, dtype=torch.bfloat16)
+
+        def refuse(*_args, **_kwargs):
+            raise RuntimeError("kernel compile failed")
+
+        with self._fake_sol_kernel(refuse), mock.patch(
+            "shared.attention.pay_attention", return_value=marker
+        ) as shared_backend, torch.inference_mode():
+            output = policy(qkv, True)
+
+        self.assertTrue(shared_backend.called)
+        self.assertIs(output, marker)
 
 
 if __name__ == "__main__":

@@ -8186,6 +8186,15 @@ def generate_video(
         ):
             reload_needed = True
     if model_type != transformer_type or reload_needed or profile != loaded_profile:
+        # Every reload re-reads the checkpoint and re-pins it in RAM, which on
+        # a large H3 model costs minutes. State which condition fired so a slow
+        # start can be diagnosed from the log instead of guessed at.
+        print(
+            "[Model] Reloading "
+            f"{model_type} (loaded={transformer_type}, "
+            f"reload_needed={reload_needed}, "
+            f"profile={profile}, loaded_profile={loaded_profile})"
+        )
         release_model()
         # Pre-flight: detect first-use download so the UI can show
         # "Downloading model..." instead of "Loading model..." while
