@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Loader2, RefreshCw, Search, Trash2 } from 'lucide-react'
 import * as api from '../../api/client'
 import type { SavedOmniCharacter } from '../../types'
@@ -136,7 +136,7 @@ export function CharacterBrowser() {
         </div>
         {files.length > 0 && <div className="space-y-2">
           {files.length > 1 && <input aria-label="Filter remote character files" value={fileSearch} onChange={event => setFileSearch(event.target.value)}
-            placeholder={`Search ${files.length} filesâ€¦`} className="w-full min-w-0 rounded border border-border bg-bg-primary px-2 py-1.5 text-base sm:text-xs text-text-primary" />}
+            placeholder={`Search ${files.length} files…`} className="w-full min-w-0 rounded border border-border bg-bg-primary px-2 py-1.5 text-base sm:text-xs text-text-primary" />}
           <select aria-label="Character file to import" value={filename} disabled={importing}
             onChange={event => setFilename(event.target.value)} className="w-full min-w-0 rounded border border-border bg-bg-primary px-2 py-2 text-base sm:text-xs text-text-primary">
             <option value="">Choose a character / RefMod file</option>
@@ -154,7 +154,7 @@ export function CharacterBrowser() {
     <div className="flex flex-wrap items-center gap-2">
       <div className="relative min-w-0 flex-1 basis-44">
         <Search size={13} className="absolute left-2 top-2.5 text-text-muted" />
-        <input aria-label="Search saved characters" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search charactersâ€¦"
+        <input aria-label="Search saved characters" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search characters…"
           className="w-full rounded-lg border border-border bg-bg-secondary py-2 pl-7 pr-2 text-base sm:text-xs text-text-primary" />
       </div>
       <select aria-label="Character filter" value={filter} onChange={event => setFilter(event.target.value)}
@@ -165,7 +165,7 @@ export function CharacterBrowser() {
       <button type="button" onClick={refresh} aria-label="Refresh characters" className="p-2 text-text-muted"><RefreshCw size={14} /></button>
     </div>
     {error && <p role="alert" className="text-xs text-indicator-error">{error}</p>}
-    {loading && characters.length === 0 && <p role="status" className="text-xs text-text-muted">Loading charactersâ€¦</p>}
+    {loading && characters.length === 0 && <p role="status" className="text-xs text-text-muted">Loading characters…</p>}
     {!loading && visible.length === 0 && <p className="text-xs text-text-muted">{characters.length ? 'No characters match this filter.' : 'No saved characters yet. Import a file above or save a character in Reference mode.'}</p>}
     <div className="grid grid-cols-1 min-[420px]:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
       {visible.map(character => <article key={character.id} className="min-w-0 overflow-hidden rounded-xl border border-border bg-bg-secondary">

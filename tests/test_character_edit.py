@@ -1,4 +1,4 @@
-﻿"""Editing a saved character must change it in place, never replace its id."""
+"""Editing a saved character must change it in place, never replace its id."""
 
 from __future__ import annotations
 
