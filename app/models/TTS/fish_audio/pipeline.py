@@ -46,6 +46,52 @@ SILENCE_SECONDS, SILENCE_SHARE, SILENCE_LOGIT = 8.0, 0.8, 2.0
 CODEC_CONTEXT_FRAMES = 1152
 CODEC_DECODE_TILE_FRAMES = 128
 
+# Drama 3 wants one clean recording of one person per voice reference. A whole
+# interview was accepted verbatim, encoded into reference codes and transcribed
+# in full: the codes consumed the model context (leaving a shorter speech
+# budget) and the clone drifted, so a take either stopped after two seconds or
+# ran to the limit without reaching the end of the script. Conditioning uses
+# the opening window instead, and says so in the console.
+MAX_REFERENCE_SECONDS = 30.0
+
+
+def bounded_reference(path, *, max_seconds=MAX_REFERENCE_SECONDS):
+    """Return a reference file whose audio is at most ``max_seconds`` long.
+
+    A shorter reference is returned untouched. A longer one is written once to
+    a cache keyed by its own path, modification time and the limit, so the
+    transcript and the encoded codes are always produced from the same audio
+    and repeated runs reuse both.
+    """
+    import hashlib
+    import tempfile
+
+    source = Path(os.path.abspath(str(path)))
+    info = sf.info(str(source))
+    if info.samplerate <= 0:
+        raise ValueError(f"Voice reference has no sample rate: {source}")
+    if info.frames <= max_seconds * info.samplerate:
+        return source
+    digest = hashlib.sha1(
+        f"{source}|{source.stat().st_mtime_ns}|{max_seconds}".encode("utf-8")
+    ).hexdigest()[:16]
+    cache_dir = Path(tempfile.gettempdir()) / "maestro-fish-references"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    target = cache_dir / f"{source.stem}-{digest}.wav"
+    if target.is_file() and sf.info(str(target)).frames > 0:
+        return target
+    frames = int(max_seconds * info.samplerate)
+    audio, sample_rate = sf.read(
+        str(source), frames=frames, dtype="float32", always_2d=True,
+    )
+    sf.write(str(target), audio, sample_rate, subtype="PCM_16")
+    print(
+        f"[Fish Audio] Voice reference '{source.name}' is "
+        f"{info.frames / info.samplerate:.1f}s; conditioning uses its first "
+        f"{max_seconds:g}s so the clone and the speech budget stay stable."
+    )
+    return target
+
 
 class FishAudioPipeline:
     sample_rate = 44100
@@ -212,7 +258,7 @@ class FishAudioPipeline:
             self._check_abort()
             from services.audio_analysis import _transcribe
 
-            segments = _transcribe(paths[0])
+            segments = _transcribe(str(paths[0]))
             self._check_abort()
             return [" ".join(segment.text for segment in segments).strip()]
         text = self.reference_cache.encode(transcribe, [path], cache_keys=[("transcript", "faster-whisper-small", *self._file_key(path))])[0]
@@ -657,6 +703,9 @@ class FishAudioPipeline:
                         stack.callback(module.register_forward_hook(self._check_abort).remove)
                 # Voice references for Speakers 1, 2 and 3 (A, B, D), each bound to its speaker tag by its transcript.
                 guides = [guide for letter, guide in zip("ABD", (audio_guide, audio_guide2, audio_guide3)) if letter in audio_prompt_type]
+                # Transcript and codes must describe the same audio, so the
+                # bounded window is applied once, before either is derived.
+                guides = [bounded_reference(guide) for guide in guides]
                 transcripts = [f"<|speaker:{index}|> {text}" for index, text in enumerate(self._reference_transcripts(guides, alt_prompt))]
                 references = [self._reference_codes(guide, f" {index}/{len(guides)}" if len(guides) > 1 else "") for index, guide in enumerate(guides, 1)]
                 history_turns, history_anchor = [], None
