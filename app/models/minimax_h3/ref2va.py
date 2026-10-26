@@ -51,6 +51,7 @@ from .reference_manifest import (
     MINIMAX_H3_MAX_REFERENCE_IMAGES,
     MINIMAX_H3_MAX_REFERENCE_VIDEOS,
     MINIMAX_H3_MAX_REFERENCES,
+    _EXACT_DRIVE_PROMPT_MARKER,
     object_reference_prompt_contract,
     validate_reference_manifest,
 )
@@ -714,11 +715,25 @@ def _ref2va_event_speaker_marker(
     return markers[-1] if markers else None
 
 
+def _declares_exact_drive_audio(text: str) -> bool:
+    """Whether this prompt already carries the supplied soundtrack contract.
+
+    With an exact target soundtrack the ``<d>`` blocks are a transcript of the
+    track that drives the mouth, not words the model has to cast and perform.
+    Demanding a per-line speaker then blocked every window of an audio-driven
+    Director project even though the audio itself resolved who speaks.
+    """
+
+    return _EXACT_DRIVE_PROMPT_MARKER in str(text or "").upper()
+
+
 def _canonicalize_ref2va_tagged_dialogue(
     text: str,
     speaker_aliases: dict[str, int],
     character_subject_count: int,
     audio_by_subject: dict[int, int] | None = None,
+    *,
+    require_owners: bool = True,
 ) -> str:
     """Repair named H3 dialogue using official event-ordered speaker IDs.
 
@@ -726,6 +741,10 @@ def _canonicalize_ref2va_tagged_dialogue(
     ``(Sx)`` numbers are a separate namespace assigned in order of the first
     actual vocal event.  Treating Subject 1 as Speaker 1 caused a later
     character who spoke first to inherit or repeat another character's line.
+
+    ``require_owners`` is false only when an exact target soundtrack already
+    drives the performance: an unresolved line is then left exactly as written
+    instead of being cast again or refused.
     """
 
     valid_subjects = set(range(1, character_subject_count + 1))
@@ -733,12 +752,18 @@ def _canonicalize_ref2va_tagged_dialogue(
     matches = list(_DIALOGUE_TAG_RE.finditer(text))
     if not matches:
         return text
-    resolved_owners = resolve_ref2va_dialogue_owners(
-        text,
-        [(match.start(), match.end(), match.group(1).strip()) for match in matches],
-        speaker_aliases,
-        valid_subjects,
-    )
+    spans = [
+        (match.start(), match.end(), match.group(1).strip())
+        for match in matches
+    ]
+    if require_owners:
+        resolved_owners = resolve_ref2va_dialogue_owners(
+            text, spans, speaker_aliases, valid_subjects,
+        )
+    else:
+        resolved_owners = _resolve_ref2va_dialogue_owners(
+            text, spans, speaker_aliases, valid_subjects, strict=False,
+        )
     edits: list[tuple[int, int, str]] = []
     vocal_speakers: dict[tuple[str, Any], int] = {}
     previous_dialogue_end = 0
@@ -748,6 +773,11 @@ def _canonicalize_ref2va_tagged_dialogue(
         if definition_field else None
     )
     for match, (subject, explicit_owner) in zip(matches, resolved_owners):
+        if not require_owners and subject is None and not explicit_owner:
+            # The soundtrack already decided who speaks. Keep the transcript
+            # line and its event label untouched: renumbering it here would
+            # relabel the very performance the audio drives.
+            continue
         marker = _ref2va_event_speaker_marker(
             text, match.start(), previous_dialogue_end, definitions_span,
         )
@@ -1017,6 +1047,7 @@ def ensure_ref2va_prompt_relationships(
             speaker_aliases,
             character_subject_count,
             voice_audio_by_subject,
+            require_owners=not _declares_exact_drive_audio(text),
         )
         return _validate_ref2va_context_ir_sections(
             _apply_ref2va_media_contracts(compiled, items)
@@ -1238,6 +1269,7 @@ def ensure_ref2va_prompt_relationships(
         speaker_aliases,
         character_subject_count,
         voice_audio_by_subject,
+        require_owners=not _declares_exact_drive_audio(compiled_target),
     )
     tagged_dialogue = list(_DIALOGUE_TAG_RE.finditer(compiled_target))
     dialogue_counter = len(tagged_dialogue)
@@ -1299,6 +1331,7 @@ def ensure_ref2va_prompt_relationships(
         speaker_aliases,
         character_subject_count,
         voice_audio_by_subject,
+        require_owners=not _declares_exact_drive_audio(compiled_prompt),
     )
     return _apply_ref2va_media_contracts(compiled_prompt, items)
 

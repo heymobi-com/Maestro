@@ -231,6 +231,52 @@ class H3SpeakerCompatibilityTests(unittest.TestCase):
         self.assertNotIn("alex.wav", paths)
 
 
+    def test_an_exact_soundtrack_casts_its_own_transcript(self):
+        """A driven mouth must not be re-cast, and must not refuse the shot.
+
+        Measured on Director podcast-5 with an uploaded soundtrack: the plan
+        labelled the speakers (S1)/(S2) without ever binding those labels to a
+        Subject, so every window the exact target soundtrack was about to drive
+        died on "could not determine which referenced character speaks".
+        """
+
+        prompt = (
+            "EXACT TARGET SOUNDTRACK (highest priority): Preserve the supplied "
+            "soundtrack waveform and timing exactly on the target timeline.\n\n"
+            "subject_definitions: <Subject 1> is Alex. <Subject 2> is Sam.\n"
+            "detailed_description: (S1) speaks gently: <d>Salut.</d>\n"
+            "(S2) replies: <d>Bonjour.</d>"
+        )
+
+        compiled = ensure_ref2va_prompt_relationships(prompt, REFERENCES[:2])
+
+        self.assertIn("(S1) speaks gently: <d>Salut.</d>", compiled)
+        self.assertIn("(S2) replies: <d>Bonjour.</d>", compiled)
+        # The same prompt without the soundtrack contract is still refused.
+        with self.assertRaisesRegex(H3SpeakerBindingError, "could not determine"):
+            ensure_ref2va_prompt_relationships(
+                prompt.replace(
+                    "EXACT TARGET SOUNDTRACK (highest priority): Preserve the supplied "
+                    "soundtrack waveform and timing exactly on the target timeline.\n\n",
+                    "",
+                ),
+                REFERENCES[:2],
+            )
+
+    def test_a_proven_driven_line_still_gets_its_owner_and_voice(self):
+        prompt = (
+            "EXACT TARGET SOUNDTRACK (highest priority): Preserve the supplied "
+            "soundtrack waveform and timing exactly on the target timeline.\n\n"
+            "subject_definitions: <Subject 1> is Alex. <Subject 2> is Sam.\n"
+            "detailed_description: (S1) speaks gently: <d>Salut.</d>\n"
+            "(S1) replies: <d>Encore.</d>"
+        )
+
+        compiled = ensure_ref2va_prompt_relationships(prompt, REFERENCES)
+
+        self.assertEqual(compiled.count("<d>Salut.</d>"), 1)
+        self.assertIn("<Subject 1>", compiled)
+
     def test_compiled_definitions_pair_each_label_so_bare_cues_resolve(self):
         """A names-only cast must still declare which Subject owns each ``(Sx)``.
 
