@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from collections.abc import Callable, Iterator, Mapping, MutableMapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -382,6 +383,41 @@ def request_cancel(
     return CancelResult(True, was_running, abort_signalled)
 
 
+def release_cancelled_generation_model(
+    job: Mapping[str, Any],
+    wgp_module: Any,
+    *,
+    log: Callable[[str], Any] | None = None,
+) -> bool:
+    """Give a stopped job's model back to the system.
+
+    A job that finishes normally keeps its tensors resident so the next job
+    starts quickly. A cancelled job is the opposite case: the user pressed
+    Stop to free the machine, and the resident checkpoint can be most of RAM
+    beside its GPU copy, which is what leaves the workstation unusable until
+    Maestro restarts. Call this from the worker that owns the generation slot,
+    so no other job can be loading the same model while it releases.
+    """
+    if not is_cancel_requested(job):
+        return False
+    if (
+        getattr(wgp_module, "wan_model", None) is None
+        and getattr(wgp_module, "offloadobj", None) is None
+    ):
+        return False
+    release = getattr(wgp_module, "release_model", None)
+    if not callable(release):
+        return False
+    emit = log or print
+    try:
+        emit("[Cancel] Releasing the generation model so the system is free")
+        release()
+        return True
+    except Exception as error:
+        emit(f"[Cancel] The generation model could not be released: {error}")
+        return False
+
+
 def finish_job(
     job: MutableMapping[str, Any],
     status: str,
@@ -448,9 +484,17 @@ def acquire_generation_slot(
     job: MutableMapping[str, Any],
     *,
     poll_interval: float = 0.1,
+    report_after: float = 5.0,
 ) -> bool:
-    """Wait for the GPU lock while allowing a queued cancellation to exit."""
+    """Wait for the GPU lock while allowing a queued cancellation to exit.
+
+    A stopped job keeps the slot until its in-flight step finishes, so a new
+    submission can wait without any visible reason. Say so once instead of
+    leaving the terminal silent and the queue looking stuck.
+    """
     lock_id = id(generation_lock)
+    started = time.monotonic()
+    reported = False
     with _lifecycle_lock:
         _generation_slot_waiters[lock_id] = _generation_slot_waiters.get(lock_id, 0) + 1
     try:
@@ -459,7 +503,18 @@ def acquire_generation_slot(
                 if is_cancel_requested(job):
                     generation_lock.release()
                     return False
+                if reported:
+                    print(
+                        f"[Queue] Job {job.get('id')} has the GPU now "
+                        f"after waiting {time.monotonic() - started:.0f}s."
+                    )
                 return True
+            if not reported and time.monotonic() - started >= report_after:
+                reported = True
+                print(
+                    f"[Queue] Job {job.get('id')} is waiting for the GPU; "
+                    "the previous job is still releasing it."
+                )
         return False
     finally:
         with _lifecycle_lock:

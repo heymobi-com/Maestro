@@ -361,6 +361,7 @@ from services.job_lifecycle import (
     record_job_outputs,
     register_terminal_listener,
     register_abort_state,
+    release_cancelled_generation_model,
     release_held,
     request_cancel,
     snapshot_job,
@@ -27853,8 +27854,21 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 task_last_cumulative_generation_seconds = 0
                 last_msg_len = 0
                 in_status_line = False
+                stop_reported = False
                 while True:
-                    cmd, data = com_stream.output_queue.next()
+                    event = com_stream.output_queue.next(timeout=0.25)
+                    if event is None:
+                        # The render is still shutting down. Re-check
+                        # cancellation without blocking forever on a worker
+                        # that may not publish anything else before it exits.
+                        if is_cancel_requested(job) and not stop_reported:
+                            print(
+                                "\n[Cancel] Stopped; waiting for the render to "
+                                "release the GPU and its memory."
+                            )
+                            stop_reported = True
+                        continue
+                    cmd, data = event
                     if is_cancel_requested(job) and cmd != "exit":
                         continue
                     if cmd == "exit":
@@ -29200,6 +29214,10 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
             # remain available for the next job. Never clear between its windows.
             from shared.cuda_memory import release_ram_cache
             release_ram_cache()
+            # A stopped job must not keep the workstation busy: the user pressed
+            # Stop to free it, and a resident checkpoint plus text encoder is
+            # most of RAM beside the GPU copy. Successful jobs keep theirs.
+            release_cancelled_generation_model(job, wgp)
             # If no other jobs are running, sync save_path to the current active
             # workspace (which may have changed while this job was running).
             if not _active_gen_states:

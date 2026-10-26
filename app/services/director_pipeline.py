@@ -6400,9 +6400,13 @@ def _submit_and_wait(
             # completed before the abort took effect.
             thread.join(timeout=_GENERATION_SETTLE_GRACE_S)
             if thread.is_alive():
+                # The abort is already signalled; the remaining time is the
+                # step (or decode) that is in flight. Say that plainly instead
+                # of reporting "busy" with no explanation.
                 print(
-                    f"[Pipeline] Job {job_id} is still shutting down; "
-                    "pipeline remains busy"
+                    f"[Pipeline] Job {job_id} was stopped and is still "
+                    "releasing the GPU; the model finishes the step it is on "
+                    "before it exits."
                 )
             settled = _jobs.get(job_id) or j
             settled_outputs = _director_job_outputs(settled)
@@ -6499,8 +6503,9 @@ def _submit_and_wait(
     thread.join(timeout=_GENERATION_SETTLE_GRACE_S)
     if thread.is_alive():
         print(
-            f"[Pipeline] Timed-out job {job_id} is still shutting down; "
-            "pipeline remains busy"
+            f"[Pipeline] Timed-out job {job_id} was stopped and is still "
+            "releasing the GPU; the model finishes the step it is on before "
+            "it exits."
         )
     settled = _jobs.get(job_id) or job
     raise _GenerationTimeoutError(_director_job_outputs(settled))

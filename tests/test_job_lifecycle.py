@@ -28,6 +28,7 @@ from services.job_lifecycle import (  # noqa: E402
     record_job_outputs,
     register_abort_state,
     register_terminal_listener,
+    release_cancelled_generation_model,
     release_held,
     request_cancel,
     snapshot_job,
@@ -348,6 +349,73 @@ class TestJobLifecycle(unittest.TestCase):
         self.assertFalse(update_job(job, message="Late worker message"))
         self.assertEqual(job["status"], "cancelled")
         self.assertEqual(job["message"], "Cancelled")
+
+
+class ReleaseCancelledModelTests(unittest.TestCase):
+    """A stopped job must hand its memory back instead of pinning the host."""
+
+    def test_cancelled_job_releases_a_loaded_model(self):
+        job = _job()
+        self.assertTrue(try_start(job))
+        release = Mock()
+        wgp = Mock(wan_model=object(), offloadobj=None, release_model=release)
+
+        request_cancel(job)
+        logs: list[str] = []
+        self.assertTrue(
+            release_cancelled_generation_model(job, wgp, log=logs.append)
+        )
+        release.assert_called_once_with()
+        self.assertEqual(
+            logs, ["[Cancel] Releasing the generation model so the system is free"],
+        )
+
+    def test_successful_job_keeps_its_model_resident(self):
+        job = _job()
+        self.assertTrue(try_start(job))
+        release = Mock()
+        wgp = Mock(wan_model=object(), offloadobj=None, release_model=release)
+
+        self.assertFalse(release_cancelled_generation_model(job, wgp, log=[].append))
+        release.assert_not_called()
+
+    def test_nothing_is_released_when_no_model_is_loaded(self):
+        job = _job()
+        self.assertTrue(try_start(job))
+        release = Mock()
+        wgp = Mock(wan_model=None, offloadobj=None, release_model=release)
+
+        request_cancel(job)
+        self.assertFalse(release_cancelled_generation_model(job, wgp, log=[].append))
+        release.assert_not_called()
+
+    def test_a_failing_release_is_reported_without_raising(self):
+        job = _job()
+        self.assertTrue(try_start(job))
+        wgp = Mock(
+            wan_model=object(),
+            offloadobj=None,
+            release_model=Mock(side_effect=RuntimeError("busy")),
+        )
+
+        request_cancel(job)
+        logs: list[str] = []
+        self.assertFalse(
+            release_cancelled_generation_model(job, wgp, log=logs.append)
+        )
+        self.assertIn("could not be released", logs[-1])
+
+    def test_offload_handle_alone_counts_as_a_loaded_model(self):
+        job = _job()
+        self.assertTrue(try_start(job))
+        release = Mock()
+        wgp = Mock(wan_model=None, offloadobj=object(), release_model=release)
+
+        request_cancel(job)
+        self.assertTrue(
+            release_cancelled_generation_model(job, wgp, log=[].append)
+        )
+        release.assert_called_once_with()
 
     def test_queued_job_ignores_a_stale_active_state(self):
         job = _job()
