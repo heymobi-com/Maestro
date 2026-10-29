@@ -6957,6 +6957,60 @@ def _retime_h3_visual_timecodes(
     return retimed
 
 
+def _strip_planner_subject_labels(plan: MutableMapping[str, Any]) -> None:
+    """Remove ``<Subject N>`` tags the planner wrote from everything it authored.
+
+    Maestro writes the ``<Subject N>`` scaffolding itself, from the identities it can
+    define for this shot. Measured on a real plan: the writer labelled the black door
+    ``<Subject 7> (Sx)`` in ``ending_beat`` and in a dialogue beat's ``physical_cue``,
+    while that shot's own rows defined only Subjects 1 and 2 — the compile then failed
+    with "Shot 11: Ref2VA visual action uses undefined subjects: 7". Only descriptions
+    were being cleaned; every other authored field carried the tag straight into the
+    body. A speaker cue such as ``(S1)`` is kept: it is how the compiler recovers which
+    participant a row is.
+    """
+
+    if not isinstance(plan, dict):
+        return
+
+    def clean(value: Any) -> Any:
+        if isinstance(value, str):
+            text = _clean_malformed_subject_tags(value)
+            text = _ANY_SUBJECT_TAG_RE.sub(" ", text)
+            # "(Sx)" is the planner's placeholder for a label it never resolved.
+            return _PLACEHOLDER_SPEAKER_CUE_RE.sub(" ", text)
+        if isinstance(value, list):
+            return [clean(item) for item in value]
+        if isinstance(value, dict):
+            return {key: clean(item) for key, item in value.items()}
+        return value
+
+    for key in (
+        "spatial_setup",
+        "environment",
+        "opening_blocking",
+        "closing_blocking",
+        "ending_beat",
+        "action_beats",
+        "subjects_on_screen",
+        "dialogue_beats",
+        "_director_dialogue_beats",
+    ):
+        if key in plan:
+            plan[key] = clean(plan[key])
+
+    # The prompt fields are only the planner's own text on the first compile; after
+    # that they hold a compiled Context-IR block whose <Subject N> definitions are
+    # exactly what must be preserved, so a compiled body is left untouched.
+    for key in ("video_prompt", "_director_h3_source_prompt"):
+        text = plan.get(key)
+        if isinstance(text, str) and "subject_definitions:" not in text:
+            plan[key] = clean(text)
+
+
+_PLACEHOLDER_SPEAKER_CUE_RE = re.compile(r"\(\s*S\s*[xX\u2026?.]{1,3}\s*\)")
+
+
 def compile_h3_clip_plans(
     clip_plans: Sequence[MutableMapping[str, Any]],
     *,
@@ -6986,6 +7040,11 @@ def compile_h3_clip_plans(
         )
         for index, plan in enumerate(clip_plans)
     ]
+
+    # The compiler owns the <Subject N> labels; a copy the planner left in any other
+    # field becomes an undefined subject and fails the whole plan.
+    for plan in clip_plans:
+        _strip_planner_subject_labels(plan)
 
     # Audio transcript beats remain useful identity and continuity metadata.
     # Track separately which beats are actual generated dialogue so prompt
