@@ -6908,6 +6908,31 @@ def _read_app_version() -> str:
 
 
 _APP_VERSION = _read_app_version()
+_PROCESS_STARTED_AT = time.time()
+
+
+def _loaded_code_revision() -> str:
+    """When the Director prompt compiler on disk was last written.
+
+    The server imports its modules once -- ``uvicorn.run`` is called without
+    ``reload`` -- so a fix written after this process started is NOT running.
+    Two reported failures were traced to a stale process rather than to the
+    brief, so the boot banner says which code is actually loaded.
+    """
+
+    try:
+        compiler = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "services", "director", "h3_dialogue.py",
+        )
+        stamp = time.strftime(
+            "%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(compiler)),
+        )
+        source = f"Director prompt compiler {stamp}"
+    except OSError:
+        source = "Director prompt compiler unknown"
+    started = time.strftime("%Y-%m-%d %H:%M", time.localtime(_PROCESS_STARTED_AT))
+    return f"{source} | process started {started}"
 
 
 @api.get("/api/v1/system-config")
@@ -10200,6 +10225,530 @@ async def mix_audio(request: Request):
     }
 
 
+@api.post("/api/v1/audio/podcast-master")
+async def podcast_master(request: Request):
+    """Master a podcast episode into one MP3.
+
+    Body:
+        path: str                 spoken episode (outputs/ or uploads/)
+        intro_path/outro_path: str optional music beds
+        cover_path: str           optional cover image
+        title/artist/album/genre/comment: str
+        chapters: [{start: seconds, title: str}, ...]
+        loudness: bool            podcast loudness normalisation (default true)
+        workspace: str | null
+
+    Intro, episode and outro are concatenated, normalised and encoded as MP3.
+    The cover is embedded as the ID3 picture and chapters as ID3 chapters.
+    Chapter times refer to the final file (after the intro).
+    """
+    import subprocess
+
+    body = await request.json()
+    from shared.utils.video_decode import _resolve_media_binary
+
+    ffmpeg_bin = _resolve_media_binary("ffmpeg") or "ffmpeg"
+    ffprobe_bin = _resolve_media_binary("ffprobe") or "ffprobe"
+
+    uploads_root = os.path.realpath(os.path.join(os.getcwd(), "uploads"))
+    outputs_root = os.path.realpath(wgp.server_config.get("save_path", "outputs"))
+
+    def _contained(real: str, root: str) -> bool:
+        real_n, root_n = os.path.normcase(real), os.path.normcase(root)
+        return real_n == root_n or real_n.startswith(root_n + os.sep)
+
+    def _allowed(raw: str, label: str) -> str:
+        real = os.path.realpath(raw) if raw else ""
+        if not real or not (_contained(real, uploads_root) or _contained(real, outputs_root)):
+            raise HTTPException(status_code=400, detail=f"{label}: path not allowed: {raw}")
+        if not os.path.isfile(real):
+            raise HTTPException(status_code=400, detail=f"{label}: file not found: {raw}")
+        return real
+
+    from services import podcast_master
+
+    main_path = _allowed(str(body.get("path") or ""), "Main audio")
+    intro_path = _allowed(str(body["intro_path"]), "Intro") if body.get("intro_path") else ""
+    outro_path = _allowed(str(body["outro_path"]), "Outro") if body.get("outro_path") else ""
+    cover_path = _allowed(str(body["cover_path"]), "Cover") if body.get("cover_path") else ""
+
+    audio_paths = [path for path in (intro_path, main_path, outro_path) if path]
+    total_seconds = sum(
+        podcast_master.probe_duration(ffprobe_bin, path) for path in audio_paths
+    )
+    if total_seconds <= 0:
+        raise HTTPException(status_code=400, detail="Could not read the duration of the episode audio.")
+
+    chapters = podcast_master.normalize_chapters(body.get("chapters"))
+    # Cite the documents the script was written from, by default. A listener cannot
+    # hear a passage reference, so the citation is the document; it lands in the
+    # MP3's comment tag and in the sidecar, which is what makes it reviewable later.
+    citations = [
+        {
+            "source_name": str(row.get("source_name") or "").strip(),
+            "passages": int(row.get("passages") or 0),
+            "headings": [str(value) for value in (row.get("headings") or [])][:6],
+        }
+        for row in (body.get("citations") or [])
+        if isinstance(row, dict) and str(row.get("source_name") or "").strip()
+    ]
+    metadata_body = dict(body)
+    if citations and not str(body.get("comment") or "").strip():
+        metadata_body["comment"] = "Sources: " + "; ".join(
+            row["source_name"] for row in citations
+        )
+    metadata = podcast_master.build_ffmetadata(metadata_body, chapters, total_seconds)
+
+    workspace = body.get("workspace")
+    out_dir = _workspace_dir(workspace)
+    os.makedirs(out_dir, exist_ok=True)
+    out_filename = f"podcast_{uuid.uuid4().hex[:6]}.mp3"
+    out_path = os.path.join(out_dir, out_filename)
+    metadata_path = os.path.join(out_dir, f"podcast_{uuid.uuid4().hex[:6]}.ffmetadata")
+    try:
+        with open(metadata_path, "w", encoding="utf-8") as handle:
+            handle.write(metadata)
+
+        cmd = podcast_master.build_command(
+            ffmpeg_bin,
+            audio_paths,
+            cover_path,
+            metadata_path,
+            out_path,
+            loudness=bool(body.get("loudness", True)),
+            metadata=metadata_body,
+        )
+
+        print(f"[Podcast Master] Writing {out_path} from {len(audio_paths)} audio input(s)")
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        except subprocess.TimeoutExpired:
+            raise HTTPException(status_code=500, detail="Podcast master timed out")
+        if result.returncode != 0:
+            print(f"[Podcast Master] ffmpeg error: {result.stderr[-800:]}")
+            raise HTTPException(status_code=500, detail=f"ffmpeg failed: {result.stderr[-300:]}")
+        if not os.path.isfile(out_path):
+            raise HTTPException(status_code=500, detail="Podcast master output was not created")
+    finally:
+        try:
+            os.remove(metadata_path)
+        except OSError:
+            pass
+
+    sidecar = {
+        "params": {
+            "model_type": "podcast_master",
+            "generation_mode": "audio",
+            "_audio_sub_mode": "speech",
+            "podcast_master": {
+                "path": main_path,
+                "intro_path": intro_path or None,
+                "outro_path": outro_path or None,
+                "cover_path": cover_path or None,
+                "title": str(body.get("title") or ""),
+                "artist": str(body.get("artist") or ""),
+                "album": str(body.get("album") or ""),
+                "genre": str(body.get("genre") or ""),
+                "loudness": bool(body.get("loudness", True)),
+                "citations": citations,
+                "chapters": [
+                    {"start": start, "title": title} for start, title in chapters
+                ],
+            },
+        },
+        "generation_mode": "audio",
+        "created_at": time.time(),
+        "output_filename": out_filename,
+        "duration_seconds": round(total_seconds, 3),
+    }
+    with open(os.path.splitext(out_path)[0] + ".meta.json", "w", encoding="utf-8") as handle:
+        json.dump(sidecar, handle, indent=2)
+
+    return {
+        "filename": out_filename,
+        "path": out_path,
+        "duration_seconds": round(total_seconds, 3),
+        "citations": citations,
+    }
+
+
+@api.post("/api/v1/sources/upload")
+async def upload_sources(files: list[UploadFile] = File(...)):
+    """Save documents for indexing and return their paths.
+
+    Files land in ``uploads/sources/`` so the ingest endpoint can validate them
+    against the same boundary as every other upload.
+    """
+    from services import sources_index
+
+    folder = os.path.join(os.getcwd(), "uploads", "sources")
+    os.makedirs(folder, exist_ok=True)
+    saved: list[dict] = []
+    for upload in files or []:
+        name = upload.filename or "document.txt"
+        extension = os.path.splitext(name)[1].lower()
+        if extension not in sources_index.SUPPORTED_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{name}: unsupported type. Use Markdown, TXT, HTML, DOCX or PDF."
+                ),
+            )
+        target = os.path.join(folder, f"{uuid.uuid4().hex[:10]}{extension}")
+        content = await upload.read()
+        if len(content) > sources_index.MAX_FILE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"{name} exceeds the "
+                    f"{sources_index.MAX_FILE_BYTES // (1024 * 1024)} MB document limit."
+                ),
+            )
+        with open(target, "wb") as handle:
+            handle.write(content)
+        saved.append({"path": target, "name": name})
+    return {"documents": saved}
+
+
+@api.post("/api/v1/sources/ingest")
+async def ingest_sources(request: Request):
+    """Index documents for retrieval.
+
+    Body: {documents: [{path, name}], workspace?: str}. Paths must be under
+    uploads/ or the active workspace. Returns one report row per document so a
+    bad file is visible without losing the good ones.
+    """
+    from services import sources_index
+
+    body = await request.json()
+    documents = body.get("documents")
+    if not isinstance(documents, list) or not documents:
+        raise HTTPException(status_code=400, detail="No documents were supplied.")
+
+    uploads_root = os.path.realpath(os.path.join(os.getcwd(), "uploads"))
+    outputs_root = os.path.realpath(wgp.server_config.get("save_path", "outputs"))
+
+    def _contained(real_path: str, root: str) -> bool:
+        real_n, root_n = os.path.normcase(real_path), os.path.normcase(root)
+        return real_n == root_n or real_n.startswith(root_n + os.sep)
+
+    checked: list[dict] = []
+    for document in documents:
+        if not isinstance(document, dict):
+            continue
+        raw = str(document.get("path") or "")
+        real = os.path.realpath(raw) if raw else ""
+        if not real or not (_contained(real, uploads_root) or _contained(real, outputs_root)):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Source: path not allowed: {raw}",
+            )
+        checked.append({"path": real, "name": str(document.get("name") or os.path.basename(real))})
+    if not checked:
+        raise HTTPException(status_code=400, detail="No usable documents were supplied.")
+
+    workspace = body.get("workspace") or _get_active_workspace()
+    out_dir = _workspace_dir(workspace)
+    existing = sources_index.load_index(out_dir)
+    index, report = await asyncio.to_thread(
+        sources_index.build, checked, existing=existing,
+    )
+    sources_index.save_index(out_dir, index)
+    print(
+        f"[Sources] {workspace}: {len(index.chunks)} passage(s) from "
+        f"{len(index.sources)} document(s)"
+    )
+    return {
+        "sources": index.sources,
+        "report": report,
+        "chunks": len(index.chunks),
+    }
+
+
+@api.get("/api/v1/sources")
+def list_sources(workspace: str = None):
+    """The documents already indexed in a workspace."""
+
+    from services import sources_index
+
+    out_dir = _workspace_dir(workspace or _get_active_workspace())
+    index = sources_index.load_index(out_dir)
+    return {"sources": index.sources, "chunks": len(index.chunks)}
+
+
+@api.post("/api/v1/sources/search")
+async def search_sources(request: Request):
+    """Retrieve the passages that match a query, plus a writer-ready block.
+
+    Body: {query: str, workspace?: str, limit?: int}. ``block`` is empty when the
+    documents do not cover the query, which tells the writer to say so instead of
+    inventing material.
+    """
+    from services import sources_index
+
+    body = await request.json()
+    query = str(body.get("query") or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="A query is required.")
+    out_dir = _workspace_dir(body.get("workspace") or _get_active_workspace())
+    index = sources_index.load_index(out_dir)
+    try:
+        limit = max(1, min(12, int(body.get("limit") or 6)))
+    except (TypeError, ValueError):
+        limit = 6
+    results = index.search(query, limit=limit)
+    return {
+        "results": results,
+        "block": sources_index.context_block(results),
+        "citations": sources_index.citation_rows(results),
+        "chunks": len(index.chunks),
+    }
+
+
+@api.post("/api/v1/sources/ingest-folder")
+async def ingest_source_folder(request: Request):
+    """Index every supported document in a folder already on this machine.
+
+    Body: {path: str, recursive?: bool, workspace?: str}. The folder must be under
+    uploads/ or the active workspace, the same boundary every other source obeys.
+    """
+    from services import sources_index
+
+    body = await request.json()
+    raw = str(body.get("path") or "")
+    real = os.path.realpath(raw) if raw else ""
+    uploads_root = os.path.realpath(os.path.join(os.getcwd(), "uploads"))
+    outputs_root = os.path.realpath(wgp.server_config.get("save_path", "outputs"))
+
+    def _contained(real_path: str, root: str) -> bool:
+        real_n, root_n = os.path.normcase(real_path), os.path.normcase(root)
+        return real_n == root_n or real_n.startswith(root_n + os.sep)
+
+    if not real or not (_contained(real, uploads_root) or _contained(real, outputs_root)):
+        raise HTTPException(status_code=400, detail=f"Folder: path not allowed: {raw}")
+
+    try:
+        documents, skipped = await asyncio.to_thread(
+            sources_index.folder_documents,
+            real,
+            recursive=bool(body.get("recursive", True)),
+        )
+    except sources_index.UnreadableSource as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    if not documents:
+        raise HTTPException(
+            status_code=400,
+            detail="That folder has no Markdown, TXT, HTML, DOCX or PDF documents.",
+        )
+
+    workspace = body.get("workspace") or _get_active_workspace()
+    out_dir = _workspace_dir(workspace)
+    existing = sources_index.load_index(out_dir)
+    index, report = await asyncio.to_thread(
+        sources_index.build, documents, existing=existing,
+    )
+    sources_index.save_index(out_dir, index)
+    print(
+        f"[Sources] {workspace}: {len(index.chunks)} passage(s) from "
+        f"{len(index.sources)} document(s) after indexing {len(documents)} file(s)"
+    )
+    return {
+        "sources": index.sources,
+        "report": report + skipped,
+        "chunks": len(index.chunks),
+    }
+
+
+@api.post("/api/v1/sources/reset")
+async def reset_sources(request: Request):
+    """Forget every indexed document in a workspace."""
+
+    from services import sources_index
+
+    body = await request.json()
+    out_dir = _workspace_dir(body.get("workspace") or _get_active_workspace())
+    path = sources_index.index_path(out_dir)
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+    except OSError as error:
+        raise HTTPException(status_code=500, detail=f"Could not clear sources: {error}")
+    return {"sources": [], "chunks": 0}
+
+
+@api.post("/api/v1/audio/duration")
+async def audio_duration(request: Request):
+    """Measured length of one audio file in uploads/ or outputs/.
+
+    Body: {path: str}. A spoken script is re-timed onto this duration so the shot
+    windows never run past the track the render will slice them out of.
+    """
+    body = await request.json()
+    raw = str(body.get("path") or "")
+    uploads_root = os.path.realpath(os.path.join(os.getcwd(), "uploads"))
+    outputs_root = os.path.realpath(wgp.server_config.get("save_path", "outputs"))
+    real = os.path.realpath(raw) if raw else ""
+
+    def _contained(real_path: str, root: str) -> bool:
+        real_n, root_n = os.path.normcase(real_path), os.path.normcase(root)
+        return real_n == root_n or real_n.startswith(root_n + os.sep)
+
+    if not real or not (_contained(real, uploads_root) or _contained(real, outputs_root)):
+        raise HTTPException(status_code=400, detail=f"Audio: path not allowed: {raw}")
+    if not os.path.isfile(real):
+        raise HTTPException(status_code=400, detail=f"Audio: file not found: {raw}")
+
+    seconds = _probe_audio_duration(real)
+    if not seconds or seconds <= 0:
+        from services import podcast_master
+        from shared.utils.video_decode import _resolve_media_binary
+
+        seconds = podcast_master.probe_duration(
+            _resolve_media_binary("ffprobe") or "ffprobe", real
+        )
+    if not seconds or seconds <= 0:
+        raise HTTPException(status_code=400, detail="Could not read the duration of this audio file.")
+    return {"path": real, "duration_seconds": round(float(seconds), 3)}
+
+
+@api.post("/api/v1/audio/tts-episode")
+async def tts_episode(request: Request):
+    """Speak a written Director script with an installed speech engine.
+
+    Body:
+        lines: [{speaker: str, text: str}, ...]
+        voices: [{speaker: str, path: str}, ...]  one voice reference per speaker
+        model_type: str   a speech model, or "auto" for the best installed one
+        workspace: str | null
+        timeout_seconds: float | null
+
+    Returns the generated audio path, its measured length, the engine used and
+    the voice-slot count. The render then treats that file as its soundtrack:
+    H3 lip-syncs to it instead of synthesizing voices of its own.
+    """
+    body = await request.json()
+    from services import tts_episode as tts
+
+    rows = tts.spoken_rows(body.get("lines"))
+    if not rows:
+        raise HTTPException(
+            status_code=400,
+            detail="The script has no spoken lines to record.",
+        )
+
+    workspace = body.get("workspace") or _get_active_workspace()
+    out_dir = _workspace_dir(workspace)
+    os.makedirs(out_dir, exist_ok=True)
+
+    try:
+        model_type, model_def = tts.resolve_engine(
+            wgp,
+            str(body.get("model_type") or ""),
+            has_baseline=lambda candidate: tts.speech_baseline(out_dir, candidate) is not None,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+    uploads_root = os.path.realpath(os.path.join(os.getcwd(), "uploads"))
+    outputs_root = os.path.realpath(wgp.server_config.get("save_path", "outputs"))
+
+    def _contained(real_path: str, root: str) -> bool:
+        real_n, root_n = os.path.normcase(real_path), os.path.normcase(root)
+        return real_n == root_n or real_n.startswith(root_n + os.sep)
+
+    voices: dict[str, str] = {}
+    for speaker, raw_path in tts.voice_map(body.get("voices")).items():
+        real = os.path.realpath(raw_path)
+        if not (_contained(real, uploads_root) or _contained(real, outputs_root)):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Voice for {speaker}: path not allowed: {raw_path}",
+            )
+        if not os.path.isfile(real):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Voice for {speaker}: file not found: {raw_path}",
+            )
+        voices[speaker] = real
+
+    max_voices = int(model_def.get("max_voice_count") or 2)
+    try:
+        prompt, voice_paths = tts.build_prompt(rows, max_voices, voices)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+    # Prefer the request this workspace has actually spoken with before: model
+    # defaults alone are not a working speech configuration (measured on
+    # fish_drama3, they produced no speech at all).
+    baseline = tts.speech_baseline(out_dir, model_type)
+    params = tts.build_params(
+        baseline or wgp.get_default_settings(model_type),
+        model_type,
+        model_def,
+        prompt,
+        voice_paths,
+        settings_version=getattr(wgp, "settings_version", None),
+    )
+    params["_tts_speaker_name1"] = next(iter(voices), "")
+    if len(voice_paths) > 1:
+        params["_tts_speaker_name2"] = list(voices)[1]
+
+    from services import director_pipeline
+
+    _init_pipeline()
+    reuse_note = (
+        " (reusing this workspace's working speech settings)" if baseline else ""
+    )
+    print(
+        f"[TTS Episode] Speaking {len(rows)} line(s) with {len(voice_paths)} "
+        f"voice(s) using {model_type}{reuse_note}"
+    )
+    try:
+        outputs = director_pipeline._submit_and_wait(
+            params,
+            timeout_s=float(body.get("timeout_seconds") or 3600),
+            workspace=workspace,
+            out_dir=out_dir,
+            job_id=f"tts-episode-{uuid.uuid4().hex[:8]}",
+        )
+    except RuntimeError as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+    filename = str(outputs[0]) if outputs else ""
+    if not filename:
+        raise HTTPException(
+            status_code=500,
+            detail="The speech engine finished without an output file.",
+        )
+    path = filename if os.path.isabs(filename) else os.path.join(out_dir, filename)
+    if not os.path.isfile(path):
+        fallback = os.path.join(out_dir, os.path.basename(filename))
+        path = fallback if os.path.isfile(fallback) else path
+    if not os.path.isfile(path):
+        raise HTTPException(
+            status_code=500,
+            detail=f"The speech output file could not be found: {filename}",
+        )
+
+    seconds = _probe_audio_duration(path)
+    if not seconds or seconds <= 0:
+        from services import podcast_master
+        from shared.utils.video_decode import _resolve_media_binary
+
+        seconds = podcast_master.probe_duration(
+            _resolve_media_binary("ffprobe") or "ffprobe", path
+        )
+
+    return {
+        "path": path,
+        "filename": filename,
+        "duration_seconds": round(float(seconds or 0), 3),
+        "model_type": model_type,
+        "voice_count": len(voice_paths),
+        "speakers": list(voices)[:len(voice_paths)],
+    }
+
+
 @api.post("/api/v1/audio/analyze")
 async def analyze_audio(request: Request):
     """Analyze an audio file: beat detection, sections, optional transcription."""
@@ -10799,6 +11348,104 @@ def director_pipeline_resume(pid: str):
     if not ok:
         raise HTTPException(status_code=400, detail=message)
     return {"status": "resumed", "pipeline_id": pid}
+
+
+# ── Director Setup Presets ────────────────────────────────────────────────
+#
+# A Studio recipe reproduces a LOOK and deliberately leaves out the per-generation
+# inputs, so it cannot describe a Director project, where the cast images, the
+# soundtrack and its transcript ARE the setup. These routes freeze a run's setup into
+# a reusable preset so a failed plan costs one click instead of an upload session.
+
+
+def _director_preset_out_dir(state=None, workspace: str = "") -> str:
+    """The workspace folder a preset belongs to (its assets are served from there)."""
+    name = str(workspace or "").strip()
+    if not name and isinstance(state, dict):
+        name = str(state.get("workspace") or "").strip()
+    if not name:
+        return wgp.server_config.get("save_path", "outputs")
+    from launch import _workspace_dir
+
+    return _workspace_dir(name)
+
+
+@api.get("/api/v1/director/presets")
+def list_director_presets_route(workspace: str = ""):
+    from services import director_presets
+
+    return {"presets": director_presets.list_presets(_director_preset_out_dir(None, workspace))}
+
+
+@api.get("/api/v1/director/presets/{preset_id}")
+def get_director_preset_route(preset_id: str, workspace: str = ""):
+    from services import director_presets
+
+    preset = director_presets.get_preset(
+        preset_id, _director_preset_out_dir(None, workspace),
+    )
+    if not preset:
+        return JSONResponse({"error": "Preset not found"}, status_code=404)
+    return preset
+
+
+@api.post("/api/v1/director/presets")
+async def save_director_preset_route(request: Request):
+    """Freeze a setup: the brief, references, audio, models and controls.
+
+    Accepts either ``pipeline_id`` (freeze a saved run) or ``params`` (freeze what the
+    composer holds right now, which is what the error case needs: edit the text, save the
+    new setup, plan again).
+    """
+    from services import director_presets
+    from services.director_pipeline import load_pipeline_state
+
+    body = await request.json()
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "Request body must be a JSON object"}, status_code=400)
+
+    submitted = body.get("params")
+    pid = str(body.get("pipeline_id") or "").strip()
+    if isinstance(submitted, dict) and submitted:
+        state = {
+            "_params_snapshot": submitted,
+            "workspace": submitted.get("workspace"),
+            "pipeline_id": pid,
+        }
+    elif pid:
+        state = load_pipeline_state(wgp.server_config.get("save_path", "outputs"), pid)
+        if not state:
+            return JSONResponse({"error": "Pipeline not found"}, status_code=404)
+    else:
+        return JSONResponse(
+            {"error": "Send the current setup (params) or a pipeline_id to freeze."},
+            status_code=400,
+        )
+
+    out_dir = _director_preset_out_dir(state, str(body.get("workspace") or ""))
+    try:
+        card = director_presets.save_preset(
+            state,
+            str(body.get("name") or ""),
+            out_dir,
+            source_pipeline_id=pid,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except OSError as exc:
+        return JSONResponse({"error": f"Could not write the preset: {exc}"}, status_code=500)
+    return card
+
+
+@api.delete("/api/v1/director/presets/{preset_id}")
+def delete_director_preset_route(preset_id: str, workspace: str = ""):
+    from services import director_presets
+
+    if not director_presets.delete_preset(
+        preset_id, _director_preset_out_dir(None, workspace),
+    ):
+        return JSONResponse({"error": "Preset not found"}, status_code=404)
+    return {"status": "deleted"}
 
 
 # ── Director Pipeline Dashboard ───────────────────────────────────────────
@@ -31779,6 +32426,7 @@ if __name__ == "__main__":
     print(f"  API docs:      http://{display_host}:{port}/docs")
     if host == "0.0.0.0":
         print(f"  (Bound to {host} — LAN-accessible via this machine's IP)")
+    print(f"  Code loaded:   {_loaded_code_revision()}")
     print(f"{'='*50}\n")
 
     # Confirm the polling filter immediately before Uvicorn configures logging.

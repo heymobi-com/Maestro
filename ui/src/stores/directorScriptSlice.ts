@@ -12,7 +12,7 @@
  * patches, which keeps its side of the seam to one line each.
  */
 
-import { parseDirectorScript, type ScriptTranscriptRow } from '../lib/directorScript'
+import { parseDirectorScript, rescaleScriptTimeline, type ScriptTranscriptRow } from '../lib/directorScript'
 import type { LyricSegment, PlannedClip } from '../types'
 
 export type DirectorScriptSource = 'audio' | 'script'
@@ -23,6 +23,14 @@ export interface DirectorScriptState {
   directorScriptText: string
   directorScriptClips: PlannedClip[]
   directorScriptTranscript: ScriptTranscriptRow[]
+  /**
+   * An episode spoken from these rows by a TTS engine. When set, the render no
+   * longer asks the video model to invent the voices: the track owns them and H3
+   * only moves the mouths and muxes the pristine audio.
+   */
+  directorScriptAudioPath: string | null
+  /** The measured length of that track, used to re-time the authored rows. */
+  directorScriptAudioDuration: number | null
 }
 
 /** One definition for the initial state and for the project reset. */
@@ -31,7 +39,10 @@ export const directorScriptDefaults: DirectorScriptState = {
   directorScriptText: '',
   directorScriptClips: [],
   directorScriptTranscript: [],
+  directorScriptAudioPath: null,
+  directorScriptAudioDuration: null,
 }
+
 
 /**
  * A written script needs no audio pass, so choosing it lands on the step that
@@ -48,12 +59,39 @@ export function directorScriptSourcePatch(
 }
 
 /** The timeline and the transcript, derived as soon as the text changes. */
-export function directorScriptTextPatch(text: string): Partial<DirectorScriptState> {
+function deriveScriptRows(text: string, audioDuration: number | null) {
   const parsed = parseDirectorScript(text)
+  const timed = audioDuration ? rescaleScriptTimeline(parsed, audioDuration) : parsed
+  return {
+    directorScriptClips: timed.clips as unknown as PlannedClip[],
+    directorScriptTranscript: timed.transcript,
+  }
+}
+
+export function directorScriptTextPatch(
+  state: DirectorScriptState,
+  text: string,
+): Partial<DirectorScriptState> {
   return {
     directorScriptText: text,
-    directorScriptClips: parsed.clips as unknown as PlannedClip[],
-    directorScriptTranscript: parsed.transcript,
+    ...deriveScriptRows(text, state.directorScriptAudioDuration),
+  }
+}
+
+/**
+ * Attach (or clear) the spoken episode for these rows. The rows are re-timed onto
+ * the measured duration here, so the review steps show the clips the render will
+ * actually slice out of the track.
+ */
+export function directorScriptAudioPatch(
+  state: DirectorScriptState,
+  path: string | null,
+  duration: number | null,
+): Partial<DirectorScriptState> {
+  return {
+    directorScriptAudioPath: path,
+    directorScriptAudioDuration: duration,
+    ...deriveScriptRows(state.directorScriptText, path ? duration : null),
   }
 }
 
@@ -61,6 +99,21 @@ export function directorScriptTextPatch(text: string): Partial<DirectorScriptSta
 export function directorScriptIsActive(state: DirectorScriptState): boolean {
   return state.directorScriptSource === 'script' && state.directorScriptClips.length > 0
 }
+
+/**
+ * A script made only of scene direction still produces clips, but it has no
+ * words for the video model to speak. Planning it used to succeed and render
+ * silent shots whose voice references made H3 vocalize gibberish, so this state
+ * is refused with a message that names the missing format.
+ */
+export function directorScriptMissingSpokenRows(state: DirectorScriptState): boolean {
+  return state.directorScriptSource === 'script'
+    && state.directorScriptTranscript.length === 0
+}
+
+export const DIRECTOR_SCRIPT_MISSING_SPOKEN_ROWS_ERROR =
+  'The written script has no dialogue rows. Write at least one line as NAME: line '
+  + '(S1: line also works) before planning or rendering.'
 
 /** The timeline the planner reads: the authored clips, or the analysed ones. */
 export function directorScriptTimeline<T>(state: DirectorScriptState, analysed: T): PlannedClip[] | T {
@@ -98,12 +151,13 @@ export function directorScriptPipelineFields(
   if (!directorScriptIsActive(state)) {
     return { audio_path: soundtrack, planned_clips: analysedClips, lyrics: analysedLyrics || '' }
   }
-  // A written script has no soundtrack: H3 generates the voices for its lines, so
-  // the render must not ask for an uploaded track. The marker says so explicitly
-  // instead of leaving the backend to infer it from a missing audio_path, which is
-  // also what a half-finished upload looks like.
+  // A written script that has no audio yet asks H3 to invent the voices for its
+  // lines, so the render must not ask for an uploaded track. Once a TTS episode
+  // exists for those rows the track owns the voice instead: it travels as the
+  // project's audio, H3 only lip-syncs and muxes it, and the rows keep their
+  // (re-timed) timings so each shot still knows how long it is.
   return {
-    audio_path: undefined,
+    audio_path: state.directorScriptAudioPath || undefined,
     planned_clips: state.directorScriptClips,
     lyrics: state.directorScriptTranscript,
     _director_script_source: true,

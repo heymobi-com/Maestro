@@ -98,6 +98,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const rejoinPipelineClips = useStore(s => s.rejoinPipelineClips)
   const setDirectorGalleryGroupExpanded = useStore(s => s.setDirectorGalleryGroupExpanded)
   const loadSavedPipeline = useStore(s => s.loadSavedPipeline)
+  const openDirectorProject = useStore(s => s.reattachDirectorPipeline)
   const setDashboardOpen = useStore(s => s.setDashboardOpen)
   const removeOutputFromGallery = useStore(s => s.removeOutputFromGallery)
   const toggleFavorite = useStore(s => s.toggleFavorite)
@@ -152,6 +153,8 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const [trimInput, setTrimInput] = useState<{ target: GalleryInputTarget; source: EditorAsset } | null>(null)
   const [showActionMenu, setShowActionMenu] = useState(false)
   const [showMoveMenu, setShowMoveMenu] = useState(false)
+  // A Director clip has two places its settings can go, so its pencil asks which.
+  const [showLoadMenu, setShowLoadMenu] = useState(false)
   const [showDetails, setShowDetails] = useState(false)
   const [moving, setMoving] = useState(false)
   const actionMenuRef = useRef<HTMLDivElement>(null)
@@ -432,6 +435,18 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     setTimeout(() => loadSettingsFromOutput(), 50)
   }, [index, setSelectedOutput, loadSettingsFromOutput])
 
+  // The sidecar of a Director clip records the run that rendered it but not the project
+  // itself: the brief, the reference manifest and the transcript live in the run. So for
+  // these clips "Load settings" has two destinations, and the second one is usually the
+  // one the user wants — Studio cannot rebuild a Director project.
+  const handleLoadInDirector = useCallback(() => {
+    setShowLoadMenu(false)
+    setShowActionMenu(false)
+    setShowMoveMenu(false)
+    const pid = file.director_pipeline_id
+    if (pid) void openDirectorProject(pid, true)
+  }, [file.director_pipeline_id, openDirectorProject])
+
   // Ours: the Director-aware decision and its progress state live in
   // lib/directorReroll.ts.
   const { rerolling, rerollError, handleReroll } = useDirectorAwareReroll({
@@ -664,6 +679,23 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     }
   }, [showActionMenu])
 
+  // The load-target choice belongs to the action row, so it shares that boundary.
+  useEffect(() => {
+    if (!showLoadMenu) return
+    const handler = (e: PointerEvent) => {
+      if (!actionMenuRef.current?.contains(e.target as Node)) setShowLoadMenu(false)
+    }
+    const escape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowLoadMenu(false)
+    }
+    document.addEventListener('pointerdown', handler)
+    document.addEventListener('keydown', escape)
+    return () => {
+      document.removeEventListener('pointerdown', handler)
+      document.removeEventListener('keydown', escape)
+    }
+  }, [showLoadMenu])
+
   const handleMove = async (targetWs: string) => {
     setMoving(true)
     setShowMoveMenu(false)
@@ -828,7 +860,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
       data-director-pipeline-id={file.director_pipeline_id || undefined}
       data-director-clip-index={file.director_clip_index ?? undefined}
       style={style}
-      className={`rounded-xl border-2 overflow-visible transition-colors ${showActionMenu ? 'z-40' : 'z-0'} ${
+      className={`rounded-xl border-2 overflow-visible transition-colors ${showActionMenu || showLoadMenu ? 'z-40' : 'z-0'} ${
         // Active frame: theme-aware bezel via frame-active-gradient.
         //
         // Default theme: linear gradient with both stops set to
@@ -1016,14 +1048,58 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
               onClick={() => {
                 setShowActionMenu(false)
                 setShowMoveMenu(false)
-                handleLoadSettings()
+                // A Director clip also exists as a project (brief, references, audio),
+                // so ask where this should land instead of always choosing Studio.
+                if (!isDirectorChild) {
+                  setShowLoadMenu(false)
+                  handleLoadSettings()
+                  return
+                }
+                setShowLoadMenu(value => !value)
               }}
-              className="rounded-lg p-1.5 text-text-secondary transition-colors hover:bg-bg-hover hover:text-text-primary"
-              title="Load settings"
+              className={`rounded-lg p-1.5 transition-colors ${
+                showLoadMenu
+                  ? 'bg-bg-active text-accent-blue'
+                  : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'
+              }`}
+              title={isDirectorChild
+                ? 'Load settings: in Studio, or in the Director project that rendered this clip'
+                : 'Load settings'}
               aria-label="Load settings"
+              aria-haspopup={isDirectorChild ? 'menu' : undefined}
+              aria-expanded={isDirectorChild ? showLoadMenu : undefined}
             >
               <Pencil size={14} />
             </button>
+          )}
+          {showLoadMenu && (
+            <div
+              role="menu"
+              aria-label="Load settings in"
+              className="absolute right-0 top-full z-[65] mt-1 w-56 overflow-hidden rounded-lg border border-border bg-bg-secondary py-1 shadow-2xl"
+            >
+              <div className="px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
+                Load settings in
+              </div>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => { setShowLoadMenu(false); handleLoadSettings() }}
+                className="flex w-full flex-col items-start gap-0.5 px-2.5 py-1.5 text-left text-[11px] text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+              >
+                <span>Studio</span>
+                <span className="text-[10px] text-text-muted">this clip&apos;s generation settings</span>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={handleLoadInDirector}
+                className="flex w-full flex-col items-start gap-0.5 px-2.5 py-1.5 text-left text-[11px] text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+              >
+                <span>Director</span>
+                <span className="text-[10px] text-text-muted">the project: brief, references, audio</span>
+              </button>
+            </div>
           )}
           {!browsingUploads && (
             <button

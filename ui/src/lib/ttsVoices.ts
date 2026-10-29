@@ -28,6 +28,29 @@ export function ttsVoicePaths(voices: TtsVoice[], count: number): Partial<Genera
   return paths
 }
 
+/**
+ * The voice slots that would reach a speech model with no reference audio.
+ *
+ * KugelAudio rejects that request with "Multi-voice cloning requires at least two
+ * reference audio files" and Qwen3 Base with "requires Speaker 1 reference audio",
+ * both after the job is queued, so the UI refuses it first. A model that declares
+ * no voice-reference slots is left alone: it needs none.
+ */
+export function ttsMissingVoiceReferences(
+  voices: TtsVoice[],
+  count: number,
+  options: ModelOptions | null,
+): number[] {
+  const limit = ttsVoiceLimit(options)
+  if (limit <= 0) return []
+  const active = Math.min(count, limit)
+  const missing: number[] = []
+  for (let index = 0; index < active; index++) {
+    if (!voices[index]?.path) missing.push(index + 1)
+  }
+  return missing
+}
+
 export function ttsSpeakingVoiceCount(count: number, options: ModelOptions | null, mode: string): number {
   const limit = options?.architecture === 'index_tts2' && mode.replace(/[NV]/g, '') === 'AB'
     ? 1 : ttsVoiceLimit(options)
@@ -39,6 +62,23 @@ export function ttsCharacterEnhancePrompt(prompt: string, voices: TtsVoice[], co
   if (!active.some(voice => voice.characterId)) return prompt
   const bindings = active.map((voice, i) => `Speaker ${i + 1}: ${JSON.stringify(voice.name || `Speaker ${i + 1}`)}`).join('\n')
   return `Saved character voice bindings:\n${bindings}\nUse these exact speaker names for dialogue labels. Keep each speaker's lines assigned to that speaker. Their voice references are already attached. Do not invent replacement speakers or speak these instructions.\n\nRequested speech:\n${prompt}`
+}
+
+/**
+ * A speaker name reduced to what a dialogue label can actually spell.
+ *
+ * Saved characters carry a slot suffix ("Bela (S1)") and a writer may add a
+ * delivery note ("Bela (pensativa)"), while the script says "Bela:". Comparing the
+ * raw names left the label untouched, and a label the engine does not recognise is
+ * read by the first voice, so the whole episode came out in one voice.
+ */
+export function normalizeTtsSpeakerName(value: string): string {
+  return String(value || '')
+    .replace(/\([^)]*\)/g, ' ')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N} ]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
 }
 
 export function applyTtsVoices(params: Record<string, unknown>, voices: TtsVoice[], count: number, options: ModelOptions | null): void {
@@ -59,10 +99,16 @@ export function applyTtsVoices(params: Record<string, unknown>, voices: TtsVoice
   // Match whole speaker labels once. Sequential substitutions can remap a
   // generated "Speaker 1:" label or names that are suffixes of other names.
   const speakers = active.slice(0, ttsSpeakingVoiceCount(active.length, options, String(params.audio_prompt_type)))
-  const names = new Map(speakers.map((voice, i) => [voice.name.trim().toLocaleLowerCase(), i]))
+  const names = new Map<string, number>()
+  speakers.forEach((voice, index) => {
+    for (const candidate of [voice.name, voice.characterName]) {
+      const key = normalizeTtsSpeakerName(String(candidate || ''))
+      if (key && !names.has(key)) names.set(key, index)
+    }
+  })
   params.prompt = String(params.prompt || '').replace(/^([ \t]*)([^\n:]+?)\s*:/gm, (label, space, name: string) => {
     const index = options?.architecture === 'chatterbox' && /^Speaker 1$/i.test(name.trim())
-      ? 0 : names.get(name.trim().toLocaleLowerCase())
+      ? 0 : names.get(normalizeTtsSpeakerName(name))
     if (index === undefined) return label
     return options?.architecture === 'chatterbox' ? space : `${space}Speaker ${index + 1}:`
   })

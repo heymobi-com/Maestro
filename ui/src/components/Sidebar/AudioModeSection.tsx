@@ -9,6 +9,8 @@ import type { SavedOmniCharacter } from '../../types'
 import { ttsVoiceLimit } from '../../lib/ttsVoices'
 import { characterDisplayName } from '../../lib/characters'
 import { TtsCharacterLibrary } from './TtsCharacterLibrary'
+import { PodcastMasterButton } from './PodcastMasterDialog'
+import { SourcesButton } from './SourcesPanel'
 
 export function AudioModeSection() {
   const modelOptions = useStore(s => s.modelOptions)
@@ -391,6 +393,9 @@ export function AudioModeSection() {
           />
         </div>
       )}
+
+      {isAudioOnly && <SourcesButton />}
+      {isAudioOnly && <PodcastMasterButton />}
     </div>
   )
 }

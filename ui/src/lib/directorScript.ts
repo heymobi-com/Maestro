@@ -63,7 +63,29 @@ const PAUSE_SECONDS = 0.4
 /** Keep a clip inside one native H3 window; a long turn is split at its sentences. */
 const MAX_CLIP_SECONDS = 12
 
-const _SPEAKER_ROW = /^\s*([\p{Lu}][\p{L}'’.\- ]{0,29}?)\s*(?:\(([^)\n]{0,40})\))?\s*:\s*(.+)$/u
+// A row may open with the scene's timecode; the dialogue itself starts after it.
+// Both shapes a written podcast script uses are accepted: ``0:00-0:05 S1: line``
+// and ``[00:05] S1: line``.
+const _TIMECODE_PREFIX = /^\s*\[?\d{1,2}:\d{2}(?::\d{2})?(?:\s*[-–—]\s*\[?\d{1,2}:\d{2}(?::\d{2})?)?\]?\s*(?:[|·•]\s*)?[-–—:]?\s*/u
+// A line that is only a timecode marks the scene, not a spoken turn. Keeping it
+// used to add a silent 1.6 s clip per timestamp, which then merged the real turns
+// into one shot.
+const _TIMECODE_ONLY = /^\s*\[?\d{1,2}:\d{2}(?::\d{2})?(?:\s*[-–—]\s*\[?\d{1,2}:\d{2}(?::\d{2})?)?\]?\s*$/u
+// ``S1:`` and ``SPEAKER 1:`` are how a two-host brief names its cast. Requiring
+// letters only turned every one of those rows into scene direction, so the
+// planner planned a dialogue-free video and H3 vocalized gibberish.
+const _SPEAKER_ROW = /^\s*([\p{Lu}][\p{L}\p{N}'’.\- ]{0,29}?)\s*(?:\(([^)\n]{0,40})\))?\s*:\s*(.+)$/u
+// A cast label may use a dash or a column separator instead of a colon. The
+// label is restricted so "JEAN-LUC" is still one name, not "JEAN" plus a line.
+const _SPEAKER_ROW_DASH = /^\s*(S\d{1,2}|(?:SPEAKER|HOST|NARRATOR|VOICE)\s*\d{1,2})\s*(?:\(([^)\n]{0,40})\))?\s*[-–—|]\s*(.+)$/u
+const _SPEAKER_LABEL_LIKE = /^(?:S\d{1,2}|(?:SPEAKER|HOST|NARRATOR|VOICE)\s*\d{1,2}|[\p{Lu}][\p{Lu}\p{N}'’.\- ]{0,29})$/u
+// Uppercase stage directions end in a colon too. They are not speakers.
+const _SCENE_HEADINGS = new Set([
+  'SETUP', 'SCENE', 'SHOT', 'CAMERA', 'ACTION', 'LIGHTING', 'SOUND',
+  'MUSIC', 'SFX', 'B-ROLL', 'NOTE', 'NOTA', 'TITLE', 'INT', 'EXT', 'CUT',
+  'TRANSITION', 'LOCATION', 'CONTINUITY', 'STYLE', 'VISUAL', 'AUDIO',
+  'DIALOGUE', 'SUBTITLES',
+])
 const _TAG = /\[([^[\]]{1,40})\]/
 
 export function _countWords(text: string): number {
@@ -99,21 +121,46 @@ function _splitTurn(turn: ScriptTurn): ScriptTurn[] {
 }
 
 /**
+ * Match one speaker row, tolerating a leading scene timecode.
+ *
+ * A timecode makes a title-case label ambiguous ("Cold open:" is staging, not a
+ * host), so after a timecode only a cast label or an explicit `<d>` line counts.
+ */
+function _speakerRow(line: string): RegExpMatchArray | null {
+  const direct = line.match(_SPEAKER_ROW) || line.match(_SPEAKER_ROW_DASH)
+  if (direct) return direct
+  const withoutTimecode = line.replace(_TIMECODE_PREFIX, '').trim()
+  if (!withoutTimecode || withoutTimecode === line) return null
+  const match = withoutTimecode.match(_SPEAKER_ROW) || withoutTimecode.match(_SPEAKER_ROW_DASH)
+  if (!match) return null
+  return _SPEAKER_LABEL_LIKE.test(match[1].trim()) || /<d>/i.test(match[3])
+    ? match
+    : null
+}
+
+/**
  * Read a script written as speaker rows.
  *
  * Lines that are not speaker rows are scene direction: they are kept in `turns`
  * order as a turn of their own with no speaker so the planner still sees the
- * staging, but they contribute no spoken words.
+ * staging, but they contribute no spoken words. A line that is only a timecode
+ * is a scene marker and contributes nothing.
  */
 export function parseDirectorScript(script: string): ParsedScript {
   const turns: ScriptTurn[] = []
   for (const line of String(script || '').split(/\r?\n/)) {
     const trimmed = line.trim()
     if (!trimmed) continue
-    const match = trimmed.match(_SPEAKER_ROW)
+    if (_TIMECODE_ONLY.test(trimmed)) continue
+    const match = _speakerRow(trimmed)
     if (match) {
+      const speaker = _cleanText(match[1])
+      if (_SCENE_HEADINGS.has(speaker.toUpperCase())) {
+        turns.push({ speaker: '', delivery: '', text: trimmed })
+        continue
+      }
       const text = _cleanText(match[3])
-      if (text) turns.push({ speaker: _cleanText(match[1]), delivery: _cleanText(match[2] || ''), text })
+      if (text) turns.push({ speaker, delivery: _cleanText(match[2] || ''), text })
       continue
     }
     // Scene direction: keep it so the shot has staging, but it is not spoken.
@@ -145,6 +192,40 @@ export function parseDirectorScript(script: string): ParsedScript {
     cursor = end + PAUSE_SECONDS
   }
   return { turns, clips, transcript, wordCount, duration: clips.length > 0 ? clips[clips.length - 1].end : 0 }
+}
+
+/**
+ * Re-time a parsed script onto a real audio duration.
+ *
+ * A timeline estimated from words per second and the episode audio recorded from
+ * those same rows never match exactly. H3 slices each shot's window out of the
+ * supplied track, so a timeline longer than the track asks for samples that do
+ * not exist, and a shorter one leaves the tail unheard. Scaling every turn onto
+ * the measured duration keeps the order, the pauses and each turn's share of the
+ * episode, which is all a lip-synced shot needs: the words it must perform come
+ * from the track, not from the estimate.
+ */
+export function rescaleScriptTimeline(parsed: ParsedScript, targetSeconds: number): ParsedScript {
+  const current = parsed.duration
+  if (!(targetSeconds > 0) || !(current > 0)) return parsed
+  const factor = targetSeconds / current
+  if (Math.abs(1 - factor) < 0.01) return parsed
+  const scale = (seconds: number) => Math.round(seconds * factor * 1000) / 1000
+  return {
+    ...parsed,
+    clips: parsed.clips.map(clip => ({
+      ...clip,
+      start: scale(clip.start),
+      end: scale(clip.end),
+      duration_frames: Math.max(1, Math.round((clip.end - clip.start) * factor * 24)),
+    })),
+    transcript: parsed.transcript.map(row => ({
+      ...row,
+      start: scale(row.start),
+      end: scale(row.end),
+    })),
+    duration: targetSeconds,
+  }
 }
 
 /** The language a turn declares, if it declares one. */

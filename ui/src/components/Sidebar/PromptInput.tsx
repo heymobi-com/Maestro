@@ -19,10 +19,15 @@ import {
 } from '../../lib/h3WindowTiming'
 import { ComposerContext, ComposerToolbarItem } from './SidebarPanels'
 import { fetchWriterDrafts } from '../../api/client'
+import * as api from '../../api/client'
 import { LoadWriterDraftHistory } from '../WriterDraftHistory'
 import { SidebarMenu } from './SidebarMenu'
 import { Flux3PromptHelper } from './Flux3PromptHelper'
 import { MossImagePromptHelper } from './MossImagePromptHelper'
+import { briefStatesDuration, podcastTagStyle } from '../../lib/podcastWriter'
+import { SPEECH_MODES, speechModeInstructions, speechModeSpec, speechModeVoices, speechModeWriterMode, type SpeechMode } from '../../lib/speechModes'
+import { SpeechCitationReview } from './SpeechCitationReview'
+import { ttsVoiceLimit } from '../../lib/ttsVoices'
 
 const placeholders: Record<string, string> = {
   image: 'Describe your image...',
@@ -199,6 +204,11 @@ export function PromptInput() {
     && !!item.h3WindowPlan
   ))?.h3WindowPlan?.signature || '')
   const [ttsMenuOpen, setTtsMenuOpen] = useState(false)
+  // Citations are reviewed after the script exists and before any audio is made.
+  const [citationReview, setCitationReview] = useState<{
+    citations: api.SpeechCitation[]
+    passages: api.SpeechSourceMatch[]
+  } | null>(null)
   const [enhanceMenuOpen, setEnhanceMenuOpen] = useState(false)
   const [enhanceAnchor, setEnhanceAnchor] = useState<HTMLDivElement | null>(null)
   const [closedWindowPlanSignature, setClosedWindowPlanSignature] = useState<string | null>(null)
@@ -206,6 +216,7 @@ export function PromptInput() {
 
   const isAudioOnly = modelOptions?.audio_only
   const voiceCount = useStore(s => s.ttsVoiceCount)
+  const setTtsVoiceCount = useStore(s => s.setTtsVoiceCount)
   const isMultiVoice = voiceCount >= 2
   // Does the active TTS model support multi-speaker output? Scenema, Kugel,
   // Qwen3-TTS, Index-TTS2 all do (max_voice_count >= 2 in their handlers).
@@ -219,6 +230,85 @@ export function PromptInput() {
   // 2+ voice slots, monologue otherwise. The dropdown lets the user override
   // either way regardless of voice slot count.
   const defaultMode: 'dialogue' | 'monologue' = isMultiVoice ? 'dialogue' : 'monologue'
+  // Every spoken format is the writer the app already has, plus a brief for that
+  // format. It keeps the user's own instructions and appends the structure once.
+  // The engine decides the delivery syntax, and the format decides whether the
+  // script is a dialogue (labelled) or continuous narration (unlabelled).
+  const writeSpeechFormat = (format: SpeechMode) => {
+    setTtsMenuOpen(false)
+    const spec = speechModeSpec(format)
+    const brief = String(useStore.getState().params.prompt || '')
+    // The prompt box is the brief: the writer expands what is written there, so
+    // starting it empty makes it invent an unrelated script.
+    if (!brief.trim()) {
+      useStore.setState({
+        promptEnhanceError:
+          'Write what this is about in the prompt box first — the topic, who it '
+          + `is for, and how long it should run. ${spec.label} expands that brief.`,
+      })
+      return
+    }
+    void writeSpeechFormatAsync(format, spec, brief)
+  }
+
+  /**
+   * Write the script, grounding it in the indexed documents when there are any.
+   *
+   * The brief is the retrieval query, so each format pulls the passages that
+   * actually cover its subject. When the documents miss something the writer is
+   * told to say so rather than invent it.
+   */
+  const writeSpeechFormatAsync = async (
+    format: SpeechMode,
+    spec: ReturnType<typeof speechModeSpec>,
+    brief: string,
+  ) => {
+    const limit = ttsVoiceLimit(modelOptions)
+    const wanted = Math.max(1, Math.min(speechModeVoices(format), limit || 1))
+    if (limit > 0 && useStore.getState().ttsVoiceCount < wanted) setTtsVoiceCount(wanted)
+
+    let grounding = ''
+    let citations: api.SpeechCitation[] = []
+    let passages: api.SpeechSourceMatch[] = []
+    try {
+      const found = await api.searchSources({
+        query: brief,
+        workspace: useStore.getState().activeWorkspace,
+        limit: 6,
+      })
+      grounding = found.block
+      citations = found.citations || []
+      passages = found.results || []
+    } catch {
+      // Sources are optional: a failure here must not stop the write.
+    }
+
+    const current = useStore.getState().params._speech_writer_instructions || ''
+    // Delivery syntax belongs to the selected engine: Fish reads [whisper] and
+    // <emphasis> as direction, while Kugel and Qwen reject any markup.
+    const written = speechModeInstructions(
+      current, format, podcastTagStyle(modelOptions?.architecture),
+    )
+    setParam(
+      '_speech_writer_instructions',
+      grounding ? `${written}\n\n${grounding}` : written,
+    )
+    // A brief that states no length would otherwise be answered with a trailer, so
+    // give the writer this format's own default. It travels with the call, not as a
+    // saved preference, so ordinary writing keeps its own length.
+    await enhancePrompt(
+      speechModeWriterMode(format),
+      'adaptive',
+      false,
+      briefStatesDuration(brief) ? undefined : spec.minutes,
+    )
+    // Review the citations after the script exists but before any audio is
+    // rendered: the documents credited are the user's decision, not a default.
+    if (citations.length > 0) {
+      setParam('_speech_citations', citations)
+      setCitationReview({ citations, passages })
+    }
+  }
   const enhanceStatus = useEnhanceStatus(isEnhancing)
   const fps = modelOptions?.fps ?? 16
   const swDefaults = (modelOptions as Record<string, unknown> | null)?.sliding_window_defaults as Record<string, number> | undefined
@@ -413,6 +503,18 @@ export function PromptInput() {
   // and editable window plan without mounting a second prompt instance.
   return (
     <div className="relative flex grow shrink-0 basis-auto flex-col">
+      {citationReview && (
+        <SpeechCitationReview
+          open
+          citations={citationReview.citations}
+          passages={citationReview.passages}
+          onClose={() => setCitationReview(null)}
+          onConfirm={kept => {
+            setParam('_speech_citations', kept)
+            setCitationReview(null)
+          }}
+        />
+      )}
       {/* Enhance status indicator */}
       {isEnhancing && enhanceStatus.phase !== 'idle' && (
         <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] text-text-muted bg-bg-tertiary/80 rounded-t-lg border border-b-0 border-border">
@@ -659,8 +761,37 @@ export function PromptInput() {
                       {voiceCount >= 2 ? `Write ${voiceCount}-Person Dialogue` : 'Write Dialogue (2 speakers)'}
                       <span className="block text-[9px] text-text-muted">No thinking — faster</span>
                     </button>
+                    <div className="border-t border-border px-3 py-1 text-[9px] uppercase tracking-wider text-text-muted">
+                      Formats
+                    </div>
+                    {/* Narration needs one voice, so it is offered even when the
+                        selected engine has no second speaker slot. */}
+                    {SPEECH_MODES.filter(format => format.shape === 'narration').map(format => (
+                      <button
+                        key={format.id}
+                        onClick={() => writeSpeechFormat(format.id)}
+                        className="w-full text-left px-3 py-2 text-[11px] text-text-secondary hover:bg-bg-hover transition-colors"
+                      >
+                        {format.label}
+                        <span className="block text-[9px] text-text-muted">
+                          {format.hint} · write your topic in the box first
+                        </span>
+                      </button>
+                    ))}
                   </>
                 )}
+                {SPEECH_MODES.filter(format => format.shape === 'dialogue').map(format => (
+                  <button
+                    key={format.id}
+                    onClick={() => writeSpeechFormat(format.id)}
+                    className="w-full text-left px-3 py-2 text-[11px] text-text-secondary hover:bg-bg-hover transition-colors"
+                  >
+                    {format.label}
+                    <span className="block text-[9px] text-text-muted">
+                      {format.hint} · write your topic in the box first
+                    </span>
+                  </button>
+                ))}
               </div>
             )}
           </div>

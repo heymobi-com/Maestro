@@ -1104,6 +1104,66 @@ export async function resumePipeline(pid: string): Promise<void> {
   }
 }
 
+// ── Director setup presets ───────────────────────────────────────────────
+//
+// Unlike a Studio recipe, a Director preset carries the per-generation inputs: the
+// cast images, the soundtrack and its transcript. That is what makes re-planning after
+// a failure cost one click instead of an upload session.
+
+export interface DirectorPresetCard {
+  id: string
+  name: string
+  created_at: number
+  source_pipeline_id: string
+  pipeline_type: string
+  video_model: string
+  reference_count: number
+  audio_name: string
+  brief_chars: number
+  has_transcript: boolean
+}
+
+export interface DirectorPreset extends DirectorPresetCard {
+  params: Record<string, unknown>
+  asset_manifest: Record<string, unknown>
+}
+
+export async function fetchDirectorPresets(workspace?: string): Promise<{ presets: DirectorPresetCard[] }> {
+  const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
+  const res = await fetch(`${BASE}/api/v1/director/presets${query}`)
+  if (!res.ok) throw new Error('Failed to load Director presets')
+  return res.json()
+}
+
+export async function fetchDirectorPreset(id: string, workspace?: string): Promise<DirectorPreset> {
+  const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
+  const res = await fetch(`${BASE}/api/v1/director/presets/${encodeURIComponent(id)}${query}`)
+  if (!res.ok) throw new Error('Director preset not found')
+  return res.json()
+}
+
+export async function saveDirectorPreset(body: {
+  pipeline_id?: string
+  params?: Record<string, unknown>
+  name: string
+  workspace?: string
+}): Promise<DirectorPresetCard> {
+  const res = await fetch(`${BASE}/api/v1/director/presets`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const payload = await res.json().catch(() => ({ error: 'Could not save the preset' }))
+    throw new Error(payload.error || payload.detail || 'Could not save the preset')
+  }
+  return res.json()
+}
+
+export async function deleteDirectorPreset(id: string, workspace?: string): Promise<void> {
+  const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
+  const res = await fetch(`${BASE}/api/v1/director/presets/${encodeURIComponent(id)}${query}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error('Could not delete the preset')
+}
+
 // ── Recipes ──────────────────────────────────────────────────────────────
 
 export interface RecipeLora {
@@ -1902,7 +1962,213 @@ export async function mixAudio(tracks: {
   return res.json()
 }
 
+// --- Podcast master ---
+
+export interface PodcastMasterChapter {
+  start: number
+  title: string
+}
+
+export async function podcastMaster(body: {
+  path: string
+  intro_path?: string
+  outro_path?: string
+  cover_path?: string
+  title?: string
+  artist?: string
+  album?: string
+  genre?: string
+  comment?: string
+  chapters?: PodcastMasterChapter[]
+  /** Documents the script was written from; cited by name in the file. */
+  citations?: SpeechCitation[]
+  loudness?: boolean
+  workspace?: string
+}): Promise<{
+  filename: string
+  path: string
+  duration_seconds: number
+  citations?: SpeechCitation[]
+}> {
+  const res = await fetch(`${BASE}/api/v1/audio/podcast-master`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Podcast master failed' }))
+    throw new Error(err.detail || 'Podcast master failed')
+  }
+  return res.json()
+}
+
+// --- Speech sources (document grounding) ---
+
+export interface SpeechSourceRow {
+  id: string
+  name: string
+  path: string
+  chars: number
+  chunks: number
+}
+
+export interface SpeechSourceMatch {
+  text: string
+  heading: string
+  source_id: string
+  source_name: string
+  score: number
+}
+
+/** One cited document: the default citation granularity for a spoken script. */
+export interface SpeechCitation {
+  source_id?: string
+  source_name: string
+  passages?: number
+  headings?: string[]
+  first_reference?: number
+}
+
+export async function uploadSources(files: File[]): Promise<{
+  documents: Array<{ path: string; name: string }>
+}> {
+  const form = new FormData()
+  for (const file of files) form.append('files', file)
+  const res = await fetch(`${BASE}/api/v1/sources/upload`, { method: 'POST', body: form })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Could not upload the documents' }))
+    throw new Error(err.detail || 'Could not upload the documents')
+  }
+  return res.json()
+}
+
+export async function ingestSources(body: {
+  documents: Array<{ path: string; name: string }>
+  workspace?: string
+}): Promise<{ sources: SpeechSourceRow[]; report: Array<Record<string, unknown>>; chunks: number }> {
+  const res = await fetch(`${BASE}/api/v1/sources/ingest`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Could not index the documents' }))
+    throw new Error(err.detail || 'Could not index the documents')
+  }
+  return res.json()
+}
+
+export async function fetchSources(workspace?: string): Promise<{
+  sources: SpeechSourceRow[]
+  chunks: number
+}> {
+  const res = await fetch(`${BASE}/api/v1/sources${workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''}`, {
+    cache: 'no-store',
+  })
+  if (!res.ok) throw new Error('Could not load the indexed documents')
+  return res.json()
+}
+
+/** The passages that match a brief, plus the writer-ready grounding block. */
+export async function searchSources(body: {
+  query: string
+  workspace?: string
+  limit?: number
+}): Promise<{
+  results: SpeechSourceMatch[]
+  block: string
+  citations: SpeechCitation[]
+  chunks: number
+}> {
+  const res = await fetch(`${BASE}/api/v1/sources/search`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Could not search the documents' }))
+    throw new Error(err.detail || 'Could not search the documents')
+  }
+  return res.json()
+}
+
+/** Index every supported document in a folder already inside uploads/ or the workspace. */
+export async function ingestSourceFolder(body: {
+  path: string
+  recursive?: boolean
+  workspace?: string
+}): Promise<{ sources: SpeechSourceRow[]; report: Array<Record<string, unknown>>; chunks: number }> {
+  const res = await fetch(`${BASE}/api/v1/sources/ingest-folder`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Could not index that folder' }))
+    throw new Error(err.detail || 'Could not index that folder')
+  }
+  return res.json()
+}
+
+export async function resetSources(workspace?: string): Promise<{ chunks: number }> {
+  const res = await fetch(`${BASE}/api/v1/sources/reset`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workspace }),
+  })
+  if (!res.ok) throw new Error('Could not clear the indexed documents')
+  return res.json()
+}
+
 // --- Upload ---
+
+export async function audioDuration(body: { path: string }): Promise<{
+  path: string
+  duration_seconds: number
+}> {
+  const res = await fetch(`${BASE}/api/v1/audio/duration`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Could not read the audio duration' }))
+    throw new Error(err.detail || 'Could not read the audio duration')
+  }
+  return res.json()
+}
+
+/**
+ * Speak a written script with an installed speech engine. Maestro picks the best
+ * installed multi-voice model unless one is named, so the render never has to ask
+ * a video model to invent the voices.
+ */
+export async function ttsEpisode(body: {
+  lines: Array<{ speaker: string; text: string }>
+  voices: Array<{ speaker: string; path: string }>
+  model_type?: string
+  workspace?: string
+  timeout_seconds?: number
+}): Promise<{
+  path: string
+  filename: string
+  duration_seconds: number
+  model_type: string
+  voice_count: number
+  speakers: string[]
+}> {
+  const res = await fetch(`${BASE}/api/v1/audio/tts-episode`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Could not speak this script' }))
+    throw new Error(err.detail || 'Could not speak this script')
+  }
+  return res.json()
+}
+
 
 export async function fetchViggleSourceInfo(videoPath: string, workspace: string, signal?: AbortSignal): Promise<{
   duration_seconds: number

@@ -26,12 +26,12 @@ import {
 } from '../lib/h3VaeUpsampling'
 import { isKreaIdentityEdit, normalizeKreaIdentitySettings, type KreaIdentitySettings } from '../lib/kreaIdentityControls'
 import type { MiniMaxH3VideoAudioRole, SavedOmniCharacter, TtsVoice } from '../types'
-import { applyTtsVoices, ttsAudioModeForCount, ttsCharacterEnhancePrompt, ttsSpeakingVoiceCount, ttsVoiceLimit, ttsVoicePaths } from '../lib/ttsVoices'
+import { applyTtsVoices, ttsAudioModeForCount, ttsCharacterEnhancePrompt, ttsMissingVoiceReferences, ttsSpeakingVoiceCount, ttsVoiceLimit, ttsVoicePaths } from '../lib/ttsVoices'
 import { vigglePreparationKey, viggleSourceReady, viggleTimeline } from '../lib/viggle'
 import { DEFAULT_AVATAR_SPEAKER_LOCATIONS, isLongCatAvatarModel, isMultiSpeakerAvatarModel, parseAvatarSpeakerRegions } from '../lib/avatarWorkflow'
 import type { GenerateParams, OutputFile, MediaFilter, AspectRatio, ResolutionPreset, ScailResolutionProfile, GenerationJob, ModelFamily, ModelDef, GenerationMode, StudioVideoWorkflow, StudioVideoCreateRoute, StudioVideoEffectiveCreateRoute, StudioImageWorkflow, ModelOptions, SystemConfig, SettingsTab, OutputMetadata, MultiClip, ServicesConfig, LlmStatus, LlmModelOption, AudioAnalysisResult, PlannedClip, ClipPlan, DirectorClipImage, DirectorImageGenProgress, SpeakerMapping, DirectorSkill, DirectorShotImageGuidance, ShortFilmCharacter, ShortFilmPath, CivitAIModel, CivitAIDownload, PipelineListItem, PipelineClipState, PipelineRepairState, SavedPipelineState, DirectorQueueState, SystemDetectResponse, SystemStats, RecastCharacterMapping, RepaintRegionMapping, H3WindowPlan, MiniMaxH3Reference, AppMode } from '../types'
 import * as api from '../api/client'
-import { clearDirectorPass, directorDeleteDefaults, directorDeleteGuardActions, directorPipelineType, directorPlannerSkill, directorScriptDefaults, directorScriptPlanFields, directorScriptPipelineFields, directorScriptSourcePatch, directorScriptTextPatch, directorScriptTimeline, directorViralPlanOptions, isShotInUseRefusal, normalizeDirectorSpeakerId, speakersFromAnalysis, studioRerollBlockedReason } from './directorSlice'
+import { clearDirectorPass, directorDeleteDefaults, directorDeleteGuardActions, directorPipelineType, directorPlannerSkill, DIRECTOR_SCRIPT_MISSING_SPOKEN_ROWS_ERROR, directorScriptDefaults, directorScriptMissingSpokenRows, directorScriptPlanFields, directorScriptPipelineFields, directorScriptSourcePatch, directorScriptAudioPatch, directorScriptTextPatch, directorScriptTimeline, directorViralPlanOptions, isShotInUseRefusal, normalizeDirectorSpeakerId, speakersFromAnalysis, studioRerollBlockedReason } from './directorSlice'
 import { ensureMusicSong } from './musicSong'
 import { applyThemePrefs, getStoredPrefs, type FamilyId, type ThemeMode, type ThemePrefs } from '../lib/theme'
 import {
@@ -1878,6 +1878,14 @@ interface AppState {
   rerunClipVideo: (pid: string, clipIndex: number, prompt?: string) => Promise<unknown>
   rejoinPipelineClips: (pid: string) => Promise<unknown>
   resumePipeline: (pid: string) => Promise<void>
+  // Director setup presets: freeze a run's brief, references, audio and settings, then
+  // start from them again without re-uploading anything.
+  directorPresets: import('../api/client').DirectorPresetCard[]
+  directorPresetsLoading: boolean
+  loadDirectorPresets: () => Promise<void>
+  saveDirectorPreset: (name: string) => Promise<void>
+  loadDirectorFromPreset: (presetId: string) => Promise<void>
+  deleteDirectorPreset: (presetId: string) => Promise<void>
   reattachDirectorPipeline: (pid: string, focusDirector?: boolean) => Promise<void>
   deletePipeline: (pid: string) => Promise<void>
   loadDirectorFromPipeline: (pid: string) => Promise<void>
@@ -2261,7 +2269,7 @@ interface AppState {
   enhanceOnGenerationRevision: number
   setEnhanceOnGeneration: (enabled: boolean) => void
   setEnhanceOnGenerationDefault: (enabled: boolean) => void
-  enhancePrompt: (ttsMode?: string, planningStyle?: 'faithful' | 'creative' | 'adaptive', retryFlaggedWindows?: boolean) => Promise<void>
+  enhancePrompt: (ttsMode?: string, planningStyle?: 'faithful' | 'creative' | 'adaptive', retryFlaggedWindows?: boolean, speechTargetMinutes?: number) => Promise<void>
   h3WindowPlan: H3WindowPlan | null
   updateH3WindowPrompt: (index: number, prompt: string) => void
   clearH3WindowPlan: () => void
@@ -2364,8 +2372,12 @@ interface AppState {
   directorScriptText: string
   directorScriptClips: PlannedClip[]
   directorScriptTranscript: Array<{ start: number; end: number; speaker: string; text: string; delivery: string }>
+  /** A TTS episode spoken from these rows; the render lip-syncs to it. */
+  directorScriptAudioPath: string | null
+  directorScriptAudioDuration: number | null
   setDirectorScriptSource: (source: 'audio' | 'script') => void
   setDirectorScriptText: (text: string) => void
+  setDirectorScriptAudio: (path: string | null) => Promise<void>
   setDirectorResolution: (preset: ResolutionPreset) => void
   setDirectorAspectRatio: (ratio: AspectRatio) => void
   setDirectorVideoInferenceSteps: (modelType: string, steps: number | null) => void
@@ -2511,6 +2523,15 @@ async function _buildDirectorRestorePatch(
         }
       }) as ClipPlan[]
     : (Array.isArray(ui.directorClipPlans) ? ui.directorClipPlans as ClipPlan[] : [])
+  // A run that died before it planned anything must not hand its old prompts back:
+  // reopening it is the user's way to fix the brief and plan again, and a restored
+  // stale plan would silently render exactly what just failed.
+  const neverPlanned = pipeline.clips.length === 0 && (
+    pipeline.status === 'failed'
+    || pipeline.status === 'crashed'
+    || pipeline.status === 'cancelled'
+  )
+  const restoredClipPlans: ClipPlan[] = neverPlanned ? [] : clipPlans
 
   let analysis = _record(ui.directorAnalysis) as unknown as AudioAnalysisResult | null
   if (!Object.keys(_record(analysis)).length) {
@@ -2697,7 +2718,7 @@ async function _buildDirectorRestorePatch(
     : pipelineType === 'short_film_audio' ? 'audio' : null
   const savedStep = typeof ui.directorStep === 'string'
     ? ui.directorStep as AppState['directorStep'] : 'style'
-  const restoreStep: AppState['directorStep'] = clipPlans.length > 0
+  const restoreStep: AppState['directorStep'] = restoredClipPlans.length > 0
     ? 'review_video'
     : savedStep === 'plan' || savedStep === 'generate_images' || savedStep === 'plan_video'
       ? 'style'
@@ -2725,7 +2746,7 @@ async function _buildDirectorRestorePatch(
     directorPlannedClips: plannedClips,
     directorMusicClipSeconds: typeof params.director_music_clip_seconds === "number" ? params.director_music_clip_seconds : null,
     directorEnergyBias: typeof ui.directorEnergyBias === "number" ? ui.directorEnergyBias : null,
-    directorClipPlans: clipPlans,
+    directorClipPlans: restoredClipPlans,
     directorClipImages: clipImages,
     directorReferenceImage: referenceFile,
     directorReferenceImagePath: referencePath,
@@ -2787,6 +2808,131 @@ async function _buildDirectorRestorePatch(
     directorLoading: false,
     directorLoadingMessage: null,
     directorError: null,
+  }
+}
+
+/**
+ * The inverse of `_buildDirectorRestorePatch`: the composer's current setup, in the
+ * shape a saved preset stores.
+ *
+ * A preset used to be freezable only from a saved run, so the button existed only after
+ * a plan had run, and it froze the brief that run was submitted with. The loop the user
+ * is in is the opposite: edit the text, plan, fail, edit again. So this reads the live
+ * fields and writes exactly what the restore reads back.
+ */
+function _directorSetupParams(state: AppState): Record<string, unknown> {
+  const shortFilmPath: ShortFilmPath | null = state.directorSkill === 'short_film'
+    ? state.shortFilmPath
+    : null
+  const pipelineType = directorPipelineType(state.directorSkill, shortFilmPath)
+  const videoModel = state.selectedModelPerMode.video || ''
+  const imageModel = state.selectedModelPerMode.image || ''
+  const videoLoras = state.savedLoraPerMode.video || {}
+  const imageLoras = state.savedLoraPerMode.image || {}
+  const audioPath = state.directorAudioPath || null
+  const references = (state.directorH3References || []).map(reference => ({
+    type: reference.type,
+    path: reference.path,
+    role: reference.role || '',
+    ...(reference.image_intent ? { image_intent: reference.image_intent } : {}),
+    ...(reference.audio_intent ? { audio_intent: reference.audio_intent } : {}),
+    ...(reference.video_intent ? { video_intent: reference.video_intent } : {}),
+    ...(reference.audio_path ? { audio_path: reference.audio_path } : {}),
+    ...(reference.library_character_id ? { library_character_id: reference.library_character_id } : {}),
+    ...(reference.character_name ? { character_name: reference.character_name } : {}),
+    ...(reference.remove_background ? { remove_background: true } : {}),
+  }))
+
+  return {
+    pipeline_type: pipelineType,
+    workspace: state.activeWorkspace,
+    scene_description: state.directorSceneDescription,
+    video_model: videoModel,
+    image_model: imageModel,
+    video_params: { ...(state.savedParamsPerMode.video || {}) },
+    image_params: { ...(state.savedParamsPerMode.image || {}) },
+    video_loras: { ...videoLoras },
+    image_loras: { ...imageLoras },
+    audio_path: audioPath || undefined,
+    audio_vocals_path: state.directorAnalysis?.vocals_path || undefined,
+    reference_image_path: state.directorReferenceImagePath || undefined,
+    character_ref_paths: state.directorCharacterRefPaths.length ? state.directorCharacterRefPaths : undefined,
+    character_ref_labels: state.directorCharacterRefLabels.length ? state.directorCharacterRefLabels : undefined,
+    location_ref_paths: state.directorLocationRefPaths.length ? state.directorLocationRefPaths : undefined,
+    location_ref_labels: state.directorLocationRefLabels.length ? state.directorLocationRefLabels : undefined,
+    ...(references.length ? {
+      minimax_h3_references: references,
+      minimax_h3_reference_detail: state.directorH3ReferenceDetail,
+    } : {}),
+    ...(state.directorVoiceRefPath ? { voice_reference: state.directorVoiceRefPath } : {}),
+    identity_guidance_scale: state.directorIdentityGuidanceScale,
+    target_duration: state.shortFilmTargetDuration,
+    narrative_mode: state.shortFilmNarrative,
+    characters: state.shortFilmCharacters,
+    use_lyrics_context: pipelineType === 'music_video' && state.directorUseLyricsContext,
+    seamless: state.directorSeamless,
+    shot_image_guidance: state.directorShotImageGuidance,
+    director_resolution_preset: state.directorResolution,
+    director_aspect_ratio: state.directorAspectRatio,
+    director_music_clip_seconds: state.directorMusicClipSeconds,
+    image_spatial_upsampling: state.directorImageSpatialUpsampling,
+    image_film_grain_intensity: state.directorImageFilmGrainIntensity,
+    image_film_grain_saturation: state.directorImageFilmGrainSaturation,
+    video_spatial_upsampling: state.directorVideoSpatialUpsampling,
+    video_film_grain_intensity: state.directorVideoFilmGrainIntensity,
+    video_film_grain_saturation: state.directorVideoFilmGrainSaturation,
+    video_self_refiner: state.directorVideoSelfRefiner,
+    audio_scale: state.directorAudioScale,
+    director_ui_snapshot: {
+      snapshot_version: 1,
+      directorSkill: state.directorSkill,
+      directorUseLyricsContext: pipelineType === 'music_video' && state.directorUseLyricsContext,
+      directorSceneDescription: state.directorSceneDescription,
+      directorAudioName: state.directorAudioFile?.name || null,
+      directorAnalysis: state.directorAnalysis,
+      directorEnergyBias: state.directorEnergyBias,
+      directorSpeakers: state.directorSpeakers,
+      directorSpeakerMappings: state.directorSpeakerMappings,
+      directorAutoMode: state.directorAutoMode,
+      directorSeamless: state.directorSeamless,
+      directorShotImageGuidance: state.directorShotImageGuidance,
+      directorResolution: state.directorResolution,
+      directorAspectRatio: state.directorAspectRatio,
+      directorCharacterRefLabels: state.directorCharacterRefLabels,
+      directorLocationRefLabels: state.directorLocationRefLabels,
+      directorH3ReferenceDetail: state.directorH3ReferenceDetail,
+      directorVoiceRefName: state.directorVoiceRef?.name || null,
+      directorIdentityGuidanceScale: state.directorIdentityGuidanceScale,
+      directorMusicSource: state.directorMusicSource,
+      directorMusicModel: state.directorMusicModel,
+      directorSongDescription: state.directorSongDescription,
+      directorSongInstrumental: state.directorSongInstrumental,
+      directorSongStyle: state.directorSongStyle,
+      directorSongLyrics: state.directorSongLyrics,
+      directorSongDuration: state.directorSongDuration,
+      directorMusicClipSeconds: state.directorMusicClipSeconds,
+      directorVideoInferenceStepsByModel: state.directorVideoInferenceStepsByModel,
+      directorVideoMaxShotFramesByModel: state.directorVideoMaxShotFramesByModel,
+      directorH3TurboModeByModel: state.directorH3TurboModeByModel,
+      directorH3TurboPresetByModel: state.directorH3TurboPresetByModel,
+      directorH3SolModeByModel: state.directorH3SolModeByModel,
+      directorH3SlaModeByModel: state.directorH3SlaModeByModel,
+      directorH3VedaModeByModel: state.directorH3VedaModeByModel,
+      directorH3FirstBlockCacheByModel: state.directorH3FirstBlockCacheByModel,
+      directorH3FirstBlockCacheMultiplierByModel: state.directorH3FirstBlockCacheMultiplierByModel,
+      directorH3FirstBlockCacheWarmupByModel: state.directorH3FirstBlockCacheWarmupByModel,
+      directorImageSpatialUpsampling: state.directorImageSpatialUpsampling,
+      directorImageFilmGrainIntensity: state.directorImageFilmGrainIntensity,
+      directorImageFilmGrainSaturation: state.directorImageFilmGrainSaturation,
+      directorVideoSpatialUpsampling: state.directorVideoSpatialUpsampling,
+      directorVideoFilmGrainIntensity: state.directorVideoFilmGrainIntensity,
+      directorVideoFilmGrainSaturation: state.directorVideoFilmGrainSaturation,
+      directorVideoSelfRefiner: state.directorVideoSelfRefiner,
+      directorAudioScale: state.directorAudioScale,
+      shortFilmCharacters: state.shortFilmCharacters,
+      shortFilmTargetDuration: state.shortFilmTargetDuration,
+      shortFilmNarrative: state.shortFilmNarrative,
+    },
   }
 }
 
@@ -4888,7 +5034,25 @@ export const useStore = create<AppState>((set, get) => ({
   },
   reattachDirectorPipeline: async (pid: string, focusDirector = false) => {
     const attachToken = ++_directorPipelineAttachToken
-    const status = await api.fetchPipelineStatus(pid)
+    let status: api.PipelineStatus
+    try {
+      status = await api.fetchPipelineStatus(pid)
+    } catch (error) {
+      // A clip in the Videos panel names the run that rendered it, and that run can be
+      // deleted afterwards. Say so where the user asked for it instead of leaving an
+      // unhandled rejection and a button that looks like it did nothing.
+      const detail = error instanceof Error ? error.message : String(error)
+      console.warn(`Could not open Director project ${pid}:`, error)
+      set({
+        directorError: `Could not open the Director project ${pid}: ${detail}`,
+        ...(focusDirector ? {
+          sidebarMode: 'director' as const,
+          sidebarOpen: true,
+          dashboardOpen: false,
+        } : {}),
+      })
+      return
+    }
     if (attachToken !== _directorPipelineAttachToken) return
 
     const active = DIRECTOR_PIPELINE_ACTIVE.has(status.status)
@@ -5310,6 +5474,132 @@ export const useStore = create<AppState>((set, get) => ({
       console.error('Failed to load Director pipeline:', e)
       set({ directorError: e instanceof Error ? e.message : 'Failed to open Director project' })
     }
+  },
+
+  // ── Director setup presets ──────────────────────────────────────────────
+  //
+  // A failed plan used to cost the whole upload session: the cast images, the
+  // soundtrack and its transcript had to be entered again before the brief could be
+  // edited. A preset freezes that setup, so planning again is one click.
+
+  directorPresets: [],
+  directorPresetsLoading: false,
+  loadDirectorPresets: async () => {
+    set({ directorPresetsLoading: true })
+    try {
+      const { presets } = await api.fetchDirectorPresets(get().activeWorkspace || undefined)
+      set({ directorPresets: presets, directorPresetsLoading: false })
+    } catch (e) {
+      console.error('Failed to load Director presets:', e)
+      set({ directorPresets: [], directorPresetsLoading: false })
+    }
+  },
+
+  saveDirectorPreset: async (name) => {
+    // Frozen from what the composer holds right now, so editing the brief and saving
+    // again works without running the project first. The run id is only a provenance
+    // label: the params below are what actually gets stored.
+    const snapshot = _directorSetupParams(get())
+    const sourcePipelineId = get().pipelineId || get().directorSourcePipelineId || ''
+    const card = await api.saveDirectorPreset({
+      ...(sourcePipelineId ? { pipeline_id: sourcePipelineId } : {}),
+      params: snapshot,
+      name,
+      workspace: get().activeWorkspace || undefined,
+    })
+    await get().loadDirectorPresets()
+    void card
+  },
+
+  loadDirectorFromPreset: async (presetId) => {
+    _directorPipelineAttachToken += 1
+    _directorPipelinePollToken += 1
+    try {
+      const preset = await api.fetchDirectorPreset(
+        presetId, get().activeWorkspace || undefined,
+      )
+      const params = _record(preset.params)
+      // The restore path reads a saved pipeline, so a preset is handed to it in that
+      // shape. There is no run behind it: no clips, no prompts, no timeline.
+      const restore = await _buildDirectorRestorePatch({
+        pipeline_id: '',
+        project_id: '',
+        status: 'preset',
+        phase: '',
+        error: null,
+        created_at: preset.created_at,
+        completed_at: null,
+        total_time_sec: null,
+        auto_mode: true,
+        seamless: false,
+        clips: [],
+        output_files: [],
+        llm_log: null,
+        _params_snapshot: preset.params,
+        asset_manifest: preset.asset_manifest,
+        scene_description: String(params.scene_description || ''),
+        reference_image_path: String(params.reference_image_path || ''),
+        character_ref_paths: _stringArray(params.character_ref_paths),
+        location_ref_paths: _stringArray(params.location_ref_paths),
+        image_model: String(params.image_model || ''),
+        video_model: String(params.video_model || ''),
+        pipeline_type: String(params.pipeline_type || ''),
+        workspace: String(params.workspace || get().activeWorkspace || ''),
+      } as unknown as SavedPipelineState)
+      const imageParams = _record(params.image_params)
+      const videoParams = _record(params.video_params)
+      const imageLoras = _record(params.image_loras)
+      const videoLoras = _record(params.video_loras)
+      const imageModel = String(params.image_model || '')
+      const videoModel = String(params.video_model || '')
+      set(s => ({
+        ...restore,
+        // A preset carries a setup, never a plan: land on the step where the brief is
+        // written and the references are chosen, with the audio already analysed.
+        directorStep: 'style',
+        // The restore patch returns the object it read as the Dashboard's selection.
+        // A preset is not a saved pipeline, and the Dashboard would query it by an
+        // empty id.
+        dashboardSelectedPipeline: null,
+        directorSourcePipelineId: null,
+        directorProjectId: null,
+        dashboardOpen: false,
+        sidebarMode: 'director',
+        sidebarOpen: true,
+        pipelineId: null,
+        pipelineStatus: null,
+        pipelinePolling: false,
+        directorQueueEditingEntryId: null,
+        directorError: null,
+        selectedModelPerMode: {
+          ...s.selectedModelPerMode,
+          ...(imageModel ? { image: imageModel } : {}),
+          ...(videoModel ? { video: videoModel } : {}),
+        },
+        savedParamsPerMode: {
+          ...s.savedParamsPerMode,
+          ...(imageModel ? { image: { ...imageParams, model_type: imageModel } } : {}),
+          ...(videoModel ? { video: { ...videoParams, model_type: videoModel } } : {}),
+        },
+        savedLoraPerMode: {
+          ...s.savedLoraPerMode,
+          ...(imageModel ? { image: _directorLoraState(imageLoras) } : {}),
+          ...(videoModel ? { video: _directorLoraState(videoLoras) } : {}),
+        },
+      }))
+      if (videoModel) {
+        await get().loadModelOptions(videoModel)
+        void get().loadLoras(videoModel)
+      }
+    } catch (e) {
+      console.error('Failed to load Director preset:', e)
+      set({ directorError: e instanceof Error ? e.message : 'Failed to load the setup' })
+    }
+  },
+
+  deleteDirectorPreset: async (presetId) => {
+    await api.deleteDirectorPreset(presetId, get().activeWorkspace || undefined)
+    await get().loadDirectorPresets()
   },
 
   loraBrowserOpen: false,
@@ -8844,6 +9134,24 @@ export const useStore = create<AppState>((set, get) => ({
 
     const clientSubmissionId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
     delete params._viggle_prepare_only
+    // A voice slot with no reference is not a request the speech models accept:
+    // KugelAudio answers "Multi-voice cloning requires at least two reference
+    // audio files" and Qwen3 Base "requires Speaker 1 reference audio", both
+    // after queueing and both as a skipped task. Say it here instead.
+    if (state.generationMode === 'audio' && state.audioSubMode === 'speech') {
+      const missing = ttsMissingVoiceReferences(
+        state.ttsVoices, state.ttsVoiceCount, state.modelOptions,
+      )
+      if (missing.length > 0) {
+        set({
+          promptEnhanceError:
+            `Voice slot ${missing.join(', ')} has no reference audio. Pick a saved `
+            + 'character or upload 2-30 s of clear speech for every voice slot, '
+            + 'or set the voice count to one.',
+        })
+        return
+      }
+    }
     if (state.params.model_type === 'viggle_animate') {
       const editedFrame = state.params._viggle_edited_frame
       const hasCharacter = !!state.params.viggle_character?.reference_path
@@ -10287,7 +10595,7 @@ export const useStore = create<AppState>((set, get) => ({
     }
   }),
   clearH3WindowPlan: () => set({ h3WindowPlan: null }),
-  enhancePrompt: async (ttsMode?: string, requestedStyle: 'faithful' | 'creative' | 'adaptive' = 'adaptive', retryFlaggedWindows = false) => {
+  enhancePrompt: async (ttsMode?: string, requestedStyle: 'faithful' | 'creative' | 'adaptive' = 'adaptive', retryFlaggedWindows = false, speechTargetMinutes?: number) => {
     let state = get()
     const primaryStudioCreate = (
       state.generationMode === 'video'
@@ -10714,7 +11022,7 @@ export const useStore = create<AppState>((set, get) => ({
         tts_enhance_mode: ttsMode || undefined,
         ...(generationMode === 'audio' && state.audioSubMode === 'speech' ? {
           tts_writer_instructions: params._speech_writer_instructions || '',
-          tts_target_minutes: params._speech_writer_target_minutes || 0,
+          tts_target_minutes: speechTargetMinutes ?? params._speech_writer_target_minutes ?? 0,
         } : {}),
         tts_voice_count: ttsSpeakingVoiceCount(state.ttsVoiceCount, state.modelOptions, String(params.audio_prompt_type || '')) || undefined,
         reference_context: referenceContext,
@@ -10961,7 +11269,18 @@ export const useStore = create<AppState>((set, get) => ({
   }),
   // Ours, one line each: the state and the patches live in stores/directorScriptSlice.ts.
   setDirectorScriptSource: (source) => set(state => directorScriptSourcePatch(state, source)),
-  setDirectorScriptText: (text) => set(directorScriptTextPatch(text)),
+  setDirectorScriptText: (text) => set(state => directorScriptTextPatch(state, text)),
+  // A TTS episode already speaks the authored rows, so the render no longer
+  // invents the voices: it lip-syncs and muxes this track. The rows are re-timed
+  // onto its measured length before they become the project timeline.
+  setDirectorScriptAudio: async (path) => {
+    if (!path) {
+      set(state => directorScriptAudioPatch(state, null, null))
+      return
+    }
+    const { duration_seconds } = await api.audioDuration({ path })
+    set(state => directorScriptAudioPatch(state, path, duration_seconds))
+  },
   setDirectorSkill: (skill) => {
     const previous = get()
     const newProject = previous.directorSkill === null
@@ -11639,6 +11958,16 @@ export const useStore = create<AppState>((set, get) => ({
 
   directorPlanPrompts: async () => {
     const { directorSceneDescription, directorAnalysis } = get()
+    // A scene-only script has no words for H3 to speak. Planning it produced a
+    // dialogue-free plan that the voice references turned into gibberish.
+    if (directorScriptMissingSpokenRows(get())) {
+      set({
+        directorLoading: false,
+        directorError: DIRECTOR_SCRIPT_MISSING_SPOKEN_ROWS_ERROR,
+        directorStep: 'style',
+      })
+      return
+    }
     // Ours: a written script replaces the analysed timeline. See stores/directorScriptSlice.ts.
     const directorPlannedClips = directorScriptTimeline(get(), get().directorPlannedClips)
     if (!directorPlannedClips.length || !directorSceneDescription.trim()) return
@@ -14733,6 +15062,16 @@ export const useStore = create<AppState>((set, get) => ({
   // ── Director Pipeline (server-side) ──────────────────────────────
   startDirectorPipeline: async (mode = 'now') => {
     const state = get()
+    // Refuse before creating a pipeline revision: a script with no NAME: rows
+    // cannot give H3 any words, and rendering it produced babble.
+    if (directorScriptMissingSpokenRows(state)) {
+      set({
+        directorLoading: false,
+        directorQueueLoading: false,
+        directorError: DIRECTOR_SCRIPT_MISSING_SPOKEN_ROWS_ERROR,
+      })
+      return
+    }
     if (mode === 'queue') {
       set({ directorQueueLoading: true, directorError: null })
     } else {

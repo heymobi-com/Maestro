@@ -4,7 +4,8 @@ import { DirectorGpuClipLimit } from './DirectorGpuClipLimit'
 import { useState, useCallback, useRef, useMemo, useEffect } from 'react'
 import { Upload, Loader2, Music, RotateCcw, Check, X, ChevronRight, ChevronDown, ImageIcon, Play, Film, Mic, Sparkles, Send, Users, FileText, ListVideo } from 'lucide-react'
 import { DEFAULT_DIRECTOR_VIDEO_MODEL, useStore, directorModelUsesFixedMediaStrength, getFamiliesForMode, getModelsForFamily, resolveResolution } from '../../stores/useStore'
-import { fetchModelOptions, getFileUrl } from '../../api/client'
+import { fetchCharacters, fetchModelOptions, getFileUrl, ttsEpisode } from '../../api/client'
+import { characterDisplayName } from '../../lib/characters'
 import { DirectorLoraSelector } from '../SettingsDrawer/DirectorLoraSelector'
 import { DirectorSongSetup } from './DirectorSongSetup'
 import { DirectorH3Optimizations } from './DirectorH3Optimizations'
@@ -13,6 +14,7 @@ import { OmniReferenceSection } from './OmniReferenceSection'
 import { GalleryInput } from '../shared/GalleryInput'
 import { InfoTooltip } from './InfoTooltip'
 import { ProjectBriefTemplate } from './ProjectBriefTemplate'
+import { DirectorPresetBar } from './DirectorPresetBar'
 import { ClipContinuityToggle } from './ClipContinuityToggle'
 import { formatSeconds, recommendedWindowProfile } from './DurationSlider'
 import { DurationPresetControl } from './DurationPresetControl'
@@ -26,7 +28,7 @@ import {
   modelOptionsForSelectedModel,
   supportsH3VaeUpsampling,
 } from '../../lib/h3VaeUpsampling'
-import type { DirectorPipelineType, DirectorShotImageGuidance, DirectorSkill, ModelOptions, ShortFilmCharacter, ShortFilmPath } from '../../types'
+import type { DirectorPipelineType, DirectorShotImageGuidance, DirectorSkill, ModelOptions, SavedOmniCharacter, ShortFilmCharacter, ShortFilmPath } from '../../types'
 
 // AUDIO_ACCEPT lists both audio formats AND video formats. When a video
 // file is uploaded, the backend's /api/v1/upload-audio endpoint extracts
@@ -480,6 +482,15 @@ export function DirectorChat() {
   // mode) or already generating from a previous click (manual mode).
   const isGenerating = useStore(s => s.isGenerating)
   const error = useStore(s => s.directorError)
+  // The pipeline that produced this error, so a failed plan can be reopened with its
+  // brief, references and audio intact instead of retyping the project.
+  const failedPipelineId = useStore(s =>
+    s.pipelineId && s.pipelineStatus && (
+      s.pipelineStatus.status === 'failed' || s.pipelineStatus.status === 'cancelled'
+    ) ? s.pipelineId : null,
+  )
+  const openFailedPipeline = useStore(s => s.loadDirectorFromPipeline)
+  const reopeningFailedPipeline = useStore(s => s.dashboardLoading)
   const analysis = useStore(s => s.directorAnalysis)
   const plannedClips = useStore(s => s.directorPlannedClips)
   const energyBias = useStore(s => s.directorEnergyBias)
@@ -551,6 +562,28 @@ export function DirectorChat() {
   const scriptText = useStore(s => s.directorScriptText)
   const setScriptSource = useStore(s => s.setDirectorScriptSource)
   const setScriptText = useStore(s => s.setDirectorScriptText)
+  const scriptAudioPath = useStore(s => s.directorScriptAudioPath)
+  const scriptAudioDuration = useStore(s => s.directorScriptAudioDuration)
+  const setScriptAudio = useStore(s => s.setDirectorScriptAudio)
+  const outputs = useStore(s => s.outputs)
+  const activeWorkspace = useStore(s => s.activeWorkspace)
+  const [scriptAudioError, setScriptAudioError] = useState<string | null>(null)
+  const [voiceBusy, setVoiceBusy] = useState(false)
+  const [voiceInfo, setVoiceInfo] = useState<string | null>(null)
+  const [characters, setCharacters] = useState<SavedOmniCharacter[]>([])
+  const [voiceBySpeaker, setVoiceBySpeaker] = useState<Record<string, string>>({})
+  const spokenTracks = useMemo(
+    () => outputs.filter(output => output.type === 'audio' && output.path),
+    [outputs],
+  )
+  const attachScriptAudio = useCallback(async (path: string) => {
+    setScriptAudioError(null)
+    try {
+      await setScriptAudio(path || null)
+    } catch (e: unknown) {
+      setScriptAudioError(e instanceof Error ? e.message : 'Could not read that audio')
+    }
+  }, [setScriptAudio])
   // Only the two skills whose planners read a written transcript offer the script source.
   const scriptCapable = skill === 'podcast' || skill === 'viral_video'
   // A script supplies the words, not the faces: the references below still anchor every shot.
@@ -561,6 +594,73 @@ export function DirectorChat() {
     if (!spoken) return 'No speaker rows yet. Write NAME: line so the model has words to say.'
     return `${spoken} spoken turn${spoken === 1 ? '' : 's'}, ${parsed.wordCount} words, about ${Math.round(parsed.duration)}s of speech`
   }, [scriptText])
+  // Every spoken speaker needs a voice reference: an engine told "Speaker 2" with
+  // no second reference is what made a two-line test stop after its first line.
+  const scriptSpeakers = useMemo(
+    () => Array.from(new Set(parseDirectorScript(scriptText).transcript.map(row => row.speaker))),
+    [scriptText],
+  )
+  useEffect(() => {
+    if (!scriptMode) return
+    let cancelled = false
+    fetchCharacters()
+      .then(list => {
+        if (!cancelled) setCharacters(list.filter(character => character.voice?.path))
+      })
+      .catch(() => { /* attaching a Studio episode still works without this list */ })
+    return () => { cancelled = true }
+  }, [scriptMode])
+  useEffect(() => {
+    if (!scriptMode || scriptSpeakers.length === 0 || characters.length === 0) return
+    setVoiceBySpeaker(current => {
+      const next = { ...current }
+      let changed = false
+      scriptSpeakers.forEach((speaker, index) => {
+        if (next[speaker]) return
+        // One saved character per speaker where the library allows it; a shorter
+        // library shares its last voice instead of leaving a speaker voiceless.
+        const pick = characters[Math.min(index, characters.length - 1)].voice?.path
+        if (pick) {
+          next[speaker] = pick
+          changed = true
+        }
+      })
+      return changed ? next : current
+    })
+  }, [characters, scriptMode, scriptSpeakers])
+  // Speak the authored rows here instead of sending the user to Studio: one
+  // generation with an installed speech engine, then the render lip-syncs to it.
+  const generateVoices = useCallback(async () => {
+    setScriptAudioError(null)
+    setVoiceInfo(null)
+    const rows = parseDirectorScript(scriptText).transcript
+      .map(row => ({ speaker: row.speaker, text: row.text }))
+    if (rows.length === 0) {
+      setScriptAudioError('Write at least one NAME: line before generating voices.')
+      return
+    }
+    const voices = scriptSpeakers
+      .filter(speaker => voiceBySpeaker[speaker])
+      .map(speaker => ({ speaker, path: voiceBySpeaker[speaker] }))
+    if (voices.length === 0) {
+      setScriptAudioError('Pick a saved character voice for at least one speaker.')
+      return
+    }
+    setVoiceBusy(true)
+    try {
+      const episode = await ttsEpisode({ lines: rows, voices, workspace: activeWorkspace })
+      await setScriptAudio(episode.path)
+      await useStore.getState().refreshOutputs()
+      setVoiceInfo(
+        `Spoken by ${episode.model_type} — ${Math.round(episode.duration_seconds)}s, `
+        + `${episode.voice_count} voice${episode.voice_count === 1 ? '' : 's'}.`,
+      )
+    } catch (e: unknown) {
+      setScriptAudioError(e instanceof Error ? e.message : 'Could not speak this script')
+    } finally {
+      setVoiceBusy(false)
+    }
+  }, [activeWorkspace, scriptSpeakers, scriptText, setScriptAudio, voiceBySpeaker])
   const musicSource = useStore(s => s.directorMusicSource)
   const setMusicSource = useStore(s => s.setDirectorMusicSource)
   const songDescription = useStore(s => s.directorSongDescription)
@@ -815,6 +915,9 @@ export function DirectorChat() {
     <div data-testid="director-chat" className="director-chat flex-1 flex flex-col min-h-0 min-w-0 [overflow-wrap:anywhere]">
       {/* Message list */}
       <div ref={messagesRef} onScroll={handleMessagesScroll} data-testid="director-messages" className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-4 space-y-3">
+        {/* Reusable setups: freeze this project's brief, references, audio and
+            settings so a failed attempt does not require re-entering them. */}
+        <DirectorPresetBar />
         {/* Header with Start Over */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-1.5">
@@ -963,7 +1066,8 @@ export function DirectorChat() {
         {scriptCapable && scriptSource === 'script' && (
           <SystemBubble>
             <p className="text-xs text-text-secondary mb-2">
-              Write the script. One row per turn: <span className="font-mono">NAME: line</span>, and{' '}
+              Write the script. One row per turn: <span className="font-mono">NAME: line</span> (or{' '}
+              <span className="font-mono">S1: line</span>), and{' '}
               <span className="font-mono">&lt;d&gt;[Spanish] ...&lt;/d&gt;</span> to fix the spoken language.
             </p>
             <textarea
@@ -975,6 +1079,72 @@ export function DirectorChat() {
               className="w-full rounded-lg border border-border bg-bg-tertiary/50 p-2 text-xs text-text-primary font-mono resize-y focus:border-accent-blue focus:outline-none"
             />
             <p className="text-[10px] text-text-muted mt-1">{scriptSummary}</p>
+            {/* A track that already speaks these rows replaces the model's own
+                voice synthesis: H3 only lip-syncs to it and muxes it. */}
+            <div className="mt-3 space-y-1.5">
+              <p className="text-[10px] text-text-muted">
+                Say it here with the speech models you already have, or attach an episode
+                spoken in Studio → Audio → Speech. Either way the render follows that audio
+                instead of inventing the voices.
+              </p>
+              <button
+                type="button"
+                onClick={() => { void generateVoices() }}
+                disabled={voiceBusy}
+                className="flex w-full items-center justify-center gap-2 rounded-lg border border-border bg-bg-tertiary px-2 py-1.5 text-[11px] font-medium text-text-primary disabled:opacity-50"
+              >
+                {voiceBusy ? <Loader2 size={12} className="animate-spin" /> : <Mic size={12} />}
+                {voiceBusy ? 'Speaking the script…' : 'Generate voices'}
+              </button>
+              {scriptSpeakers.length > 0 && (
+                <div className="space-y-1">
+                  {scriptSpeakers.map(speaker => (
+                    <label key={speaker} className="flex items-center gap-2">
+                      <span className="w-16 shrink-0 truncate text-[10px] text-text-muted" title={speaker}>
+                        {speaker}
+                      </span>
+                      <select
+                        value={voiceBySpeaker[speaker] || ''}
+                        onChange={event => setVoiceBySpeaker(current => ({
+                          ...current, [speaker]: event.target.value,
+                        }))}
+                        className="min-w-0 flex-1 rounded-md border border-border bg-bg-tertiary/50 px-1.5 py-1 text-[10px] text-text-primary focus:border-accent-blue focus:outline-none"
+                      >
+                        <option value="">No saved voice</option>
+                        {characters.map(character => (
+                          <option key={character.id} value={character.voice?.path || ''}>
+                            {characterDisplayName(character.name)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ))}
+                </div>
+              )}
+              {voiceInfo ? <p className="text-[10px] text-accent-blue">{voiceInfo}</p> : null}
+              <select
+                value={scriptAudioPath || ''}
+                onChange={event => { void attachScriptAudio(event.target.value) }}
+                className="w-full rounded-lg border border-border bg-bg-tertiary/50 px-2 py-1.5 text-[11px] text-text-primary focus:border-accent-blue focus:outline-none"
+              >
+                <option value="">No audio — the video model speaks the lines</option>
+                {scriptAudioPath && !spokenTracks.some(track => track.path === scriptAudioPath) && (
+                  <option value={scriptAudioPath}>{scriptAudioPath.split(/[\\/]/).pop()}</option>
+                )}
+                {spokenTracks.map(track => (
+                  <option key={track.path || track.name} value={track.path}>
+                    {track.name}
+                  </option>
+                ))}
+              </select>
+              {scriptAudioPath && scriptAudioDuration ? (
+                <p className="text-[10px] text-accent-blue">
+                  {Math.round(scriptAudioDuration)}s of audio — the written rows are re-timed onto it
+                  so every shot slices inside the track.
+                </p>
+              ) : null}
+              {scriptAudioError ? <p className="text-[10px] text-red-400">{scriptAudioError}</p> : null}
+            </div>
           </SystemBubble>
         )}
         {skill && (!isShortFilm || shortFilmPath === 'audio') && scriptSource !== 'script' && (atStep('upload') || atStep('analyze') || pastStep('analyze')) && (
@@ -1113,7 +1283,23 @@ export function DirectorChat() {
         {/* Error */}
         {error && (
           <div className="text-[11px] text-red-400 bg-red-500/10 rounded px-2 py-1.5 border border-red-500/20">
-            {error}
+            <p>{error}</p>
+            {failedPipelineId && (
+              <div className="mt-1.5 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => { void openFailedPipeline(failedPipelineId) }}
+                  disabled={reopeningFailedPipeline}
+                  className="px-2 py-1 text-[10px] bg-accent-blue/10 border border-accent-blue/30 rounded text-accent-blue hover:bg-accent-blue/20 disabled:opacity-40 transition-colors"
+                  title="Reload this project's brief, references, audio and settings into the editor with the plan cleared, so you can fix the text and plan again"
+                >
+                  {reopeningFailedPipeline ? 'Opening…' : 'Fix and plan again'}
+                </button>
+                <span className="text-[10px] text-text-muted">
+                  Keeps your brief, references and audio. Only the plan is cleared.
+                </span>
+              </div>
+            )}
           </div>
         )}
 
@@ -3205,6 +3391,14 @@ function StyleForm({
             ? 'Type your story description in the input below and press send.'
             : 'Type your scene description in the input below and press send.'}
       </p>
+
+      {!isStoryPath && !isShortFilm && (
+        <p className="text-[10px] text-text-muted">
+          Keep this to the set, look and cast. It is repeated inside every shot, so a
+          shot-by-shot plan (B-roll, cuts, blackouts) makes the video model perform all of it
+          in each clip. Put the dialogue in the script instead.
+        </p>
+      )}
     </div>
   )
 }

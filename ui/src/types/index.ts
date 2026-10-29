@@ -190,6 +190,16 @@ export interface GenerateParams {
   /** Speech writing preferences; never part of the spoken text. */
   _speech_writer_instructions?: string
   _speech_writer_target_minutes?: number
+    /**
+     * The documents a grounded script was written from. Reviewed before the audio is
+     * rendered and carried into the podcast master, which cites them by name.
+     */
+    _speech_citations?: Array<{
+      source_id?: string
+      source_name: string
+      passages?: number
+      headings?: string[]
+    }>
   pause_seconds?: number
   temperature?: number
   top_k?: number
