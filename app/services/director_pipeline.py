@@ -2815,7 +2815,11 @@ def _h3_references_for_shot(references: list[dict], clip_plan: dict) -> list[dic
     if not references or not isinstance(clip_plan, dict):
         return references
     on_screen, speaking = _h3_shot_labels(clip_plan)
-    shot_words = set(re.findall(r"[a-záéíóúüñ0-9'-]+", _h3_shot_text(clip_plan)))
+    # Match against what this shot says it stages, never against the whole prompt:
+    # the prompt embeds the project's cast and world, so every name in the project
+    # matched every shot and nothing was ever filtered.
+    cast_text = _h3_cast_text(clip_plan)
+    shot_words = set(re.findall(r"[a-záéíóúüñ0-9'-]+", cast_text))
     if not on_screen and not speaking and not shot_words:
         return references
     visible = on_screen | speaking
@@ -2890,47 +2894,112 @@ def _h3_shot_text(clip_plan: dict) -> str:
     ).casefold()
 
 
+# The place one reference names, in the language the reference was written in.
+# A project's references are usually named in the user's language while the clip's
+# own environment is written in English by the planner, so "Pueblo" has to be able
+# to match "village" or nothing ever matches and every set is bound to every shot.
+_PLACE_SYNONYMS = {
+    "pueblo": ("village", "town", "hamlet"),
+    "aldea": ("village", "hamlet"),
+    "calle": ("street", "road", "cobbled"),
+    "plaza": ("square", "plaza"),
+    "iglesia": ("church", "chapel", "altar", "pews"),
+    "capilla": ("chapel", "church"),
+    "altar": ("altar",),
+    "bosque": ("forest", "woods", "trees", "trunks", "clearing"),
+    "campo": ("field", "meadow", "clearing"),
+    "rio": ("river", "stream", "bank", "shore"),
+    "playa": ("beach", "shore"),
+    "mesa": ("table", "desk"),
+    "cocina": ("kitchen",),
+    "pasillo": ("corridor", "hallway", "hall"),
+    "puerta": ("door", "doorway", "threshold", "gate"),
+    "torre": ("tower", "belfry"),
+    "pantano": ("swamp", "marsh"),
+    "fiesta": ("festival", "celebration", "lanterns", "party"),
+    "noche": ("night", "moonlight"),
+    "casa": ("house", "home", "room"),
+}
+
+
+def _h3_place_keys(text: str) -> set[str]:
+    """Canonical English place keys named by ``text`` (roles or clip prose)."""
+
+    words = set(re.findall(r"[a-záéíóúüñ0-9'-]+", str(text or "").casefold()))
+    keys: set[str] = set()
+    for word in words:
+        keys.update(_PLACE_SYNONYMS.get(word, ()))
+        if word in _place_canonical():
+            keys.add(word)
+    return keys
+
+
+def _place_canonical() -> frozenset[str]:
+    """Every canonical place word, so "village" and "pueblo" land on one key."""
+
+    global _PLACE_CANONICAL_CACHE
+    if not _PLACE_CANONICAL_CACHE:
+        _PLACE_CANONICAL_CACHE = frozenset(
+            [word for values in _PLACE_SYNONYMS.values() for word in values]
+            + list(_STAGE_PLACE_WORDS)
+        )
+    return _PLACE_CANONICAL_CACHE
+
+
+_PLACE_CANONICAL_CACHE: frozenset[str] = frozenset()
+
+
+def _h3_cast_text(clip_plan: dict) -> str:
+    """Only what this shot says it stages: its cast rows and its own environment."""
+
+    parts = [str(clip_plan.get("_director_environment") or "")]
+    for subject in clip_plan.get("_director_subjects_on_screen") or []:
+        if isinstance(subject, dict):
+            parts.append(str(subject.get("visual_description") or ""))
+            parts.append(str(subject.get("character_id") or ""))
+            parts.append(str(subject.get("speaker_name") or ""))
+        elif subject:
+            parts.append(str(subject))
+    return " ".join(parts).casefold()
+
+
 def _h3_locations_for_shot(locations: list[dict], clip_plan: dict) -> list[dict]:
-    """The location reference a shot can actually be in.
+    """Choose the one location this shot happens in, by name, in either language.
 
-    A clip is one continuous shot, so it happens in ONE place, but every supplied
-    location image used to travel into every clip: a 26-clip drama gave its kitchen
-    shot five environments at once -- church, corridor, street, kitchen, forest edge --
-    and the render settled on the village street for all of them, which is what "it
-    never leaves the same static scene" looks like from the director's side.
+    A clip is one shot in one place, so binding a project's whole set collection to
+    every shot told H3 that the village, the festival street, the forest and the
+    church were all in frame at once. Measured on a real 26-clip drama whose manifest
+    named its locations in Spanish while the planner wrote the sets in English: the
+    name comparison never matched, so every clip received all five scene references.
 
-    A location is chosen by name when the reference declares one, and a project whose
-    locations are all named therefore gets the exact set per shot. A single unnamed
-    location is unambiguous and is kept. Several unnamed ones cannot be told apart, so
-    none is bound and the shot's own environment prose describes the place: a shot in
-    the wrong set is not better than a shot the prompt describes.
+    Now the reference's place (translated through a small synonym map) has to match
+    the place the clip's own environment names, and only the best match is bound. A
+    shot whose set matches nothing gets no location picture: its own environment
+    prose still describes the place, and a wrong set is worse than none.
     """
 
     if not locations:
         return []
     if len(locations) == 1:
         return locations
-    shot_text = _h3_shot_text(clip_plan)
-    if not shot_text.strip():
-        return locations
-    shot_words = set(re.findall(r"[a-záéíóúüñ0-9'-]+", shot_text))
-    matched = [
-        reference for reference in locations
-        if _h3_location_words(reference) & shot_words
-    ]
-    if matched:
-        return matched
-    if all(not _h3_location_words(reference) for reference in locations):
-        digest = str(len(locations))
-        if digest not in _UNNAMED_LOCATIONS_REPORTED:
-            _UNNAMED_LOCATIONS_REPORTED.add(digest)
-            print(
-                f"[MiniMax H3] {len(locations)} location references are supplied with no "
-                "name, and a shot happens in one place. None is bound to a shot: each "
-                "clip's own environment describes its set. Name each location "
-                "reference to select it per shot."
-            )
-    return []
+    shot_keys = _h3_place_keys(_h3_cast_text(clip_plan))
+    if not shot_keys:
+        return []
+    scored: list[tuple[int, dict]] = []
+    for reference in locations:
+        keys = _h3_place_keys(
+            str(reference.get("role") or reference.get("name") or "")
+        )
+        score = len(keys & shot_keys)
+        if score:
+            scored.append((score, reference))
+    if not scored:
+        return []
+    best = max(score for score, _ in scored)
+    chosen = [reference for score, reference in scored if score == best]
+    # Two references that name the very same place (a wide and a detail of one set)
+    # are still one place; anything beyond that is a different set.
+    return chosen[:1]
 
 
 _UNNAMED_LOCATIONS_REPORTED: set[str] = set()

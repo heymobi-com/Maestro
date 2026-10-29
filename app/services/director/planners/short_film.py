@@ -296,6 +296,60 @@ def _bounded_long_form_durations(
     return [base + (1 if index < remainder else 0) for index in range(count)]
 
 
+_STAGE_HEADING_RE = re.compile(
+    r"stage\s+(\d+)\s*(?:[\(\[]\s*([^)\]\n:]{0,60})[)\]]\s*)?:?\s*",
+    re.IGNORECASE,
+)
+
+
+def _brief_stage_list(brief: str) -> list[dict]:
+    """Split a brief's DESCRIPTION into its ordered stages.
+
+    A 26-clip drama whose brief was written in seven stages still put stage 7 (the
+    closing chapel) in clip 11 and the bell in the forest in clip 6, whose lines were
+    about street lamps: the planner was free to choose a stage per shot, so it chose
+    badly and out of order. Reading the stages here and assigning each clip the stage
+    its position in the narration has reached makes the progression the code's
+    decision instead of the model's.
+    """
+
+    text = str(brief or "")
+    matches = list(_STAGE_HEADING_RE.finditer(text))
+    # A brief also *mentions* stages in its cast rules ("he appears only inside the
+    # opened shroud in Stage 5"), so the sequence is taken from Stage 1 forward and
+    # only while the numbers keep counting.
+    first = next(
+        (position for position, match in enumerate(matches) if int(match.group(1)) == 1),
+        0,
+    )
+    ordered: list[re.Match] = []
+    expected = 1
+    for match in matches[first:]:
+        if int(match.group(1)) != expected:
+            continue
+        ordered.append(match)
+        expected += 1
+    stages: list[dict] = []
+    for position, match in enumerate(ordered):
+        end = ordered[position + 1].start() if position + 1 < len(ordered) else len(text)
+        body = " ".join(text[match.end():end].split())
+        stages.append({
+            "number": int(match.group(1)),
+            "label": (match.group(2) or "").strip(),
+            "text": body[:400],
+        })
+    return stages
+
+
+def _stage_for_clip(stages: list[dict], index: int, total: int) -> Optional[dict]:
+    """The stage this clip belongs to, by its position in the narration."""
+
+    if not stages or total <= 0:
+        return None
+    position = min(len(stages) - 1, int(index * len(stages) / total))
+    return stages[max(0, position)]
+
+
 def _audio_shot_row_issue(
     index: int,
     row: dict,
@@ -6930,9 +6984,14 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
         nsfw: bool = False,
         polish_block: str = "",
         _bounded_batch: bool = False,
+        _clip_offset: int = 0,
+        _total_clips: Optional[int] = None,
     ) -> list[ShotPlan]:
         """Plan shots from existing audio-segmented clips."""
         from ..nsfw_guidance import inject_nsfw_if_enabled
+
+        stages = _brief_stage_list(story_description)
+        total_clips = int(_total_clips or len(clips) or 0)
 
         batch_size = self.long_form_batch_size()
         if len(clips) > batch_size and not _bounded_batch:
@@ -6986,6 +7045,10 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
                     nsfw=nsfw,
                     polish_block=polish_block,
                     _bounded_batch=True,
+                    # The stage a clip belongs to is its position in the whole film,
+                    # not in this batch: a batch of 12 must not be given all seven.
+                    _clip_offset=start,
+                    _total_clips=len(clips),
                 )
                 return [shot.to_dict() for shot in batch_shots]
 
@@ -7100,7 +7163,18 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
             if dialogue_lines:
                 dialogue_text = f" Dialogue: {' / '.join(dialogue_lines[:4])}"
 
-            ctx = f"Shot {i + 1}: {label}, {duration:.1f}s.{char_info}{dialogue_text}"
+            stage = _stage_for_clip(stages, _clip_offset + i, total_clips)
+            stage_text = ""
+            if stage:
+                stage_text = (
+                    f" This shot belongs to STAGE {stage['number']} of "
+                    f"{len(stages)}"
+                    + (f" ({stage['label']})" if stage["label"] else "")
+                    + f": {stage['text'][:220]} Stay inside this stage: show nothing "
+                    "from a later one and nothing from an earlier one that has passed."
+                )
+
+            ctx = f"Shot {i + 1}: {label}, {duration:.1f}s.{stage_text}{char_info}{dialogue_text}"
             clip_contexts.append(ctx)
 
         # Build full transcript for context

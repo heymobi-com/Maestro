@@ -67,6 +67,17 @@ about holding one studio; a short film that holds one church for ten clips is.
 
 ## The cast is per shot, not per project
 
+### The stage is decided by position, not by the model
+
+A brief written as seven stages still put stage 7 (the closing chapel) in clip 11 of 26
+and the bell in the forest in clip 6, whose lines were about street lamps: the planner
+was free to choose a stage per shot, so it chose badly and out of order. The pipeline now
+reads the brief's stages (`_brief_stage_list`) and hands each clip the stage its position
+in the narration has reached, with the instruction to show nothing from a later stage and
+nothing from an earlier one that has passed. A stage number mentioned in the cast rules
+("he appears only inside the opened shroud in Stage 5") is ignored, and a batch keeps its
+global position so a batch of twelve is not given all seven stages.
+
 Two rules keep a character out of a shot it does not belong to.
 
 **In the prompt.** The audio-film planner carries a `NARRATION AUTHORITY` block and a
