@@ -221,6 +221,9 @@ Create {count} short, punchy shots. Hook first! Go:"""
                 progress_label="viral",
                 call_batch=call_batch,
                 fallback_factory=fallback_shot,
+                # Same rule as the podcast planner: a failed batch stops the pass
+                # instead of leaving placeholder shots in the finished video.
+                require_planned_rows=True,
             )
         else:
             shot_dicts = plan_scenes(target_scenes, target_duration)

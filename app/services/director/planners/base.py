@@ -32,6 +32,44 @@ from ..schema import ProductionPlan, ShotPlan
 from ..staged_progression import with_shot_progression
 from services.text_integrity import repair_payload, repair_text
 
+# A planning batch is one HTTP request to the writer. Measured on a real run, one
+# batch failed in 3.1 s with "WinError 10048: Only one usage of each socket
+# address" -- an ephemeral-port collision, not a planning problem -- and the six
+# clips it owed were filled with placeholder shots and rendered as generic video.
+# Retrying is the correct answer to that class of failure; the run would have been
+# complete.
+_WRITER_RETRY_DELAYS_SECONDS = (2.0, 5.0, 10.0)
+_TRANSIENT_WRITER_MARKERS = (
+    "max retries exceeded",
+    "newconnectionerror",
+    "failed to establish a new connection",
+    "connection aborted",
+    "connection reset",
+    "connection refused",
+    "remotedisconnected",
+    "temporarily unavailable",
+    "winerror 10048",
+    "winerror 10053",
+)
+
+
+def _is_transient_writer_failure(exc: BaseException) -> bool:
+    """Whether the batch never reached the writer, rather than failing to plan.
+
+    ``llm_service`` wraps a dropped socket in a plain ``RuntimeError`` whose text
+    still carries the original cause, so the class alone cannot answer this.
+    """
+
+    try:
+        from services import llm_writer_health
+
+        if llm_writer_health.is_connection_failure(exc):
+            return True
+    except Exception:  # noqa: BLE001 - the fallback below is the real test
+        pass
+    text = str(exc or "").lower()
+    return any(marker in text for marker in _TRANSIENT_WRITER_MARKERS)
+
 # Grammar fallback for the JSON-fix retry when the caller didn't provide a
 # shot schema: any JSON array of objects. llama-server compiles this to a
 # GBNF grammar that masks every token which would break it, so the retry's
@@ -180,6 +218,32 @@ class BasePlanner(ABC):
             callback(copy.deepcopy(checkpoint))
         self._raise_if_planning_cancelled()
 
+    def _call_writer_batch(
+        self,
+        call: Callable[..., Any],
+        *args: Any,
+        label: str = "",
+    ) -> Any:
+        """Call the writer, retrying only a failure that never reached it."""
+
+        attempts = len(_WRITER_RETRY_DELAYS_SECONDS) + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                return call(*args)
+            except InterruptedError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - classified below
+                if attempt >= attempts or not _is_transient_writer_failure(exc):
+                    raise
+                delay = _WRITER_RETRY_DELAYS_SECONDS[attempt - 1]
+                print(
+                    f"[DirectorPlanner] {label or 'planning'} could not reach the "
+                    f"writer (attempt {attempt}/{attempts}): {exc}. "
+                    f"Retrying in {delay:g}s."
+                )
+                time.sleep(delay)
+        raise RuntimeError("unreachable: the retry loop returns or raises")
+
     def _run_checkpointed_json_batches(
         self,
         *,
@@ -198,12 +262,16 @@ class BasePlanner(ABC):
         ] = None,
         repair_batch_size: Optional[int] = None,
         repair_attempts: int = 2,
+        require_planned_rows: bool = False,
     ) -> list[dict]:
         """Run a long structured plan in small, durable JSON batches.
 
         Callers may opt into strict row validation and bounded tail repair.
         Without a validator, the historical bounded-fallback behavior remains
         unchanged for planners that have their own recovery contracts.
+        ``require_planned_rows`` makes a batch that produced nothing usable stop
+        the pass instead of filling the clips with placeholder shots: a rendered
+        video must not silently contain shots nobody planned.
         """
 
         source = list(items or [])
@@ -316,11 +384,13 @@ class BasePlanner(ABC):
                     )
                     previous = output[-1] if output else None
                     try:
-                        candidate_rows = call_batch(
+                        candidate_rows = self._call_writer_batch(
+                            call_batch,
                             batch_index,
                             start,
                             batch_items,
                             previous,
+                            label=f"{progress_label} batch {batch_index}/{batch_total}",
                         )
                     except InterruptedError:
                         raise
@@ -378,11 +448,17 @@ class BasePlanner(ABC):
                             else output[-1] if output else None
                         )
                         try:
-                            repaired = repair_call(
+                            repaired = self._call_writer_batch(
+                                repair_call,
                                 batch_index,
                                 repair_start,
                                 repair_items,
                                 previous,
+                                label=(
+                                    f"{progress_label} repair "
+                                    f"{repair_start + 1}-"
+                                    f"{repair_start + requested}"
+                                ),
                             )
                         except InterruptedError:
                             raise
@@ -478,11 +554,13 @@ class BasePlanner(ABC):
                     )
                     previous = output[-1] if output else None
                     try:
-                        candidate = call_batch(
+                        candidate = self._call_writer_batch(
+                            call_batch,
                             batch_index,
                             start,
                             batch_items,
                             previous,
+                            label=f"{progress_label} batch {batch_index}/{batch_total}",
                         )
                         rows = [
                             dict(row) for row in (candidate or [])
@@ -501,7 +579,33 @@ class BasePlanner(ABC):
                             f"batches and using bounded fallbacks for this batch "
                             f"({exc})."
                         )
+                        if require_planned_rows:
+                            # Filling these clips with placeholders is worse than
+                            # stopping: the video then contains shots nobody planned,
+                            # and the run still reports success. Measured on a real
+                            # 14-clip project, a dropped writer connection turned six
+                            # clips into "SETUP: medium shot | ACTION: The visible
+                            # performance follows the audio" and the film completed.
+                            raise RuntimeError(
+                                f"{progress_label.capitalize()} planning could not "
+                                f"plan global clips {start + 1}-{start + expected} "
+                                f"of {total}: {exc}. Accepted shot plans were "
+                                "saved. Retry planning to continue from the saved "
+                                "checkpoint instead of rendering placeholder clips."
+                            ) from exc
                         rows = []
+
+                    if require_planned_rows and len(rows) < expected:
+                        # The model answered, but not for every clip it was given.
+                        # Naming them is the difference between "retry planning" and
+                        # a video with shots nobody designed.
+                        raise RuntimeError(
+                            f"{progress_label.capitalize()} planning returned "
+                            f"{len(rows)} of {expected} shot plans for global "
+                            f"clips {start + 1}-{start + expected} of {total}. "
+                            "Accepted shot plans were saved. Retry planning to "
+                            "continue from the saved checkpoint."
+                        )
 
                     while len(rows) < expected:
                         item_index = start + len(rows)

@@ -512,5 +512,76 @@ class H3FinalSubjectBindingTests(unittest.TestCase):
         self.assertIn("found subject bindings [1, 2]", duplicate_errors[0])
 
 
+    def test_one_person_shot_uses_that_participants_subject_number(self):
+        """A shot of S2 is Subject 2, not Subject 1.
+
+        A real podcast run failed with "Ref2VA visual action uses undefined
+        subjects: 1": the action text labelled the only subject by list
+        position while the definitions numbered it from its inline (S2).
+        """
+
+        plan = _plan(
+            [{"visual_description": "the man (S2) from the reference image, in muted blue"}],
+            [],
+            "SETUP: shared desk | SUBJECTS: the man from the reference image | "
+            "ACTION: he sits and speaks | CAMERA: static | ENDING: he nods.",
+        )
+        plan.update({
+            "_director_dialogue_beats": [
+                {"speaker_id": "(S2)", "spoken_text": "Claro, sí."},
+            ],
+            "_director_audio_plan": {
+                "mode": "dialogue_driven",
+                "lip_sync_critical": True,
+            },
+            "_director_audio_policy": {
+                "generated_speech_allowed": True,
+                "generated_music_allowed": True,
+            },
+            "_director_dialogue_manifest_authoritative": True,
+        })
+        compile_h3_clip_plans([plan])
+        prompt = plan["video_prompt"]
+        self.assertIn("<Subject 2>", prompt)
+        self.assertNotIn("<Subject 1>", prompt)
+        self.assertEqual(set(_subject_definition_lines(prompt)), {2})
+
+    def test_single_s2_subject_binds_its_picture_and_keeps_the_off_camera_voice(self):
+        """Picture 1 may belong to Subject 2, and an off-camera voice stays unbound."""
+
+        references = [
+            {"type": "audio", "role": "Bela (S1)", "audio_intent": "voice"},
+            {"type": "image", "role": "Roman (S2)", "image_intent": "identity"},
+            {"type": "audio", "role": "Roman (S2)", "audio_intent": "voice"},
+        ]
+        plan = _plan(
+            [{"visual_description": "the man from the reference image (S2), in muted blue"}],
+            references,
+            "SETUP: shared desk | SUBJECTS: the man from the reference image (S2) | "
+            "ACTION: he listens while the other host speaks | CAMERA: static | ENDING: he nods.",
+        )
+        plan.update({
+            "_director_dialogue_beats": [
+                {"speaker_id": "(S1)", "spoken_text": "Exacto."},
+            ],
+            "_director_audio_plan": {
+                "mode": "dialogue_driven",
+                "lip_sync_critical": False,
+            },
+            "_director_audio_policy": {
+                "generated_speech_allowed": True,
+                "generated_music_allowed": True,
+            },
+            "_director_dialogue_manifest_authoritative": True,
+        })
+        compile_h3_clip_plans([plan])
+        prompt = plan["video_prompt"]
+        definitions = _subject_definition_lines(prompt)
+        self.assertEqual(set(definitions), {2})
+        self.assertIn("<Picture 1>", definitions[2])
+        self.assertIn("<Audio 1> is the voice-timbre reference for Bela (S1)", prompt)
+        self.assertNotIn("<Subject 1>", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -32,6 +32,7 @@ from services.director.h3_subject_rows import (
 )
 from services.director import h3_speaker_cues
 from services.director.project_brief import clip_project_context as _clip_context
+from services.director.project_brief import section_heading as _section_heading
 from services.h3_prompt_budget import (
     H3_ENHANCED_TEXT_TOKEN_TARGET as _H3_DIRECTOR_TEXT_TOKEN_BUDGET,
     fit_h3_base_prompt,
@@ -957,20 +958,103 @@ def _strip_h3_dialogue_blocks(value: Any) -> str:
     return _normalized_space(cleaned)
 
 
+# A project brief that narrates the film's own progression is not this shot's world.
+# Measured twice: spoken brief prose was read aloud by the model, and on a
+# 27B-planned 14-clip project every rendered clip began with both hosts entering
+# the studio and the key lights blooming, because that arc lived in all fourteen
+# prompts. The block already told the model "do not perform its progression" and it
+# performed it anyway, so the arc is now removed instead of forbidden.
+#
+# Two layers, deliberately: a story under a heading (``DESCRIPTION:``, ``STORY:``) is
+# dropped whole by ``clip_project_context``, and prose with no heading at all is
+# trimmed sentence by sentence here. Only the second layer lives in this module.
+_ARC_MARKER_RE = re.compile(
+    r"\b(?:ent(?:er|ers|ering|rance|rances)|settl(?:e|es|ing)|awak(?:e|en|ens|ening)|"
+    r"bloom\w*|unfurl\w*|contract\w*|dim(?:s|med|ming)?|fold\w*|sprout\w*|"
+    r"ris(?:e|es|ing)|eas(?:e|es|ing)|push\w*|lift\w*|unfold\w*|expand\w*|grow\w*|"
+    r"progress\w*|begi(?:n|ns|nning)|start\w*|close(?:s|d)?|"
+    r"then|afterwards|meanwhile|finally|peak|arc|cycle|"
+    r"despu[eé]s|luego|entr(?:a|an|ada|ando)|se sientan|comienz(?:a|an)|"
+    r"termin(?:a|an)|finalmente|mientras|crec\w*|expande\w*)\b",
+    re.IGNORECASE,
+)
+# A story names several steps of one process. One verb is a description that happens to
+# use it -- "warm light rising along the desk edge" is a look, not an event -- so a block
+# is only read as narrative when more than one of its sentences carries a marker.
+_MIN_ARC_SENTENCES = 2
+_ARC_DROP_REPORTED: set[str] = set()
+
+
+def _static_sentences(block: str) -> str:
+    """A prose block without the sentences that narrate its progression."""
+
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", block) if part.strip()]
+    marked = [sentence for sentence in sentences if _ARC_MARKER_RE.search(sentence)]
+    if len(marked) < _MIN_ARC_SENTENCES:
+        return block
+    return " ".join(sentence for sentence in sentences if not _ARC_MARKER_RE.search(sentence)).strip()
+
+
+def _world_only_project_context(context: Any) -> str:
+    """The brief's static world, without the film's progression.
+
+    A labelled section is a contract that must hold in every clip -- the cast, the
+    vocal roles, the look of the place -- so it travels whole and is never trimmed:
+    cutting it was measured to delete the voice rules and the ambience, which is the
+    opposite of what this pass is for. Free prose is the author's story, and only its
+    place/look sentences are kept.
+    """
+
+    text = str(context or "").strip()
+    if not text:
+        return ""
+    blocks = [block.strip() for block in re.split(r"\n\s*\n", text) if block.strip()]
+    kept: list[str] = []
+    for block in blocks:
+        if _section_heading(block):
+            kept.append(block)
+            continue
+        world = _static_sentences(block)
+        if world:
+            kept.append(world)
+    return "\n\n".join(kept)
+
+
+def _report_dropped_project_context(project_context: Any) -> None:
+    """Say why a brief the director wrote reached no shot at all."""
+
+    text = str(project_context or "").strip()
+    if not text:
+        return
+    digest = str(abs(hash(text)))
+    if digest in _ARC_DROP_REPORTED:
+        return
+    _ARC_DROP_REPORTED.add(digest)
+    print(
+        "[MiniMax H3] The project brief narrates the film's story, so none of it is sent "
+        "to a shot: a clip that is told the whole film performs the whole film. The "
+        "planner still reads all of it. Put the cast in CHARACTERS AND BINDINGS, the "
+        "look of the place in AMBIENCE, and the action per clip in the timeline."
+    )
+
+
 def _h3_injected_project_context(project_context: Any) -> str:
     """The exact project-brief prose a compiled shot carries.
 
-    Computed once so the audio-policy scan can mask the same text it injected:
-    the brief states film-wide rules, and they are not this shot's speech.
+    Computed once so the audio-policy scan can mask the same text it injected: the
+    brief states film-wide rules, and they are not this shot's speech.
     """
 
-    context = _normalized_space(
-        pack_project_context(_clip_context(normalize_h3_text(project_context))),
-    )
+    raw = normalize_h3_text(project_context)
+    trimmed = _world_only_project_context(_clip_context(raw))
     # Dialogue belongs to the shot that speaks it. A brief may template its
     # lines with empty <d> placeholders, and those were injected into every
     # shot as extra dialogue blocks.
-    return _strip_h3_dialogue_blocks(context)
+    context = _strip_h3_dialogue_blocks(trimmed)
+    context = _normalized_space(pack_project_context(context)) if context.strip() else ""
+    if not context:
+        _report_dropped_project_context(raw)
+    return context
 
 
 def _strip_forbidden_dialogue_blocks(value: Any) -> str:
@@ -1044,7 +1128,12 @@ def _audio_policy_violations(
             for cue in _H3_SPOKEN_INSTRUCTION_RE.finditer(without_tags):
                 if _is_generated_speech_instruction(without_tags, cue):
                     errors.append(
-                        "generated speech instructions contradict the authoritative no-generated-speech policy"
+                        "generated speech instructions contradict the authoritative "
+                        "no-generated-speech policy: this shot says "
+                        f"{_sentence_around(without_tags, cue.start(), cue.end())!r}. "
+                        "Either let the shot speak, or describe only the visible "
+                        "performance (the mouth moving with the supplied track) "
+                        "without naming a speech act."
                     )
                     break
 
@@ -1071,6 +1160,29 @@ def _audio_policy_violations(
             errors.append("generated music instructions contradict the audio policy")
             break
     return list(dict.fromkeys(errors))
+
+
+def _sentence_around(text: str, start: int, end: int) -> str:
+    """The clause a diagnostic is about, so the report names what to change."""
+
+    left = max(
+        text.rfind(".", 0, start),
+        text.rfind("!", 0, start),
+        text.rfind("?", 0, start),
+        text.rfind(";", 0, start),
+        text.rfind("\n", 0, start),
+    ) + 1
+    stops = [
+        index for index in (
+            text.find(".", end),
+            text.find("!", end),
+            text.find("?", end),
+            text.find(";", end),
+            text.find("\n", end),
+        ) if index >= 0
+    ]
+    right = min(stops) if stops else len(text)
+    return _normalized_space(text[left:right]).strip()[:160]
 
 
 def _h3_visual_shot_markers(visual: str) -> list[re.Match[str]]:
@@ -4725,10 +4837,30 @@ def _compile_official_dialogue(
             "mouth closed; no invented dialogue, muttering, gibberish, "
             "speech-like vocalization, or background voice occurs."
         )
-        vocal_detail = (
-            f"{timing} Dialogue: {' '.join(dialogue_parts)} {guard} "
+        on_screen_labels = {
+            f"(S{int(match.group(1))})"
+            for subject in subjects or []
+            for key in ("visual_description", "character_id", "speaker_name")
+            for match in _H3_SPEAKER_TOKEN_RE.finditer(
+                str(_field(subject, key, "") or "")
+            )
+        }
+        off_camera = {
+            beat["stable_id"] for beat in valid_beats
+            if beat["stable_id"]
+        } - on_screen_labels
+        frame_clause = (
+            "Keep every on-screen speaker visible with an unobstructed face and "
+            "mouth through their complete line; a speaker who is not in this "
+            "frame stays off-camera, and the visible listener does not move "
+            "their lips."
+            if off_camera else
             "Keep each current speaker visibly framed with an unobstructed "
             "face and mouth through their complete line."
+        )
+        vocal_detail = (
+            f"{timing} Dialogue: {' '.join(dialogue_parts)} {guard} "
+            f"{frame_clause}"
         )
         body = _insert_h3_vocal_detail(body, vocal_detail)
         contract = " ".join(
@@ -5025,6 +5157,15 @@ def _ref2va_identity_aliases(subject: Any) -> list[str]:
 
 
 def _mapped_ref2va_subject(role: str, subjects: Sequence[Any]) -> int | None:
+    # An explicit (Sx) is the strongest identity: the reference role and the
+    # subject row both state it, and a plan can describe the same person as
+    # "Roman (S2)" and "the man from the reference image (S2)" with no shared
+    # name. Without this, the reference created a phantom extra Subject and a
+    # single-subject reaction shot was paired with the off-camera speaker.
+    role_labels = {
+        f"S{int(match.group(1))}"
+        for match in _H3_SPEAKER_TOKEN_RE.finditer(str(role or ""))
+    }
     scored: list[tuple[tuple[int, int], int]] = []
     for index, subject in enumerate(subjects):
         explicit = _ref2va_identity_aliases({
@@ -5036,7 +5177,20 @@ def _mapped_ref2va_subject(role: str, subjects: Sequence[Any]) -> int | None:
             )), default=0)
         explicit_length = match_length(explicit)
         inferred_length = match_length(_ref2va_identity_aliases(subject))
-        scored.append(((2, explicit_length) if explicit_length else (1, inferred_length), index))
+        subject_labels = {
+            f"S{int(match.group(1))}"
+            for match in _H3_SPEAKER_TOKEN_RE.finditer(
+                " ".join(
+                    str(_field(subject, key, "") or "")
+                    for key in ("visual_description", "character_id", "speaker_name")
+                )
+            )
+        }
+        shared_labels = role_labels & subject_labels
+        if shared_labels:
+            scored.append(((3, max(len(label) for label in shared_labels)), index))
+        else:
+            scored.append(((2, explicit_length) if explicit_length else (1, inferred_length), index))
     best = max((score for score, _index in scored), default=(0, 0))
     matches = [index for score, index in scored if best[1] and score == best]
     if len(matches) > 1:
@@ -5252,7 +5406,11 @@ def _reference_relationships(
                 or (aliases[0] if aliases else f"visible subject {matched_index + 1}")
             )
             entry = _speaker_registry_entry(registry, character_id or subject_name)
-            return matched_index + 1, subject_name, entry[0] if entry else ""
+            # The planner's slot, not the row's list position: a one-person
+            # shot of S2 is position 1 but Subject 2, and returning the
+            # position minted a phantom <Subject 1> beside the real <Subject 2>.
+            slot, _ = _planner_subject_slot(subject, matched_index + 1)
+            return slot, subject_name, entry[0] if entry else ""
         # A planner row can name its participant only through the inline "(Sx)" label, or through
         # the label the body binds to its Subject. Falling through to a brand-new Subject gave one
         # participant two labels -- one for acting and one for identity -- and the identity
@@ -5813,7 +5971,13 @@ def _label_ref2va_subjects_in_body(
     result = body
     missing: list[str] = []
     for index, subject in enumerate(subjects or [], start=1):
-        label = f"<Subject {index}>"
+        # Use the participant's own slot, not its list position. A one-person
+        # shot of S2 is position 1 but Subject 2, and labelling it <Subject 1>
+        # here made the action text contradict the definitions, which are
+        # numbered from the same inline label (a real run failed with
+        # "Ref2VA visual action uses undefined subjects: 1").
+        slot, _ = _planner_subject_slot(subject, index)
+        label = f"<Subject {slot}>"
         if label in result:
             continue
         name = (
@@ -5932,6 +6096,7 @@ def compile_h3_official_prompt(
     audio_policy: Mapping[str, Any] | None = None,
     dialogue_manifest_authoritative: bool = False,
     strict_audio_policy: bool = False,
+    driving_audio: bool = False,
 ) -> tuple[str, str]:
     """Compile Director metadata into MiniMax's documented Context-IR shape."""
 
@@ -5959,6 +6124,16 @@ def compile_h3_official_prompt(
         registry,
         source_text=f"{project_context}\n{prompt}",
     )
+    # The caller may know something the manifest cannot show: the project supplies its
+    # own soundtrack, so the mouths follow that track instead of generated speech. A
+    # clip whose own audio plan came through neutral then read as "silent shot with no
+    # track", and describing the very mouth that has to sync was refused as a request
+    # to generate speech.
+    #
+    # Kept separate from ``has_driving_audio`` on purpose: that flag also decides which
+    # beats this compiler writes into the prompt, and widening it silenced a shot whose
+    # beats the caller still required -- "expected 4 dialogue block(s), found 0".
+    policy_driving_audio = has_driving_audio or driving_audio
     audio_mode = _normalized_space(_field(audio_plan or {}, "mode", "")).casefold()
     if audio_mode == "music_driven":
         from .music_performance import constrain_music_performance
@@ -5993,7 +6168,7 @@ def compile_h3_official_prompt(
             audio_policy,
             dialogue_beats=dialogue_beats,
             dialogue_manifest_authoritative=dialogue_manifest_authoritative,
-            has_driving_audio=has_driving_audio,
+            has_driving_audio=policy_driving_audio,
             ignore_regions=[_h3_injected_project_context(project_context)]
             if project_context else None,
         )
@@ -6247,7 +6422,7 @@ def compile_h3_official_prompt(
         audio_policy,
         dialogue_beats=dialogue_beats,
         dialogue_manifest_authoritative=dialogue_manifest_authoritative,
-        has_driving_audio=has_driving_audio,
+        has_driving_audio=policy_driving_audio or has_driving_audio,
         ignore_regions=[_h3_injected_project_context(project_context)]
         if project_context else None,
     )
@@ -6495,9 +6670,15 @@ def validate_h3_prompt_contract(
             except H3DialogueContractError as exc:
                 errors.append(str(exc))
                 continue
-            expected_picture_bindings[picture_no] = (
-                mapped + 1 if mapped is not None else None
-            )
+            if mapped is None:
+                expected_picture_bindings[picture_no] = None
+            else:
+                # The planner's slot, not the row's list position. A one-person
+                # S2 shot stores the man at position 1 but defines <Subject 2>,
+                # and expecting <Subject 1> rejected the correct prompt.
+                subject = (subjects or [])[mapped]
+                slot, _ = _planner_subject_slot(subject, mapped + 1)
+                expected_picture_bindings[picture_no] = slot
         errors.extend(validate_final_h3_subject_bindings(
             text,
             expected_picture_bindings,
@@ -6755,6 +6936,7 @@ def compile_h3_clip_plans(
     prompt_modes: Sequence[str] | None = None,
     durations: Sequence[float] | None = None,
     reference_manifests: Sequence[Sequence[Mapping[str, Any]]] | None = None,
+    supplied_track: bool = False,
 ) -> Sequence[MutableMapping[str, Any]]:
     """Compile every saved/renderable H3 clip immediately before queuing.
 
@@ -6762,6 +6944,11 @@ def compile_h3_clip_plans(
     lets generation recompile a prompt from T2VA to I2VA/FL2VA after the actual
     start/end files are known without nesting an alignment header or six-field
     Ref2VA wrapper around a previously compiled prompt.
+
+    ``supplied_track`` says the project renders with the user's own soundtrack, so the
+    track owns every voice. Without it, a clip whose own audio plan came through neutral
+    was treated as a silent shot with no audio at all: its transcript beats were cleared
+    and its description of a synced mouth was refused as a request for generated speech.
     """
 
     references_by_plan = [
@@ -6789,6 +6976,30 @@ def compile_h3_clip_plans(
             for reference in references or []
         )
         transcript_only.append(not _transcript.states_the_lines(audio_mode=audio_mode, audio_plan=plan.get("_director_audio_plan"), driving_audio_reference=has_driving_audio_reference))
+
+    # A supplied track that owns the voice and a prompt that writes the same lines as
+    # new speech are two instructions for the same mouth. Name it here: when the
+    # rendered mouths do not match the track, this line says which configuration the
+    # shot was compiled under.
+    restated_over_track = [
+        index + 1
+        for index, plan in enumerate(clip_plans)
+        if not transcript_only[index]
+        and any(
+            str(_field(reference, "type", "")).strip().casefold() == "audio"
+            and str(_field(reference, "audio_intent", "voice") or "voice")
+            .strip().casefold() == "drive"
+            for reference in (references_by_plan[index] or [])
+        )
+    ]
+    if restated_over_track:
+        print(
+            "[MiniMax H3] Shot(s) "
+            + ", ".join(str(number) for number in restated_over_track[:8])
+            + " write their lines as speech while a driving audio reference owns the "
+            "voice. If a rendered mouth does not match that track, this is the shot to "
+            "re-plan as a transcript-only performance."
+        )
 
     for index, (plan, has_driving_audio) in enumerate(zip(clip_plans, transcript_only)):
         audio_policy = plan.get("_director_audio_policy")
@@ -6827,6 +7038,21 @@ def compile_h3_clip_plans(
                     audio_plan["mode"] = "ambient_only"
                 audio_plan["timing_anchor"] = "video"
                 audio_plan["lip_sync_critical"] = False
+            # A voice-timbre reference primes H3 to speak even under this
+            # contract. A silent shot must not carry one; the remaining image,
+            # video and sound references keep their numbering and their bindings.
+            references_by_plan[index] = [
+                reference for reference in references_by_plan[index] or []
+                if not (
+                    str(_field(reference, "type", "")).strip().casefold() == "audio"
+                    and str(_field(reference, "audio_intent", "voice") or "voice")
+                    .strip().casefold() == "voice"
+                )
+            ]
+        # Persist the list this shot actually uses: later validators and the
+        # rerun/chat paths read the plan's manifest, and it must not promise a
+        # reference the compiled prompt no longer maps.
+        plan["_director_h3_reference_manifest"] = references_by_plan[index]
 
     for index, (plan, references) in enumerate(zip(clip_plans, references_by_plan)):
         source = str(plan.get("_director_h3_source_prompt") or plan.get("video_prompt") or "")
@@ -7048,6 +7274,7 @@ def compile_h3_clip_plans(
             audio_policy=audio_policy,
             dialogue_manifest_authoritative=dialogue_manifest_authoritative,
             strict_audio_policy=bool(plan.get("_director_prompt_user_edited")),
+            driving_audio=supplied_track,
         )
         plan["video_prompt"] = prompt
         plan["_director_h3_compiled_prompt"] = prompt
@@ -7083,7 +7310,7 @@ def compile_h3_clip_plans(
             duration_seconds=duration,
             audio_policy=audio_policy,
             dialogue_manifest_authoritative=dialogue_manifest_authoritative,
-            has_driving_audio=transcript_only[index] or driven_mode,
+            has_driving_audio=transcript_only[index] or driven_mode or supplied_track,
             project_context=plan.get("_director_project_context") or "",
         )
         if errors:

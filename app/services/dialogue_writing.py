@@ -98,9 +98,62 @@ def only_supplied_dialogue_requested(prompt: str) -> bool:
     ))
 
 
+def _cast_row_lines(source: str) -> str:
+    """Drop cast rows: a rule about one member is not the film's policy.
+
+    Measured on a real 8,000-character brief that grew past its first version:
+
+        S3 (Don Aurelio): ... No lip-sync, no voice: he appears only inside the
+        opened shroud in Stage 5.
+        S4 (Los cinco niños del río ...): ... No lip-sync, no voice, no
+        articulated speech – only faint distant breathing and soft footsteps.
+
+    Both lines say the same thing: THIS character does not speak. They were read
+    as a project-wide prohibition, so ``director_audio_policy`` reported
+    ``generated_speech_allowed: False`` for a film whose lead narrates 88
+    transcript beats, and every compiled clip then failed with "generated speech
+    instructions contradict the authoritative no-generated-speech policy".
+
+    The shape is exactly the one the project-brief template asks directors to
+    write -- ``SUBJECT 1 (S1): ...`` / ``<Subject 1> (S1): ...`` -- so it is the
+    one shape a global ban can never hide behind.
+    """
+
+    kept: list[str] = []
+    in_cast_row = False
+    for line in str(source or "").splitlines():
+        if not line.strip():
+            in_cast_row = False
+            kept.append(line)
+            continue
+        if _CAST_ROW_RE.match(line):
+            in_cast_row = True
+            continue
+        if _BRIEF_HEADING_RE.match(line):
+            in_cast_row = False
+            kept.append(line)
+            continue
+        if in_cast_row:
+            # A long cast row wraps onto the next line, and the wrap is still
+            # the same character's contract.
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+_CAST_ROW_RE = re.compile(
+    r"^\s*(?:[-*•]\s*)?"
+    r"(?:<\s*subject\s*\d+\s*>|subject\s*\d+\b|s\s?\d+\b)"
+    r"[^\n:]{0,120}:",
+    re.IGNORECASE,
+)
+# ``CHARACTERS AND BINDINGS:``, ``NEGATIVE:`` -- an uppercase heading ends the row.
+_BRIEF_HEADING_RE = re.compile(r"^\s*[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ0-9 ,'’\-]{2,60}:\s*$")
+
+
 def dialogue_forbidden(prompt: str) -> bool:
     """Recognize a scene-wide instruction, not a locally silent reaction/shot."""
-    source = str(prompt or "")
+    source = _cast_row_lines(str(prompt or ""))
     # Natural restriction lists often begin with a scene-specific noun before
     # reaching the speech item ("No baby, dialogue, collision, or cuts").
     # Collapse only a bare list item: positive clauses such as "dialogue begins

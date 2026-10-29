@@ -95,28 +95,82 @@ def _compress_i2v(text: str) -> str:
 
 
 def _compress_a2v(text: str, shot: Optional[ShotPlan] = None) -> str:
-    """A2V-specific: reduce visual density during dialogue-heavy shots.
+    """A2V-specific: trim repeated setting, never the performance.
 
-    Don't overload with visual events that could fight audio timing.
+    A dialogue shot's sentences are the performance: what the actor does while the
+    line plays. Measured on a real 26-clip drama, this function used to keep the
+    first two sentences (the setting), any sentence containing a quote or one of
+    "says/speaks/whispers/gestures/nods", and the last sentence -- and delete
+    everything else. Every action sentence went with it: "She touches the knife,
+    then touches the rosary", "Don Aurelio enters from behind her", "Streetlamps
+    flicker and fail one by one". Seven different shots reduced to the same
+    setting plus the same closing line, so they rendered as one static portrait
+    of one character in one place, which is what the user reported.
+
+    Only a sentence that restates what the kept text already said is dropped, so
+    the budget this exists for is still met on a prompt that repeats its setting,
+    and a prompt whose sentences each add something survives whole.
     """
-    if shot and shot.audio_plan.lip_sync_critical:
-        # Remove excessive environmental description during dialogue
-        # Keep it lean — audio is the star
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-        if len(sentences) > 6:
-            # Keep first 2 (setting), dialogue-related, and last (ending)
-            essential = []
-            for s in sentences:
-                s_lower = s.lower()
-                is_dialogue = '"' in s
-                is_camera = any(w in s_lower for w in ['camera', 'shot', 'framing', 'dolly', 'tracking'])
-                is_action = any(w in s_lower for w in ['says', 'speaks', 'whispers', 'gestures', 'nods'])
-                if is_dialogue or is_camera or is_action or len(essential) < 2:
-                    essential.append(s)
-                elif s == sentences[-1]:  # keep ending
-                    essential.append(s)
-            text = " ".join(essential)
-    return text
+
+    if not (shot and shot.audio_plan.lip_sync_critical):
+        return text
+    sentences = [part for part in re.split(r'(?<=[.!?])\s+', text) if part.strip()]
+    if len(sentences) <= 6:
+        return text
+    kept: list[str] = []
+    stated: set[str] = set()
+    for position, sentence in enumerate(sentences):
+        is_last = position == len(sentences) - 1
+        # The opening sentence is the setting, and it is what makes the shot readable.
+        opens_the_shot = position == 0
+        protected = bool(_PERFORMANCE_RE.search(sentence))
+        repeats = _novel_content_ratio(sentence, stated) < _MIN_NOVELTY
+        if is_last or opens_the_shot or protected or not repeats:
+            kept.append(sentence)
+            stated.update(_content_words(sentence))
+    return " ".join(kept)
+
+
+# Anything that shows something happening: dialogue, camera direction, or a body
+# doing something. Protected sentences are kept regardless of how much they repeat,
+# because cutting the performance is the failure this guards against.
+_PERFORMANCE_RE = re.compile(
+    r'["“”«»]|'
+    r'\b(?:camera|shots?|framing|dolly|tracking|pans?|tilts?|zoom\w*|push[- ]?in|'
+    r'orbit\w*|crane|handheld|lens|close[- ]?ups?|angle)\b|'
+    r'\b(?:turns?|turning|looks?|looking|gazes?|stares?|glares?|blinks?|nods?|'
+    r'shakes?|touches?|touching|reaches?|raises?|lifting|lifts?|lowers?|drops?|'
+    r'opens?|closing|closes?|steps?|walks?|enters?|entering|exits?|kneels?|'
+    r'rises?|sits?|settles?|leans?|picks?|places?|holds?|presses?|pulls?|'
+    r'pushes?|sways?|swaying|flickers?|fails?|spills?|dims?|brightens?|'
+    r'gathers?|crosses?|trembles?|shivers?|breathes?|'
+    r'says?|speaks?|speaking|whispers?|mutters?|shouts?|sings?|recites?)\b',
+    re.IGNORECASE,
+)
+
+# A sentence that names almost nothing new is the setting said twice.
+_MIN_NOVELTY = 0.34
+
+_STOP_WORDS = frozenset({
+    "the", "and", "with", "from", "that", "this", "into", "over", "under", "then",
+    "her", "his", "their", "its", "she", "he", "they", "it", "as", "at", "in",
+    "on", "of", "to", "a", "an", "is", "are", "was", "were", "be", "been",
+    "while", "which", "who", "for", "by", "not", "no", "all", "only",
+})
+
+
+def _content_words(text: str) -> set[str]:
+    return {
+        word for word in re.findall(r"[a-záéíóúüñ0-9'-]+", text.casefold())
+        if len(word) > 2 and word not in _STOP_WORDS
+    }
+
+
+def _novel_content_ratio(sentence: str, stated: set[str]) -> float:
+    words = _content_words(sentence)
+    if not words:
+        return 1.0
+    return len(words - stated) / len(words)
 
 
 def _compress_image(text: str) -> str:

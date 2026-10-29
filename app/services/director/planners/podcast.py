@@ -168,6 +168,11 @@ class PodcastPlanner(BasePlanner):
     ) -> list[ShotPlan]:
         """Plan shots from pre-segmented clips (similar to audio-driven short film)."""
         cast_section, speaker_display = resolve_cast(transcript, speaker_mappings)
+        # A 4B planner degrades inside a 12-shot answer: one real run cut its
+        # JSON off at the token limit (finish_reason=length) on the last shot.
+        # The shared helper shortens the batch for small models; the music,
+        # short-film and viral planners already use it.
+        batch_size = self.long_form_batch_size()
 
         # The rows are the words; the model plans the staging. See
         # dialogue_assignment for the measurement behind this.
@@ -284,23 +289,29 @@ Write exactly {len(batch_clips)} structured shot plans. Go:"""
             return self._call_llm_json(
                 user_prompt=batch_user,
                 system_prompt=batch_system,
-                max_tokens=max(1024, len(batch_clips) * 300 + 512),
+                # Measured on a real podcast batch: a complete plan costs about
+                # 540 answer tokens per shot, so 300 truncated the final shots.
+                max_tokens=max(1024, len(batch_clips) * 700 + 512),
                 thinking_budget=(
                     0
-                    if len(clips) > self._LONG_FORM_BATCH_SIZE
+                    if len(clips) > batch_size
                     else None
                 ),
                 image_paths=image_paths,
             )
 
-        if len(clips) > self._LONG_FORM_BATCH_SIZE:
+        if len(clips) > batch_size:
             shot_dicts = self._run_checkpointed_json_batches(
                 items=clips,
-                batch_size=self._LONG_FORM_BATCH_SIZE,
+                batch_size=batch_size,
                 checkpoint_key="podcast_batches",
                 stage="podcast_batch",
                 progress_label="podcast",
                 call_batch=plan_batch,
+                # A rendered episode must not contain shots nobody planned: a dropped
+                # writer connection used to fill the rest of the episode with
+                # "Continue podcast segment N" and still report success.
+                require_planned_rows=True,
                 fallback_factory=lambda index, _clip: {
                     "scene_goal": f"Continue podcast segment {index + 1}",
                     "scene_type": "speaker",

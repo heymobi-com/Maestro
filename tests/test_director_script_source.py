@@ -42,6 +42,23 @@ class ScriptParserTests(unittest.TestCase):
         self.assertIn("clips: ScriptClip[]", parser)
         self.assertIn("transcript: ScriptTranscriptRow[]", parser)
 
+    def test_numbered_speakers_and_timecodes_are_recognised(self):
+        parser = _read(PARSER)
+        # A two-host podcast brief names its cast S1/S2, and a written script often
+        # timestamps each scene. Requiring letters-only labels turned every S1: row
+        # into scene direction, so the planner planned a silent video.
+        self.assertIn(r"\p{L}\p{N}", parser)
+        self.assertIn("_TIMECODE_PREFIX", parser)
+        self.assertIn("_TIMECODE_ONLY", parser)
+        self.assertIn("_SPEAKER_LABEL_LIKE", parser)
+        self.assertIn("_SPEAKER_ROW_DASH", parser)
+        self.assertIn("_speakerRow", parser)
+        # A timestamp-only line is a scene marker, not a silent 1.6 s turn.
+        self.assertIn("if (_TIMECODE_ONLY.test(trimmed)) continue", parser)
+        # Uppercase stage direction ("SETUP:") ends in a colon but is not a speaker.
+        self.assertIn("_SCENE_HEADINGS", parser)
+        self.assertIn("_SCENE_HEADINGS.has(speaker.toUpperCase())", parser)
+
     def test_the_transcript_rows_carry_what_the_planner_filters_on(self):
         parser = _read(PARSER)
         # The podcast planner keeps a line in a clip when
@@ -95,12 +112,42 @@ class SourceChoiceTests(unittest.TestCase):
         # The timeline and the transcript are derived when the script changes, so the
         # review steps show the clips the render will use.
         self.assertIn("const parsed = parseDirectorScript(text)", slice_source)
-        self.assertIn("directorScriptClips: parsed.clips", slice_source)
+        self.assertIn("directorScriptClips: timed.clips as unknown as PlannedClip[]", slice_source)
         # The store only delegates, so its half of the seam stays one line.
         self.assertIn(
-            "setDirectorScriptText: (text) => set(directorScriptTextPatch(text))",
+            "setDirectorScriptText: (text) => set(state => directorScriptTextPatch(state, text))",
             _read(STORE),
         )
+
+
+class ScriptGuardTests(unittest.TestCase):
+    def test_a_scene_only_script_is_refused_before_planning_or_rendering(self):
+        slice_source = _read(SLICE)
+        store = _read(STORE)
+        pipeline = _read(PIPELINE)
+
+        # Scene direction still produces clips, so "has clips" was not enough:
+        # the plan had no words and H3 vocalized gibberish over the voice refs.
+        self.assertIn("directorScriptMissingSpokenRows", slice_source)
+        self.assertIn("state.directorScriptTranscript.length === 0", slice_source)
+        self.assertIn("DIRECTOR_SCRIPT_MISSING_SPOKEN_ROWS_ERROR", slice_source)
+        # Both entry points refuse it, and the backend refuses queue/API starts too.
+        self.assertEqual(store.count("directorScriptMissingSpokenRows("), 2)
+        self.assertIn("directorError: DIRECTOR_SCRIPT_MISSING_SPOKEN_ROWS_ERROR", store)
+        self.assertIn('params.get("_director_script_source") and not any(', pipeline)
+        self.assertIn("The written script has no dialogue rows.", pipeline)
+
+    def test_a_silent_shot_does_not_carry_a_voice_reference(self):
+        pipeline = _read(PIPELINE)
+        dialogue = _read(ROOT / "app/services/director/h3_dialogue.py")
+
+        # H3 vocalizes when a voice-timbre reference is present, even under a
+        # "no character speaks" contract. Silent shots drop it for the initial
+        # render and for a Dashboard rerun, and the prompt compiler does the same.
+        self.assertIn("def _h3_clip_forbids_generated_speech", pipeline)
+        self.assertIn("def _without_voice_references", pipeline)
+        self.assertGreaterEqual(pipeline.count("_without_voice_references("), 3)
+        self.assertIn("references_by_plan[index] = [", dialogue)
 
 
 class RequestRoutingTests(unittest.TestCase):
@@ -129,7 +176,9 @@ class RequestRoutingTests(unittest.TestCase):
         # The script owns the soundtrack, the timeline and the words, so all of its
         # fields travel as one spread instead of being re-listed by hand.
         self.assertIn("...scriptFields,", store)
-        self.assertIn("audio_path: undefined,", slice_source)
+        # A script with no spoken episode attached still sends none, because H3 then
+        # invents the voices itself.
+        self.assertIn("audio_path: state.directorScriptAudioPath || undefined,", slice_source)
         self.assertIn("planned_clips: state.directorScriptClips,", slice_source)
 
     def test_the_render_is_told_that_the_dialogue_was_written(self):
@@ -196,6 +245,61 @@ class ScriptReferenceTests(unittest.TestCase):
             "{skill && (!isShortFilm || shortFilmPath === 'audio') && scriptSource !== 'script'",
             self.chat,
         )
+
+
+class ScriptSpokenEpisodeTests(unittest.TestCase):
+    """A spoken episode replaces the video model's voice synthesis.
+
+    H3 speaking a written script is the source of the measured defects: metallic
+    32 kHz timbre, imprecise words, and background prose read aloud. A TTS episode
+    for the same rows removes all three, so the track owns the voice, H3 only
+    lip-syncs to it, and the authored rows are re-timed onto the measured length so
+    every shot window still slices inside the track.
+    """
+
+    def test_the_parser_re_times_a_timeline_onto_a_measured_duration(self):
+        parser = _read(PARSER)
+
+        self.assertIn("export function rescaleScriptTimeline", parser)
+        self.assertIn("const factor = targetSeconds / current", parser)
+        # The estimate is replaced, not appended to: both the clips and the rows move.
+        self.assertIn("clips: parsed.clips.map(clip => ({", parser)
+        self.assertIn("transcript: parsed.transcript.map(row => ({", parser)
+
+    def test_the_slice_keeps_the_measured_track_with_the_rows(self):
+        slice_source = _read(SLICE)
+
+        self.assertIn("directorScriptAudioPath: string | null", slice_source)
+        self.assertIn("directorScriptAudioDuration: number | null", slice_source)
+        self.assertIn("export function directorScriptAudioPatch", slice_source)
+        # Detaching the audio must return the rows to the word-per-second estimate.
+        self.assertIn("...deriveScriptRows(state.directorScriptText, path ? duration : null),", slice_source)
+
+    def test_the_track_travels_as_the_project_audio(self):
+        slice_source = _read(SLICE)
+
+        self.assertIn("audio_path: state.directorScriptAudioPath || undefined,", slice_source)
+        # The marker stays: the rows are still authored, not diarized.
+        self.assertIn("_director_script_source: true,", slice_source)
+
+    def test_the_measured_length_comes_from_the_backend(self):
+        store = _read(STORE)
+        client = _read(ROOT / "ui/src/api/client.ts")
+        launch = _read(ROOT / "app/launch.py")
+
+        self.assertIn("const { duration_seconds } = await api.audioDuration({ path })", store)
+        self.assertIn("/api/v1/audio/duration", client)
+        self.assertIn('@api.post("/api/v1/audio/duration")', launch)
+        # An uploads/ or outputs/ path only, the same boundary the podcast master uses.
+        self.assertIn('detail=f"Audio: path not allowed: {raw}"', launch)
+
+    def test_the_script_editor_offers_the_spoken_episode(self):
+        chat = _read(CHAT)
+
+        self.assertIn("const setScriptAudio = useStore(s => s.setDirectorScriptAudio)", chat)
+        self.assertIn("void attachScriptAudio(event.target.value)", chat)
+        self.assertIn("No audio", chat)
+        self.assertIn("re-timed onto it", chat)
 
 
 if __name__ == "__main__":

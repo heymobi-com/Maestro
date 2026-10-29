@@ -27,7 +27,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
-__all__ = ["audit_project_brief", "clip_project_context", "per_shot_headings"]
+__all__ = [
+    "audit_project_brief",
+    "clip_project_context",
+    "per_shot_headings",
+    "section_heading",
+]
 
 # Headings that describe the FILM rather than the clip. Everything else travels: the cast and
 # their wardrobe, the vocal roles, the audio rules and the visual world.
@@ -55,10 +60,19 @@ _DROPPED_HEADINGS = _NARRATIVE_HEADINGS | _PER_SHOT_HEADINGS
 # leak this set exists to prevent, so something outside this module has to be able to name it.
 per_shot_headings = _PER_SHOT_HEADINGS
 
-# A ``HEADING:`` on a line of its own, short enough that a prose sentence ending in a colon
-# is not mistaken for one. Parentheses and lower case are allowed: a director writes
-# ``SUBJECT LOCK (critical, non-negotiable):`` and ``Description:`` and both are headings.
-_HEADING_RE = re.compile(r"^([^\n:]{2,60}?)(?:\s*\([^)]*\))?:\s*$")
+# A ``HEADING:`` at the start of a section. Parentheses and lower case are allowed: a
+# director writes ``SUBJECT LOCK (critical, non-negotiable):`` and ``Description:``.
+#
+# The colon may be followed by the section's text on the SAME line. Measured on a real
+# project, the brief was written the natural way:
+#
+#     DESCRIPTION: A two-host tech podcast set awakens, conducts its conversation, ...
+#
+# and every clip performed that whole arc. The heading was only recognised when it stood
+# alone on its line, so this section was never identified as the film's story and its 2,159
+# characters travelled into all 14 prompts -- the exact failure the template's "a clip that
+# is told the whole film performs the whole film" rule exists to prevent.
+_HEADING_RE = re.compile(r"^([^\n:<]{2,60}?)(?:\s*\([^)]*\))?:(?:\s*$|\s+)")
 _CLIP_PLAN_ITEM_RE = re.compile(r"^\s*[-*•]?\s*<C\d+\b", re.IGNORECASE)
 
 
@@ -98,6 +112,11 @@ def _section_heading(section: str) -> str:
     first = section.splitlines()[0].strip()
     match = _HEADING_RE.match(first)
     return match.group(1).strip() if match else ""
+
+
+# Public: another module needs to know whether a block of the brief is a labelled contract
+# section (the cast, the voices, the world) or the author's free prose.
+section_heading = _section_heading
 
 
 def _is_film_narrative(section: str) -> bool:

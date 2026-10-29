@@ -321,7 +321,17 @@ def director_audio_policy(source: str) -> dict[str, bool]:
         if isinstance(start, int) and isinstance(end, int):
             source = source[:start] + " " + source[end:]
     text = re.sub(r"\s+", " ", source).casefold()
-    speech_text = re.sub(r"\bsilent (?:\w+\s+){0,3}(?:film|short|sequence|video)\b", "silent film", text)
+    # Keep the line breaks for the speech check: a cast row the template asks a
+    # director to write ("S3 (Don Aurelio): ... no voice") states a rule about that
+    # member, and only a line-structured copy still shows where the row begins.
+    # Measured: an 8,000-character brief declared `generated_speech_allowed: False`
+    # for a film whose lead narrates 88 transcript beats, because two cast rows said
+    # their characters never lip-sync.
+    speech_text = re.sub(
+        r"\bsilent (?:\w+\s+){0,3}(?:film|short|sequence|video)\b",
+        "silent film",
+        source,
+    )
     speech_forbidden = dialogue_forbidden(speech_text)
     music_forbidden = bool(re.search(
         r"\b(?:no (?:background |non[- ]diegetic )?music|without (?:background )?music|"

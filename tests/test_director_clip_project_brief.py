@@ -33,7 +33,11 @@ from services.director.planners.short_film import (  # noqa: E402
     _h3_rebuilt_visual_prompt,
     _prepare_h3_prompt_only_continuity,
 )
-from services.director.project_brief import audit_project_brief, clip_project_context  # noqa: E402
+from services.director.project_brief import (  # noqa: E402
+    audit_project_brief,
+    clip_project_context,
+    section_heading,
+)
 from services.director.prompt_audit import format_audit_report  # noqa: E402
 
 SHOT = "A wide shot of S2 standing at the piano, his mouth remaining closed."
@@ -105,6 +109,46 @@ class TheFilmStoryStaysOutOfTheClipTests(unittest.TestCase):
         brief = "DESCRIPTION:\nA song about surrender, told across the whole film."
 
         self.assertEqual(clip_project_context(brief), "")
+
+    def test_a_heading_written_inline_still_marks_the_films_story(self):
+        """The run that broke wrote its brief the natural way, ``DESCRIPTION: A two-host
+        tech podcast set awakens ...`` on one line. The heading was only recognised when it
+        stood alone, so 2,159 characters of arc travelled into all 14 prompts."""
+
+        brief = (
+            "DESCRIPTION: A two-host tech podcast set awakens, conducts its conversation, "
+            "and closes. The set begins dark and dormant. The two participants enter in "
+            "sequence and settle into their chairs.\n\n"
+            "AMBIENCE:\nA cavernous studio with a glossy, mirror-like floor."
+        )
+
+        kept = clip_project_context(brief)
+
+        self.assertNotIn("enter in sequence", kept)
+        self.assertNotIn("begins dark and dormant", kept)
+        self.assertIn("glossy, mirror-like floor", kept)
+
+    def test_an_inline_description_alone_leaves_no_context(self):
+        self.assertEqual(
+            clip_project_context("DESCRIPTION: The whole film, from the first shot to the last."),
+            "",
+        )
+
+    def test_an_inline_camera_heading_stays_out_of_the_clips(self):
+        brief = "CAMERA: slow orbit on every shot.\n\nVOICES:\nS1: a warm alto."
+
+        kept = clip_project_context(brief)
+
+        self.assertNotIn("orbit", kept)
+        self.assertIn("warm alto", kept)
+
+    def test_a_subject_row_is_not_read_as_a_heading(self):
+        """``<Subject 1> (S1): a woman in red`` is a data row, not a section."""
+
+        brief = "<Subject 1> (S1): a woman in a red dress."
+
+        self.assertEqual(section_heading(brief), "")
+        self.assertEqual(clip_project_context(brief), brief)
 
     def test_a_brief_that_is_only_a_continuation_line_survives(self):
         """A subject row split off by a blank line carries an identity, not a story."""

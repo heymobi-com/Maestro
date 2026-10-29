@@ -11,7 +11,7 @@ That difference is what makes the order matter. The compiler keeps your sections
 you wrote them, but when the text exceeds 3,000 characters it **drops whole sections**,
 lowest priority first. So what you write last is what you can afford to lose.
 
-## Only one section is parsed by code: `SUBJECT LOCK`
+## `SUBJECT LOCK` is the only section whose content is parsed
 
 Everything else is read as a labelled brief by the planning model. `SUBJECT LOCK` is the
 exception: it is parsed, and it is the authority on which participant is which `<Subject N>`.
@@ -23,6 +23,27 @@ The syntax is exact (the parser accepts Spanish or English):
 SUBJECT LOCK (critical, non-negotiable):
 - <Subject 1> is ALWAYS Valeria. <Subject 2> is ALWAYS Ricardo.
 ```
+
+### `DESCRIPTION:` and `CAMERA:` are read by the code too — as sections to withhold
+
+Any line that starts with a `HEADING:` marks a section, and the text may follow on the same
+line or on the next:
+
+```
+DESCRIPTION: a two-host podcast set awakens, the conversation unfolds, the set closes.
+```
+
+is the same section as
+
+```
+DESCRIPTION:
+a two-host podcast set awakens, the conversation unfolds, the set closes.
+```
+
+The headings `DESCRIPTION`, `STORY`, `NARRATIVE`, `PLOT`, `ARC`, `SCRIPT`, `SCENE LIST`,
+`SHOT LIST`, `CLIP PLAN` and `CAMERA` are **kept away from the clips on purpose** — see
+"Creative direction: the whole film versus one clip" below. A subject row such as
+`<Subject 1> (S1): a woman in red` is a data row, not a section.
 
 ## The template
 
@@ -86,3 +107,42 @@ all that travels into each shot's prompt. Measured on a real project: 2,916 char
   it inside one seven-second clip.
 - Weather and atmosphere are a **state**, not an event: "rain falling across the warehouse"
   is a condition to carry; "it starts raining" belongs to the one shot where it changes.
+
+## Creative direction: the whole film versus one clip
+
+A clip prompt is seven seconds of video. Anything that travels into every clip is therefore
+performed *inside every clip* — measured, not theorised: a 2,159-character brief that narrated
+a podcast set awakening and closing made all fourteen rendered clips begin with the two hosts
+entering the studio and the key lights coming up, while each clip's own action said they were
+seated and already talking.
+
+So direct the film at the level where each instruction is true:
+
+| What you want to say | Where it goes | Reaches a clip? |
+| --- | --- | --- |
+| who these people are, their faces and wardrobe | `CHARACTERS AND BINDINGS` | yes, every clip |
+| who lip-syncs, and that no speech may be invented | `AUDIO-DRIVEN GENERATION` | yes, every clip |
+| each voice's pitch and delivery | `VOICES` | yes, every clip |
+| the place, the light, the palette, the style | `AMBIENCE` | yes, every clip |
+| the film's sequence: what happens, in what order | `DESCRIPTION` | **no** — the planner reads it once and distributes it into shots |
+| lens, movement and framing habits | `CAMERA` | **no** — the plan decides the camera per shot |
+
+The rule behind the split: **an invariant travels, a progression does not.** "Cool blue LED
+strip along the desk edge" is true in every shot, so every shot is told it. "The key lights
+bloom up in stages, then the hosts enter and sit down" is true in *one* shot, so only that shot
+is told it — by the plan, as that shot's action.
+
+Two practical consequences:
+
+- If you want a specific beat in a specific clip, say it as that clip's action. The review step
+  before rendering lists every clip with its own prompt and lets you edit it; a beat you place
+  there is exactly where it lands.
+- If you put a beat inside `DESCRIPTION`, you are trusting the planner's distribution. That is
+  the intended workflow for a story, and it is what the 27B does well — it produced fourteen
+  distinct prompts with eighteen distinct camera choices on the run above. What it cannot do is
+  obey "do not perform this progression" while the progression is in front of it.
+
+The honest gap: there is no first-class beat sheet yet — no input that says "beat 3 belongs to
+clip 3". Today the planner owns that mapping. Option 4 in
+[Director-planning-long-project-options.md](./Director-planning-long-project-options.md) is
+that feature, and it is not built.

@@ -2717,6 +2717,198 @@ def _director_reference_label(params: dict, kind: str, index: int) -> str:
     return f"{noun} {index + 1}"
 
 
+def _h3_clip_forbids_generated_speech(clip_plan: dict) -> bool:
+    """Whether this shot has no authored line for any voice reference to read."""
+
+    if not isinstance(clip_plan, dict):
+        return False
+    policy = clip_plan.get("_director_audio_policy")
+    if isinstance(policy, dict) and policy.get("generated_speech_allowed") is False:
+        return True
+    from services.director.h3_dialogue import is_silent_dialogue
+
+    beats = clip_plan.get("_director_dialogue_beats") or []
+    spoken = any(
+        isinstance(beat, dict) and not is_silent_dialogue(beat.get("spoken_text"))
+        for beat in beats
+    )
+    return bool(clip_plan.get("_director_dialogue_manifest_authoritative")) and not spoken
+
+
+_H3_REFERENCE_SPEAKER_RE = re.compile(r"\(\s*S\s*(\d+)\s*\)", re.IGNORECASE)
+
+
+def _h3_speaker_labels(value: object) -> set[str]:
+    return {
+        f"S{int(match.group(1))}"
+        for match in _H3_REFERENCE_SPEAKER_RE.finditer(str(value or ""))
+    }
+
+
+def _h3_reference_speaker_labels(reference: dict) -> set[str]:
+    for key in ("role", "character_name"):
+        labels = _h3_speaker_labels(reference.get(key))
+        if labels:
+            return labels
+    return set()
+
+
+def _h3_shot_labels(clip_plan: dict) -> tuple[set[str], set[str]]:
+    """Return ``(on_screen, speaking)`` participant labels for one shot."""
+
+    on_screen: set[str] = set()
+    for subject in clip_plan.get("_director_subjects_on_screen") or []:
+        if not isinstance(subject, dict):
+            continue
+        # The compiler numbers a participant from its inline (Sx), so that is
+        # the label the shot actually shows. Fall back to the structured fields
+        # only when the planner wrote no inline label.
+        inline = _h3_speaker_labels(subject.get("visual_description"))
+        if inline:
+            on_screen.update(inline)
+        else:
+            on_screen.update(_h3_speaker_labels(subject.get("character_id")))
+            on_screen.update(_h3_speaker_labels(subject.get("speaker_name")))
+    speaking: set[str] = set()
+    for beat in clip_plan.get("_director_dialogue_beats") or []:
+        if isinstance(beat, dict):
+            speaking.update(_h3_speaker_labels(beat.get("speaker_id")))
+    return on_screen, speaking
+
+
+def _h3_references_for_shot(references: list[dict], clip_plan: dict) -> list[dict]:
+    """Keep only the references this shot can actually use.
+
+    H3 maps every supplied reference to a Subject and states that the Subject
+    appears in the shot. A global manifest therefore rendered Bela into Roman's
+    reaction shots as a phantom extra Subject. Identity pictures follow the
+    people on screen; voice references follow the people on screen plus whoever
+    speaks off-camera. Unlabelled references, scene/object images and non-voice
+    audio are left alone, and a filter that would remove every visual reference
+    falls back to the original manifest.
+    """
+
+    if not references or not isinstance(clip_plan, dict):
+        return references
+    on_screen, speaking = _h3_shot_labels(clip_plan)
+    if not on_screen and not speaking:
+        return references
+    visible = on_screen | speaking
+    kept: list[dict] = []
+    locations: list[dict] = []
+    for reference in references:
+        kind = str(reference.get("type") or "").strip().lower()
+        labels = _h3_reference_speaker_labels(reference)
+        if kind == "image":
+            intent = str(reference.get("image_intent") or "identity").strip().lower()
+            if intent in {"scene", "background"}:
+                locations.append(reference)
+                continue
+            if labels and intent == "identity" and not (labels & on_screen):
+                continue
+        elif kind == "audio":
+            intent = str(reference.get("audio_intent") or "voice").strip().lower()
+            if labels and intent == "voice" and not (labels & visible):
+                continue
+        kept.append(reference)
+    kept.extend(_h3_locations_for_shot(locations, clip_plan))
+    if not any(
+        str(reference.get("type") or "").strip().lower() in {"image", "video"}
+        for reference in kept
+    ):
+        return references
+    return kept
+
+
+# Words that name the reference's ROLE rather than the place it shows. A role built from
+# these alone identifies no location, so it cannot be matched to a shot by name.
+_LOCATION_ROLE_FILLER = frozenset({
+    "the", "environment", "location", "shown", "this", "reference", "image", "photo",
+    "named", "supplied", "scene", "place", "setting", "and", "of", "a", "an",
+})
+
+
+def _h3_location_words(reference: dict) -> set[str]:
+    role = str(reference.get("role") or reference.get("name") or "").strip()
+    words = {
+        word for word in re.findall(r"[a-záéíóúüñ0-9'-]+", role.casefold())
+        if len(word) > 2 and word not in _LOCATION_ROLE_FILLER
+    }
+    return words
+
+
+def _h3_shot_text(clip_plan: dict) -> str:
+    return " ".join(
+        str(clip_plan.get(key) or "")
+        for key in ("video_prompt", "_director_h3_source_prompt", "_director_environment")
+    ).casefold()
+
+
+def _h3_locations_for_shot(locations: list[dict], clip_plan: dict) -> list[dict]:
+    """The location reference a shot can actually be in.
+
+    A clip is one continuous shot, so it happens in ONE place, but every supplied
+    location image used to travel into every clip: a 26-clip drama gave its kitchen
+    shot five environments at once -- church, corridor, street, kitchen, forest edge --
+    and the render settled on the village street for all of them, which is what "it
+    never leaves the same static scene" looks like from the director's side.
+
+    A location is chosen by name when the reference declares one, and a project whose
+    locations are all named therefore gets the exact set per shot. A single unnamed
+    location is unambiguous and is kept. Several unnamed ones cannot be told apart, so
+    none is bound and the shot's own environment prose describes the place: a shot in
+    the wrong set is not better than a shot the prompt describes.
+    """
+
+    if not locations:
+        return []
+    if len(locations) == 1:
+        return locations
+    shot_text = _h3_shot_text(clip_plan)
+    if not shot_text.strip():
+        return locations
+    shot_words = set(re.findall(r"[a-záéíóúüñ0-9'-]+", shot_text))
+    matched = [
+        reference for reference in locations
+        if _h3_location_words(reference) & shot_words
+    ]
+    if matched:
+        return matched
+    if all(not _h3_location_words(reference) for reference in locations):
+        digest = str(len(locations))
+        if digest not in _UNNAMED_LOCATIONS_REPORTED:
+            _UNNAMED_LOCATIONS_REPORTED.add(digest)
+            print(
+                f"[MiniMax H3] {len(locations)} location references are supplied with no "
+                "name, and a shot happens in one place. None is bound to a shot: each "
+                "clip's own environment describes its set. Name each location "
+                "reference to select it per shot."
+            )
+    return []
+
+
+_UNNAMED_LOCATIONS_REPORTED: set[str] = set()
+
+
+def _without_voice_references(references: list[dict], clip_plan: dict) -> list[dict]:
+    """Drop voice-timbre references from a shot that forbids generated speech.
+
+    MiniMax H3 vocalizes when a voice reference is present even when the prompt
+    says no character speaks. A b-roll or silent beat must therefore not carry
+    one; image, video, style and sound references stay untouched.
+    """
+
+    if not _h3_clip_forbids_generated_speech(clip_plan):
+        return references
+    return [
+        reference for reference in references or []
+        if not (
+            str(reference.get("type") or "").strip().lower() == "audio"
+            and str(reference.get("audio_intent") or "voice").strip().lower() == "voice"
+        )
+    ]
+
+
 def _director_h3_reference_manifest(
     params: dict,
     clip_image_path: str | None,
@@ -4572,14 +4764,20 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
             "generated_reference_image_filename",
             state.get("generated_reference_image_filename"),
         )
-        gen_params["minimax_h3_references"] = _director_h3_reference_manifest(
-            manifest_params,
-            start_path if uses_shot_images else None,
-            out_dir=clip_out_dir,
-            # The soundtrack slice is exact target audio through
-            # audio_guide/AD above. Only identity, scene, composition, and
-            # optional voice references belong in the Omni manifest.
-            drive_audio_path=None,
+        gen_params["minimax_h3_references"] = _without_voice_references(
+            _h3_references_for_shot(
+                _director_h3_reference_manifest(
+                    manifest_params,
+                    start_path if uses_shot_images else None,
+                    out_dir=clip_out_dir,
+                    # The soundtrack slice is exact target audio through
+                    # audio_guide/AD above. Only identity, scene, composition, and
+                    # optional voice references belong in the Omni manifest.
+                    drive_audio_path=None,
+                ),
+                prompt_plan,
+            ),
+            prompt_plan,
         )
         if not any(
             reference.get("type") in {"image", "video"}
@@ -5228,6 +5426,12 @@ def _director_asset_filename(key: str, index: Optional[int], source: str) -> str
     original = re.sub(
         r"[^A-Za-z0-9_.-]+", "_", os.path.basename(source)
     ).strip("._") or "file"
+    # A source that was already namespaced by an earlier materialize -- a resume, a
+    # rerun, or a preset frozen from a run -- must not be prefixed again. It produced
+    # names such as ``audio_path_audio_path_audio_path_8802b1b4.wav``, and a second
+    # pass grew them further.
+    if original.startswith(f"{stem}{suffix}_") or original.startswith(f"{stem}_"):
+        return original
     return f"{stem}{suffix}_{original}"
 
 
@@ -7399,6 +7603,7 @@ def _run_pipeline(pid: str, resume: bool = False):
             params.get("video_model", ""),
             clip_plans,
             pid=pid,
+            supplied_track=bool(str(params.get("audio_path") or "").strip()),
         )
 
         _update_pipeline(pid, clip_plans=clip_plans, llm_streaming=False)
@@ -8151,6 +8356,19 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
         if not isinstance(written, list):
             analysed = params.get("lyrics")
             written = analysed if isinstance(analysed, list) else None
+        # A written script that parsed to scene direction only has no words to
+        # speak. The planner used to plan it as a dialogue-free podcast and H3
+        # then vocalized gibberish over the voice references, so refuse it here
+        # as well as in the UI: the pipeline can also be started from the queue
+        # or the API.
+        if params.get("_director_script_source") and not any(
+            isinstance(row, dict) and str(row.get("text") or "").strip()
+            for row in (written or [])
+        ):
+            raise ValueError(
+                "The written script has no dialogue rows. Write at least one "
+                "line as NAME: line (S1: line also works) before planning."
+            )
         planner_kwargs.update({
             "clips": planned_clips if planned_clips else None,
             "transcript": written,
@@ -8564,6 +8782,7 @@ def _run_image_generation(pid: str, params: dict, clip_plans: list[dict], out_di
         - clip_keyframes[i] = list of keyframe image filenames for clip i (may be empty)
     """
     _validate_director_models(params, stages=("image",))
+    _refuse_unplanned_clips(pid, clip_plans)
     release_writer(pid, "image render")
     ref_image_path = params.get("reference_image_path")
     character_ref_paths = params.get("character_ref_paths", []) or []
@@ -9027,6 +9246,7 @@ def _preflight_h3_director_prompts(
     prompt_modes: Optional[list[str]] = None,
     durations: Optional[list[float]] = None,
     reference_manifests: Optional[list[list[dict]]] = None,
+    supplied_track: bool = False,
 ) -> list[dict]:
     """Compile official H3 Context-IR and validate it before GPU work."""
 
@@ -9046,6 +9266,7 @@ def _preflight_h3_director_prompts(
         prompt_modes=prompt_modes,
         durations=durations,
         reference_manifests=reference_manifests,
+        supplied_track=supplied_track,
     )
     unrenderable = unrenderable_speaker_lines(clip_plans)
     if unrenderable:
@@ -9178,6 +9399,49 @@ def _strip_baked_acceleration_loras(
     }
 
 
+def _unplanned_placeholder_clips(clip_plans: list[dict]) -> list[int]:
+    """One-based positions of shots whose prompt is a planner placeholder.
+
+    A failed planning batch used to be filled with a placeholder shot so the run
+    could continue. That is how a real 14-clip film came to contain six clips whose
+    only direction was "SETUP: medium shot | ACTION: The visible performance follows
+    the audio | ENDING: The performance continues": the plan had stopped at clip 7
+    and nothing said so.
+    """
+
+    markers = (
+        "the visible performance follows the audio",
+        "the active speaker continues naturally",
+    )
+    found: list[int] = []
+    for index, plan in enumerate(clip_plans or []):
+        if not isinstance(plan, dict):
+            continue
+        text = str(
+            plan.get("_director_h3_source_prompt") or plan.get("video_prompt") or ""
+        ).casefold()
+        if any(marker in text for marker in markers):
+            found.append(index + 1)
+    return found
+
+
+def _refuse_unplanned_clips(pid: str, clip_plans: list[dict]) -> None:
+    """Stop before the GPU if any shot was never planned."""
+
+    unplanned = _unplanned_placeholder_clips(clip_plans)
+    if not unplanned:
+        return
+    label = f"[Pipeline {pid}]" if pid else "[Pipeline]"
+    listing = ", ".join(str(index) for index in unplanned)
+    print(f"{label} refusing to render placeholder shots: clips {listing}")
+    raise RuntimeError(
+        f"{len(unplanned)} shot(s) have no planned direction (clips {listing}). "
+        "These are placeholders left by a planning batch that did not finish, and "
+        "they would render as generic video. Re-plan the project — the batches that "
+        "did plan are saved, so planning continues from there."
+    )
+
+
 def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                           planned_clips: list[dict], clip_images: list[str],
                           clip_keyframes: Optional[list[list[str]]] = None,
@@ -9185,6 +9449,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
     """Generate multi-clip video with optional keyframe injection. Returns list of output filenames."""
     _validate_director_models(params, stages=("video",))
     video_model = params.get("video_model") or "ltx2_22B_distilled_1_1"
+    _refuse_unplanned_clips(pid, clip_plans)
     _audit_prompts_before_generating(pid, clip_plans)
     release_writer(pid, "video render")
     _apply_h3_music_audio_contract(video_model, clip_plans, params)
@@ -9804,7 +10069,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                 "MiniMax H3 Omni Director needs the uploaded soundtrack or "
                 "dialogue audio for this workflow."
             )
-        for clip_image in image_start_paths:
+        for clip_index, clip_image in enumerate(image_start_paths):
             manifest = _director_h3_reference_manifest(
                 params,
                 clip_image if uses_shot_images else None,
@@ -9815,6 +10080,17 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                 # second copy in the manifest only made H3 synthesize a
                 # related, rather than exact, performance.
                 drive_audio_path=None,
+            )
+            # Keep only the references this shot shows or hears: the global
+            # manifest otherwise renders one host into the other's shot as a
+            # phantom Subject. Then drop voice references from a silent shot,
+            # which made H3 vocalize unintelligible speech.
+            manifest = _without_voice_references(
+                _h3_references_for_shot(
+                    manifest,
+                    clip_plans[clip_index] if clip_index < len(clip_plans) else {},
+                ),
+                clip_plans[clip_index] if clip_index < len(clip_plans) else {},
             )
             if not any(
                 reference.get("type") in {"image", "video"}

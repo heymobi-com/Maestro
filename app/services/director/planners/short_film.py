@@ -295,6 +295,97 @@ def _bounded_long_form_durations(
     return [base + (1 if index < remainder else 0) for index in range(count)]
 
 
+def _audio_shot_row_issue(
+    index: int,
+    row: dict,
+    previous_rows: list[dict],
+) -> str:
+    """Refuse a planned clip that names no shot at all.
+
+    Measured on a real 14-clip audio film: the writer returned eight rows, and the
+    eighth was ``"scene_goal": "Shot 8"`` with no action, no dialogue, no subject
+    and no staging. It was accepted as-is, so that clip carried only the project's
+    continuity paragraph and rendered as generic video. A placeholder is not a plan.
+    """
+
+    if not isinstance(row, dict):
+        return f"row {index + 1} is not a JSON object"
+    goal = str(row.get("scene_goal") or "").strip()
+    if not goal:
+        return f"clip {index + 1} has no scene goal"
+    if re.fullmatch(r"shot\s*\d+", goal, re.IGNORECASE):
+        return f"clip {index + 1} returned a placeholder scene goal ({goal!r})"
+    beats = [
+        str(beat or "").strip()
+        for beat in (row.get("action_beats") or [])
+        if str(beat or "").strip()
+    ]
+    if any(
+        "visible performance follows the audio" in beat.casefold()
+        for beat in beats
+    ):
+        return f"clip {index + 1} returned a placeholder action beat"
+    dialogue = [
+        beat for beat in (row.get("dialogue_beats") or [])
+        if isinstance(beat, dict)
+        and str(beat.get("spoken_text") or "").strip()
+    ]
+    subjects = [subject for subject in (row.get("subjects_on_screen") or []) if subject]
+    staging = str(row.get("spatial_setup") or "").strip() or str(
+        row.get("environment") or ""
+    ).strip()
+    if not beats and not dialogue and not subjects and not staging:
+        # A described place on its own is a legitimate establishing shot; this only
+        # refuses a row that says nothing at all.
+        return f"clip {index + 1} names no action, dialogue, or on-screen subject"
+    return _repeated_shot_issue(index, row, previous_rows, beats)
+
+
+def _repeated_shot_issue(
+    index: int,
+    row: dict,
+    previous_rows: list[dict],
+    beats: list[str],
+) -> str:
+    """Refuse a clip that re-performs an earlier clip instead of advancing.
+
+    Measured on a real 26-clip drama: the writer returned twelve rows, and six of
+    them carried the same action beats ("Rosa stands before the wooden table", "The
+    table transforms: the plate, cup, and knife disappear") and the same video_prompt,
+    five more repeated one church shot. Eleven of twenty-six clips were therefore one
+    shot, and 42% of the film had nothing new in it. Each clip covers different
+    transcript lines, so the repetition is not the story advancing -- it is the plan
+    standing still.
+
+    Compared on BOTH halves: two clips may legitimately share a location, a camera and
+    a first-frame pose, but not the identical list of actions and the identical prompt.
+    """
+
+    prompt = " ".join(str(row.get("video_prompt") or "").split()).casefold()
+    here = tuple(beats)
+    if not prompt or not here:
+        return ""
+    for offset, previous in enumerate(reversed(previous_rows), start=1):
+        if not isinstance(previous, dict):
+            continue
+        there = tuple(
+            str(beat or "").strip()
+            for beat in (previous.get("action_beats") or [])
+            if str(beat or "").strip()
+        )
+        if there != here:
+            continue
+        if " ".join(str(previous.get("video_prompt") or "").split()).casefold() != prompt:
+            continue
+        earlier = index + 1 - offset
+        return (
+            f"clip {index + 1} repeats clip {earlier}'s action and video prompt "
+            "verbatim; this clip covers different lines, so write what happens in "
+            "these lines instead of restaging the earlier shot"
+        )
+    return ""
+
+
 def _redact_long_form_dialogue(
     story_description: str,
     locked_dialogue: list[dict[str, Any]],
@@ -6934,6 +7025,11 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
                     ending_beat="The performance continues",
                 ).to_dict()
 
+            def audio_row_issue(
+                index: int, row: dict, previous_rows: list[dict],
+            ) -> Optional[str]:
+                return _audio_shot_row_issue(index, row, previous_rows) or None
+
             serialized = self._run_checkpointed_json_batches(
                 items=clips,
                 batch_size=batch_size,
@@ -6942,6 +7038,10 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
                 progress_label="audio-film",
                 call_batch=call_batch,
                 fallback_factory=fallback_shot,
+                row_validator=audio_row_issue,
+                repair_batch_size=max(1, batch_size // 2),
+                repair_attempts=2,
+                require_planned_rows=True,
             )
             shots = [ShotPlan.from_dict(row) for row in serialized]
             for index, shot in enumerate(shots):

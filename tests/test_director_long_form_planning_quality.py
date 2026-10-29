@@ -36,6 +36,7 @@ if _APP_DIR not in sys.path:
 
 from services import llm_service  # noqa: E402
 from services.director.planners.music_video import MusicVideoPlanner  # noqa: E402
+from services.director.planners.podcast import PodcastPlanner  # noqa: E402
 from services.director.planners.short_film import ShortFilmPlanner  # noqa: E402
 
 
@@ -53,6 +54,7 @@ class BatchSizeTests(unittest.TestCase):
         with patch.object(llm_service, "_active_registry_entry", return_value=SMALL_MODEL):
             self.assertEqual(MusicVideoPlanner.long_form_batch_size(), 8)
             self.assertEqual(ShortFilmPlanner.long_form_batch_size(), 8)
+            self.assertEqual(PodcastPlanner.long_form_batch_size(), 8)
 
     def test_a_larger_model_keeps_the_full_batch(self):
         with patch.object(llm_service, "_active_registry_entry", return_value=LARGE_MODEL):
@@ -66,8 +68,10 @@ class BatchSizeTests(unittest.TestCase):
         with patch.object(llm_service, "_active_registry_entry", side_effect=RuntimeError("no runtime")):
             self.assertEqual(MusicVideoPlanner.long_form_batch_size(), 12)
 
-    def test_both_planners_size_their_batches_for_the_model(self):
-        for source in (_read("music_video.py"), _read("short_film.py")):
+    def test_every_long_form_planner_sizes_its_batches_for_the_model(self):
+        for source in (
+            _read("music_video.py"), _read("short_film.py"), _read("podcast.py"),
+        ):
             with self.subTest(source=source[:40]):
                 self.assertIn("self.long_form_batch_size()", source)
                 self.assertNotIn("batch_size=self._LONG_FORM_BATCH_SIZE", source)
