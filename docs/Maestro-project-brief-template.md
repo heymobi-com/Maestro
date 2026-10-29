@@ -146,3 +146,24 @@ The honest gap: there is no first-class beat sheet yet — no input that says "b
 clip 3". Today the planner owns that mapping. Option 4 in
 [Director-planning-long-project-options.md](./Director-planning-long-project-options.md) is
 that feature, and it is not built.
+
+## Two things a brief can say that make every clip look alike
+
+Both were measured on a 26-clip drama whose 26 prompts were all distinct (highest pairwise
+similarity 0.42) and which still played as one static scene. Nothing was wrong with the writing
+of any single prompt; the brief told every clip the same thing about stillness and place.
+
+- **Stillness written as a habit, not as a beat.** `CAMERA: locked-off and symmetrical in the
+  silences… the frame holds still and lets the absence sit` is a rule the planner applies to
+  every shot it writes, so eleven of those twenty-six prompts say the frame does not move. Say
+  which stages hold still — "Stage 1 and Stage 7 are locked off; everywhere else the character
+  is doing something visible" — and leave the rest to the plan.
+- **A story that never changes room.** If every stage is in the same place, every clip is the
+  same setting with a different line over it: clips 17–26 of that run were ten consecutive shots
+  inside one church.
+
+The plan variety check reports both before anything renders, in the pipeline log and as an
+amber block above the clip list in the composer — see
+[Prompt-audit.md](./Prompt-audit.md#plan-variety-check). It reports; it does not rewrite. Fixing
+it is either an edit to one clip's prompt, or a re-plan with the brief reworded — and re-planning
+keeps the references and the setup.

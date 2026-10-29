@@ -1583,6 +1583,9 @@ def _save_pipeline_state_locked(pid: str) -> bool:
         # or interrupted planning run resume at the first unfinished unit
         # instead of repeating ten or more minutes of successful LLM work.
         "planning_checkpoint": p.get("_planning_checkpoint") or None,
+        # Shots that will look alike on screen. Saved with the plan so the report
+        # survives a Maestro restart and a reloaded project still shows it.
+        "plan_warnings": copy.deepcopy(p.get("plan_warnings") or []),
         "clips": clips,
         "output_files": p.get("output_files", []),
         "total_time_sec": (time.time() - p["created_at"]) if p.get("created_at") else None,
@@ -6995,6 +6998,7 @@ def get_pipeline_status(pid: str, out_dir: str) -> Optional[dict]:
             clip.get("start_image_filename") or "" for clip in clips
         ],
         "output_files": saved.get("output_files", []) or [],
+        "plan_warnings": copy.deepcopy(saved.get("plan_warnings") or []),
         "error": saved.get("error") or (
             "Maestro no longer has a live worker for this Director run."
             if saved_status == "crashed" else None
@@ -7605,6 +7609,10 @@ def _run_pipeline(pid: str, resume: bool = False):
             pid=pid,
             supplied_track=bool(str(params.get("audio_path") or "").strip()),
         )
+        # Reported here, not only at render time: this is the moment before the
+        # review pause, so the composer can show a plan that will repeat itself
+        # while there is still nothing spent on it.
+        _director_prompt_diversity_report(clip_plans, pid=pid)
 
         _update_pipeline(pid, clip_plans=clip_plans, llm_streaming=False)
         _save_pipeline_state(pid)  # Save after planning
@@ -9238,6 +9246,195 @@ def _apply_h3_music_audio_contract(video_model: str, clip_plans: list[dict], par
             ]
 
 
+_PLACE_WORDS = frozenset({
+    "church", "chapel", "altar", "corridor", "kitchen", "street", "square",
+    "forest", "field", "garden", "village", "courtyard", "room", "doorway",
+    "hall", "hallway", "stairs", "stairway", "tower", "cellar", "attic",
+    "bedroom", "basement", "bridge", "road", "cave", "tunnel", "temple",
+    "shrine", "cemetery", "graveyard", "market", "station", "platform",
+    "office", "studio", "stage", "arena", "classroom", "library", "bar",
+    "restaurant", "hospital", "beach", "desert", "mountain", "river", "shore",
+})
+
+
+def _place_words(text: str) -> set[str]:
+    return {
+        word for word in re.findall(r"[a-z]+", str(text or "").casefold())
+        if word in _PLACE_WORDS
+    }
+
+
+def _consecutive_same_setting_runs(
+    settings: list[str],
+    *,
+    threshold: float = 0.55,
+    minimum_length: int = 3,
+) -> list[tuple[int, int]]:
+    """Groups of consecutive clips that never leave one place, as 1-based ranges.
+
+    A viewer reads three shots in a row in the same room as one scene, however
+    differently each prompt words it. Measured on a 26-clip drama, clips 17-24 are
+    eight consecutive shots at the church altar and five of them declare the people
+    in frame "perfectly still", so the film's whole climax looks like one photograph.
+
+    Adjacency is read from the place a setting names, not from its wording: "Stone
+    church interior, wooden pews" and "Church altar, golden light" share no useful
+    words but are the same room. A run is only reported when one place dominates it,
+    so a deliberate move through corridor -> chapel -> kitchen stays unreported.
+    """
+
+    runs: list[tuple[int, int]] = []
+    if len(settings) < minimum_length:
+        return runs
+
+    def similar(left: str, right: str) -> bool:
+        if not left or not right:
+            return False
+        if left.casefold() == right.casefold():
+            return True
+        words = lambda text: {word for word in re.findall(r"[a-z']{2,}", text.casefold())}
+        left_words, right_words = words(left), words(right)
+        union = left_words | right_words
+        jaccard = len(left_words & right_words) / len(union) if union else 0.0
+        ratio = difflib.SequenceMatcher(None, left.casefold(), right.casefold()).ratio()
+        return max(jaccard, ratio) >= threshold
+
+    places = [_place_words(setting) for setting in settings]
+
+    def adjacent(index: int) -> bool:
+        left, right = places[index - 1], places[index]
+        return bool(left & right) or similar(settings[index - 1], settings[index])
+
+    start = 0
+    for index in range(1, len(settings) + 1):
+        if index < len(settings) and adjacent(index):
+            continue
+        if index - start >= minimum_length:
+            counts: dict[str, int] = {}
+            for place in places[start:index]:
+                for word in place:
+                    counts[word] = counts.get(word, 0) + 1
+            dominant = max(counts.values()) if counts else 0
+            identical = all(
+                settings[start].casefold() == settings[other].casefold()
+                for other in range(start, index)
+            )
+            if dominant >= minimum_length or identical:
+                runs.append((start + 1, index))
+        start = index
+    return runs
+
+
+def _director_prompt_diversity_report(clip_plans: list[dict], *, pid: str = "") -> list[str]:
+    """Say, before any GPU time, when the plan will render as the same shot twice.
+
+    Two measured failures motivate this. A 14-clip run repeated one entrance in every
+    clip; a 26-clip drama ended up with half its shots explicitly frozen ("the scene
+    remains visually still", "No movement visible", "they remain perfectly still"), which
+    reads as the same static tableau even though every prompt is worded differently.
+
+    Distinct prompts are not enough on their own, so this reports both: prompts that
+    duplicate an earlier one, and shots where nobody in the frame does anything.
+    """
+
+    import hashlib
+
+    if not clip_plans:
+        return []
+    source = [str(plan.get("_director_h3_source_prompt") or plan.get("video_prompt") or "")
+              for plan in clip_plans]
+    digests = [hashlib.sha1(text.encode("utf-8", "ignore")).hexdigest() for text in source]
+    duplicates: dict[str, list[int]] = {}
+    for index, digest in enumerate(digests):
+        duplicates.setdefault(digest, []).append(index + 1)
+
+    still = re.compile(
+        r"remains? (?:visually )?still|perfectly still|no movement visible|"
+        r"remains? still and empty|stays? (?:still|motionless)|remains? motionless",
+        re.I,
+    )
+    # A sentence carries performance only if someone does something. Ambient
+    # verbs ("the shroud sways", "the fog drifts", "the lamplight moves") are
+    # deliberately absent: a shot built from them has no body in it, which is
+    # what the measured drama had in 13 of 26 clips.
+    action = re.compile(
+        r"\b(turns?|turning|looks?|looking|walks?|walking|crosses?|crossing|kneels?|"
+        r"kneeling|raises?|raising|lifts?|lifting|touches?|touching|enters?|entering|"
+        r"opens?|opening|closes?|closing|drops?|dropping|steps?|stepping|reaches?|"
+        r"reaching|holds?|holding|presses?|pressing|leans?|leaning|dissolves?|"
+        r"dissolving|tears?|tearing|collapses?|climbs?|climbing|runs?|running|"
+        r"sits?|sitting|stands?|standing|drinks?|drinking|prays?|praying|"
+        r"lies?|lying|carries?|carrying|pushes?|pulling|pulls?|takes?|taking)\b",
+        re.I,
+    )
+
+    frozen: list[int] = []
+    motionless: list[int] = []
+    for index, text in enumerate(source):
+        if still.search(text):
+            frozen.append(index + 1)
+        sentences = [part for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
+        if not any(action.search(part) for part in sentences):
+            motionless.append(index + 1)
+
+    settings = [" ".join(str(plan.get("_director_environment") or "").split())
+                for plan in clip_plans]
+    same_setting = _consecutive_same_setting_runs(settings)
+
+    findings: list[str] = []
+    repeated = {digest: shots for digest, shots in duplicates.items() if len(shots) > 1}
+    if repeated:
+        detail = "; ".join(
+            f"clips {', '.join(str(shot) for shot in shots)}" for shots in repeated.values()
+        )
+        findings.append(f"{len(repeated)} prompt(s) repeat another clip verbatim ({detail})")
+    if len(frozen) * 5 >= len(source):
+        findings.append(
+            f"{len(frozen)} of {len(source)} shots declare the frame itself does not move "
+            f"(clips {', '.join(str(shot) for shot in frozen[:12])}"
+            + (", ..." if len(frozen) > 12 else "")
+            + "); clustered, they read as one still image repeated"
+        )
+    if len(motionless) * 4 >= len(source):
+        findings.append(
+            f"{len(motionless)} of {len(source)} shots have no performed action at all - "
+            "nobody in the frame does anything, only light, fog or a prop moves "
+            f"(clips {', '.join(str(shot) for shot in motionless[:12])}"
+            + (", ..." if len(motionless) > 12 else "")
+            + ")"
+        )
+    for first, last in same_setting:
+        findings.append(
+            f"clips {first}-{last} never leave one setting ({settings[first - 1]}); "
+            f"{last - first + 1} consecutive shots in the same place read as one scene"
+        )
+    if findings:
+        header = f"[Pipeline {pid}] " if pid else ""
+        print(header + "Plan variety check:")
+        for finding in findings:
+            print("  - " + finding)
+        print(
+            "  Every clip is a different prompt; these are shots that will still look "
+            "alike on screen. Give the character something to do, or let the brief ask "
+            "for stillness in one or two places instead of throughout."
+        )
+    else:
+        header = f"[Pipeline {pid}] " if pid else ""
+        print(
+            header
+            + f"Plan variety check: {len(set(digests))} distinct shots of {len(source)}, "
+            f"{len(frozen)} declared still, {len(motionless)} without performed action."
+        )
+    if pid:
+        # The composer shows these above the clip list, so a run is stopped before
+        # it spends GPU time on shots that will look the same.
+        try:
+            _update_pipeline(pid, plan_warnings=findings)
+        except Exception:
+            pass
+    return findings
+
+
 def _preflight_h3_director_prompts(
     video_model: str,
     clip_plans: list[dict],
@@ -9454,6 +9651,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
     release_writer(pid, "video render")
     _apply_h3_music_audio_contract(video_model, clip_plans, params)
     _preflight_h3_director_prompts(video_model, clip_plans, pid=pid)
+    _director_prompt_diversity_report(clip_plans, pid=pid)
     video_params = params.get("video_params", {})
     video_loras = params.get("video_loras", {})
     # Mirror of the image-LoRA file-existence filter — see _run_image_generation

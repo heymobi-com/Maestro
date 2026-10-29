@@ -5664,6 +5664,20 @@ def project_subject_lock(project_context: str) -> dict[int, str]:
 
 _H3_SUBJECT_SLOT_RE = re.compile(r"<\s*Subject\s+(\d+)\s*>", re.IGNORECASE)
 _H3_SPEAKER_TOKEN_RE = re.compile(r"\(\s*S\s*(\d+)\s*\)", re.IGNORECASE)
+# A speaker token is a cue, not a name. Rows built by the short-film planner carry
+# their label in ``speaker_name`` ("(S1)"), and printing it as the participant's name
+# produced ``<Subject 1> ((S1))`` and ``<Subject 1> is (S1)`` -- a Subject introduced
+# by the very cue the definition is supposed to explain.
+_H3_BARE_SPEAKER_RE = re.compile(r"^\(?\s*S\s*\d+\s*\)?$", re.IGNORECASE)
+
+
+def _h3_name_not_a_cue(value: Any) -> str:
+    """``value`` unless it is only a speaker cue, which is never a participant's name."""
+
+    text = str(value or "").strip()
+    if not text or _H3_BARE_SPEAKER_RE.match(text):
+        return ""
+    return text
 
 # The participant a row starts with, before any other words: "Ricardo (S2), leaning in".
 _H3_SUBJECT_ROW_NAME_RE = re.compile(
@@ -5849,10 +5863,19 @@ def _ref2va_subject_definitions(
     for position, subject in enumerate(subjects or [], start=1):
         slot, inline_speaker = _planner_subject_slot(subject, position, lock)
         character_id = _normalized_space(_field(subject, "character_id", ""))
-        speaker_name = _normalized_space(_field(subject, "speaker_name", ""))
+        speaker_name = _normalized_space(
+            _h3_name_not_a_cue(_field(subject, "speaker_name", "")),
+        )
+        if not inline_speaker:
+            # The planner may carry the cue in ``speaker_name`` rather than inline in
+            # the description. It is not the participant's name, but the renderer
+            # still needs it paired with this Subject.
+            cue = _H3_SPEAKER_TOKEN_RE.search(str(_field(subject, "speaker_name", "") or ""))
+            if cue:
+                inline_speaker = f"S{int(cue.group(1))}"
         aliases = _ref2va_identity_aliases(subject)
         name = (
-            _clean_h3_metadata(speaker_name or character_id, 80)
+            _clean_h3_metadata(speaker_name, 80)
             or _ref2va_inferred_visible_identity(subject)
             or _h3_identity_label(character_id)
             or next(iter(aliases), f"visible subject {position}")
@@ -5980,13 +6003,14 @@ def _label_ref2va_subjects_in_body(
         label = f"<Subject {slot}>"
         if label in result:
             continue
+        speaker_token = _h3_name_not_a_cue(_field(subject, "speaker_name", ""))
         name = (
-            _h3_identity_label(_field(subject, "speaker_name", ""))
+            _h3_identity_label(speaker_token)
             or _ref2va_inferred_visible_identity(subject)
             or _h3_identity_label(_field(subject, "character_id", ""))
         )
         if (
-            not _h3_identity_label(_field(subject, "speaker_name", ""))
+            not _h3_identity_label(speaker_token)
             and not _ref2va_inferred_visible_identity(subject)
         ):
             # Semantic IDs such as lead_performer need not occur in natural
@@ -6006,7 +6030,10 @@ def _label_ref2va_subjects_in_body(
         pattern = re.compile(rf"(?<![\w>]){re.escape(name)}(?![\w<])", re.IGNORECASE)
         result, count = pattern.subn(f"{label} ({name})", result, count=1)
         if not count:
-            missing.append(f"{label} ({name}) is visible in the described blocking.")
+            # A machine identity ("director_identity_s1") is not something the model
+            # can see in the frame; naming it there only adds noise.
+            described = "" if "_" in name else f" ({name})"
+            missing.append(f"{label}{described} is visible in the described blocking.")
     if missing:
         shot = re.search(r"\[Shot\s+1\]", result, flags=re.IGNORECASE)
         if shot:

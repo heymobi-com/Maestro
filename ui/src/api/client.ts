@@ -974,6 +974,11 @@ export interface PipelineStatus {
    *  active model (e.g. Flux 2 Dev LoRA on Klein 9B). The chat renders
    *  these inline so users see why some selected LoRAs weren't applied. */
   lora_warnings?: string[]
+  /** Shots that will render looking alike even though every prompt differs: the
+   *  plan repeats an earlier prompt verbatim, or a shot declares the frame
+   *  itself does not move / performs no action. Shown above the clip list so a
+   *  run can be replanned before it spends GPU time. */
+  plan_warnings?: string[]
 }
 
 export async function startPipeline(params: Record<string, unknown>): Promise<{ pipeline_id: string }> {

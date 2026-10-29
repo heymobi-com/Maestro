@@ -2,7 +2,7 @@ import { isModelEnabledInScope } from '../../lib/modelVisibility'
 import { DirectorMusicClipLength } from './DirectorMusicClipLength'
 import { DirectorGpuClipLimit } from './DirectorGpuClipLimit'
 import { useState, useCallback, useRef, useMemo, useEffect } from 'react'
-import { Upload, Loader2, Music, RotateCcw, Check, X, ChevronRight, ChevronDown, ImageIcon, Play, Film, Mic, Sparkles, Send, Users, FileText, ListVideo } from 'lucide-react'
+import { Upload, Loader2, Music, RotateCcw, Check, X, ChevronRight, ChevronDown, ImageIcon, Play, Film, Mic, Sparkles, Send, Users, FileText, ListVideo, AlertTriangle } from 'lucide-react'
 import { DEFAULT_DIRECTOR_VIDEO_MODEL, useStore, directorModelUsesFixedMediaStrength, getFamiliesForMode, getModelsForFamily, resolveResolution } from '../../stores/useStore'
 import { fetchCharacters, fetchModelOptions, getFileUrl, ttsEpisode } from '../../api/client'
 import { characterDisplayName } from '../../lib/characters'
@@ -429,6 +429,36 @@ function LlmThinkingStream({ stage }: { stage: string }) {
 /** Collapsed, persistent record of completed LLM streams for one stage.
  *  Replaces the old behavior where the thinking/output box vanished the
  *  moment a stage finished. Default-collapsed so history stays compact. */
+function PlanVarietyNotes() {
+  // Shots that will look alike even though their prompts differ. The backend
+  // reports them from the compiled prompts, before the first clip renders, so
+  // a 26-clip run can be replanned instead of discovered to be one still image
+  // twenty clips later.
+  const warnings = useStore(s => s.pipelineStatus?.plan_warnings) || []
+  if (warnings.length === 0) return null
+  return (
+    <div data-testid="plan-variety-notes" className="space-y-1.5">
+      <div className="flex items-center gap-1.5 text-[11px] text-amber-400/90">
+        <AlertTriangle size={12} />
+        <span>This plan will repeat itself on screen</span>
+      </div>
+      {warnings.map((w, i) => (
+        <div
+          key={i}
+          className="px-2.5 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-[11px] text-text-primary leading-snug"
+        >
+          {w}
+        </div>
+      ))}
+      <p className="text-[10px] text-text-muted leading-snug">
+        Editing a clip&apos;s prompt above, or re-planning with a brief that asks for action
+        instead of stillness, changes this. Planning again keeps your references and
+        setup.
+      </p>
+    </div>
+  )
+}
+
 function LlmLogStage({ stage, label }: { stage: string; label: string }) {
   const log = useStore(s => s.directorLlmLog)
   const [openIdx, setOpenIdx] = useState<number | null>(null)
@@ -1569,6 +1599,7 @@ export function DirectorChat() {
         {/* Video review step */}
         {atStep('review_video') && (
           <SystemBubble>
+            <PlanVarietyNotes />
             <VideoPromptsReview
               clipPlans={clipPlans}
               plannedClips={plannedClips}

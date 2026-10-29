@@ -178,6 +178,45 @@ inconsistencies found". No rule was relaxed to get there: the same classifier st
 reports one Subject in a dress and in a shirt and a vest in one prompt, which is the
 case the reduction would have had to keep.
 
+## Plan variety check
+
+The audit reads each prompt for contradictions. This one reads the plan as a
+viewer would and asks a different question: will these shots look like the same
+shot? It runs at the end of planning, right before the review pause, so the
+answer arrives while nothing has been rendered yet, and again before the first
+clip is submitted.
+
+It reports three things, and only when they cross a line:
+
+| finding | threshold | what it means |
+|---|---|---|
+| prompts repeated verbatim | any | one clip's prompt is another clip's prompt, character for character |
+| the frame declared still | a fifth of the shots or more | the prompt itself says the frame does not move (`remains visually still`, `No movement visible`, `stands perfectly still`). One or two are a choice; eleven of twenty-six is a slideshow |
+| one setting held too long | three or more consecutive clips in one place | adjacent clips whose settings name the same place (church, altar, corridor, kitchen…), with one place dominant across the run. Wording is ignored, so "Stone church interior, wooden pews" and "Church altar, golden light" are one setting |
+
+Distinct prompts are not the same thing as distinct shots. Measured on a real
+26-clip drama: **26 of 26 prompts were distinct** (highest pairwise similarity
+0.42, 25 of 26 settings distinct as text), and the run still looked repetitive,
+because clips 17–26 were all inside one church and 11 clips declared the frame
+itself motionless. That is the failure this check exists to catch, and the reason
+it is measured on settings and stillness rather than on prompt wording.
+
+The findings print in the pipeline log as `Plan variety check:` and are published
+on the pipeline as `plan_warnings`, which the Director composer shows as an amber
+block above the clip list. They are not a failure: the plan renders exactly as it
+was written. Editing a clip's prompt, or re-planning with a brief that asks for
+action instead of stillness, changes them — planning again keeps the references
+and the setup.
+
+Two things in a brief cause this and are worth writing differently:
+
+- **A stillness instruction stated as a general rule.** `CAMERA: locked-off and
+  symmetrical… the frame holds still and lets the absence sit` is applied to every
+  shot the planner writes. Name the one or two stages that hold still and say what
+  the character does everywhere else.
+- **A story told in one room.** If the brief's stages all sit in the same place,
+  every clip is the same setting with a different line over it.
+
 ## Tests
 
 `tests/test_prompt_contradictions.py` holds one case per code plus the guards the
@@ -189,3 +228,10 @@ its finding, that a suggestion is withheld when it would clear nothing, and that
 panel saves through the endpoint the clip cards use. `tests/test_project_prompt_audit.py`
 adds the other two: a draft that really repeats the project's text is named, a draft that
 is only long is not, and a native H3 draft is not read as loose prose.
+
+`tests/test_director_plan_variety.py` holds the variety check: a clean plan stays
+quiet, a repeated prompt is named by clip, a fifth of the shots frozen is reported
+and two in twelve is not, ambient-only motion is not mistaken for performance, an
+action inside an ambient sentence still counts, eight clips at one altar are one
+run while a move through corridor, chapel and kitchen is not, and the findings are
+published on the pipeline and cleared by a clean re-plan.
