@@ -28861,6 +28861,7 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                             publish_finished_clip(
                                 job, int(clip_info["index"]),
                                 latest_clip_file, clip_output_files,
+                                out_dir=out_dir,
                             )
                         except (TypeError, ValueError):
                             pass

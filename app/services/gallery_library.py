@@ -213,10 +213,19 @@ class GalleryLibrary:
                             folder_items.append((entry.name, path, ext, stat, meta))
                 except OSError:
                     continue
-                if any((meta['director_pipeline_id'] and not meta['director_joined']
-                        and meta['director_clip_index'] is None)
+                # Ownership is recovered from the saved plans when a file cannot
+                # name its own Director project. That happens in two shapes: a
+                # sidecar that predates the clip index, and — the one that hid
+                # today's clips — no sidecar at all. A run that was stopped before
+                # its job finished writing sidecars left finished mp4s that named no
+                # project, so the gallery showed them as ordinary renders and the
+                # pencil could not load the project they belong to.
+                if any(not meta['director_pipeline_id']
+                       and ext in (VIDEO_EXTENSIONS | AUDIO_EXTENSIONS)
+                       or (meta['director_pipeline_id'] and not meta['director_joined']
+                           and meta['director_clip_index'] is None)
                        or ('_multiclip' in name.lower() and not meta['director_pipeline_id'])
-                       for name, _, _, _, meta in folder_items):
+                       for name, _, ext, _, meta in folder_items):
                     ownership = self._saved_director_outputs(directory)
                     recovered = []
                     for name, path, ext, stat, meta in folder_items:

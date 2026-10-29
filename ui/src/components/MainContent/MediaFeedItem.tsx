@@ -1043,7 +1043,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
                 {showDetails ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
               </span>
           </button>
-          {params && (
+          {(params || isDirectorChild) && (
             <button
               onClick={() => {
                 setShowActionMenu(false)
@@ -1084,11 +1084,17 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
               <button
                 type="button"
                 role="menuitem"
+                disabled={!params}
                 onClick={() => { setShowLoadMenu(false); handleLoadSettings() }}
-                className="flex w-full flex-col items-start gap-0.5 px-2.5 py-1.5 text-left text-[11px] text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+                title={params
+                  ? 'Load this clip’s own generation settings into Studio'
+                  : 'This clip has no saved generation settings — load the Director project instead'}
+                className="flex w-full flex-col items-start gap-0.5 px-2.5 py-1.5 text-left text-[11px] text-text-secondary hover:bg-bg-hover hover:text-text-primary disabled:opacity-40 disabled:hover:bg-transparent"
               >
                 <span>Studio</span>
-                <span className="text-[10px] text-text-muted">this clip&apos;s generation settings</span>
+                <span className="text-[10px] text-text-muted">
+                  {params ? 'this clip’s generation settings' : 'no saved settings for this clip'}
+                </span>
               </button>
               <button
                 type="button"

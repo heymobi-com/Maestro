@@ -23,6 +23,31 @@ Only Director clips offer the choice, because only they have a project behind th
 plain Studio output asks nothing and loads Studio directly. Once the project is open, use
 **Save setup** in the Setups bar to freeze it for later attempts.
 
+A clip keeps that project even when the run was stopped before the job finished. Full clip
+metadata is written at job completion, so a cancelled run used to leave finished mp4s that
+named no project at all: the gallery showed them as ordinary renders and the pencil offered
+them nothing, while the same clips from a completed run did offer the project. Two things
+now cover that. A minimal ownership sidecar (`director_pipeline_id`, `director_clip_index`,
+`director_artifact_kind`) is written as soon as each clip's file exists, and the gallery also
+recovers ownership from the saved plan for any video in the folder that names no project. The
+completion sidecar still replaces the minimal one with the full recipe when the job finishes.
+
+## Editing a loaded project before rendering again
+
+Once a project is past its setup steps — which is where a loaded project or an Open & Edit
+lands — the Director sidebar carries two collapsible editors, both of them outside the step
+flow:
+
+| Editor | What it lets you change |
+| --- | --- |
+| **References** | the reference photo, the ordered cast and location manifest |
+| **Prompts** | the video prompt of every shot, one box per shot, with its length in characters |
+
+Editing a prompt there writes it into the project that the next **Generate** submits, so a
+single bad shot no longer means re-planning the film. When a loaded setup has no prompts yet
+(a setup never stores a plan), the Prompts editor says so and offers **Plan prompts** instead
+of showing an empty list.
+
 ## Saving a setup
 
 In the **Setups** bar above the Director chat, type a name and press **Save setup**. It

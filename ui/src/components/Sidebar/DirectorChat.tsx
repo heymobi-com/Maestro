@@ -745,6 +745,9 @@ export function DirectorChat() {
   // The reference editor used to exist only up to the style step; a loaded project
   // lands later than that and its cast was frozen.
   const [showReferencesEditor, setShowReferencesEditor] = useState(false)
+  // Same reason, for the prompts: a loaded project could swap its cast but not say
+  // what a shot should show, so fixing one line meant re-planning the whole film.
+  const [showPromptsEditor, setShowPromptsEditor] = useState(false)
   const referenceCount = useStore(s => (
     s.directorH3References?.length
     || s.directorCharacterRefPaths.length
@@ -1350,6 +1353,70 @@ export function DirectorChat() {
                   setReferenceImage={setReferenceImage}
                   disabled={loading}
                 />
+              </div>
+            )}
+          </SystemBubble>
+        )}
+
+        {/* Prompts, editable in the same place as the references and for the same
+            reason: a loaded project lands past the plan step, and fixing one shot's
+            wording must not require re-planning the whole film. */}
+        {pastStep('style') && (
+          <SystemBubble>
+            <button
+              type="button"
+              onClick={() => setShowPromptsEditor(open => !open)}
+              data-testid="director-prompts-toggle"
+              className="flex w-full items-center justify-between gap-2 text-left"
+              aria-expanded={showPromptsEditor}
+            >
+              <span className="text-xs text-text-secondary">
+                Prompts
+                <span className="ml-1.5 text-[10px] text-text-muted">
+                  {clipPlans.length
+                    ? `${clipPlans.length} shot${clipPlans.length === 1 ? '' : 's'} — edit one before rendering`
+                    : 'none yet'}
+                </span>
+              </span>
+              <span className="text-[10px] text-accent-blue">
+                {showPromptsEditor ? 'Hide' : 'Edit'}
+              </span>
+            </button>
+            {showPromptsEditor && (
+              <div className="mt-2 pt-2 border-t border-border/50 space-y-2" data-testid="director-prompts-editor">
+                {clipPlans.length === 0 && (
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10px] text-text-muted leading-snug">
+                      This project has no shot prompts yet. Plan them from the brief, then
+                      edit any shot here.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void (isShortFilm ? shortFilmPlanVideoPrompts() : planVideoPrompts())}
+                      disabled={loading}
+                      className="shrink-0 rounded border border-accent-blue/30 bg-accent-blue/10 px-2 py-1 text-[10px] text-accent-blue hover:bg-accent-blue/20 disabled:opacity-40"
+                    >
+                      Plan prompts
+                    </button>
+                  </div>
+                )}
+                {clipPlans.map((plan, index) => (
+                  <div key={index} className="space-y-1">
+                    <div className="flex items-center justify-between text-[10px] text-text-muted">
+                      <span className="font-medium text-text-secondary">
+                        {isShortFilm ? 'Shot' : 'Clip'} {index + 1}
+                      </span>
+                      <span>{(plan.video_prompt || '').length} chars</span>
+                    </div>
+                    <AutoResizeTextarea
+                      value={plan.video_prompt || ''}
+                      onChange={e => editClipPlan(index, 'video_prompt', e.target.value)}
+                      rows={4}
+                      data-testid={`director-prompt-${index}`}
+                      className="w-full bg-bg-secondary border border-border rounded px-2 py-1.5 text-[11px] text-text-primary resize-none focus:outline-none focus:border-accent-blue transition-colors"
+                    />
+                  </div>
+                ))}
               </div>
             )}
           </SystemBubble>
