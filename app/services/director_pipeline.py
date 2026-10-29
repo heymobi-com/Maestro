@@ -8687,7 +8687,9 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
                 ),
                 "_director_h3_prompt_mode": h3_initial_prompt_mode,
                 "_director_h3_model_family": h3_model_family,
-                "_director_project_context": scene_description,
+                "_director_project_context": _h3_shot_project_context(
+                    scene_description, index, len(clip_plans),
+                ),
                 "_director_environment": getattr(shot, "environment", ""),
                 "_director_audio_policy": metadata.get("_director_audio_policy") or director_audio_policy(scene_description),
                 "_director_dialogue_manifest_authoritative": True,
@@ -9641,6 +9643,79 @@ def _report_h3_manifest_issues(pid: str, params: dict) -> list[str]:
         except Exception:
             pass
     return issues
+
+
+_WORLD_SECTION_RE = re.compile(
+    r"(?im)^[ \t]*(ambience|visual style|style|palette|lighting|world|setting|"
+    r"texture|design|grade|lens|look)\s*[:\-]")
+
+
+def _h3_world_context(brief: str, *, limit: int = 700) -> str:
+    """The brief's world/style sections — never its cast list."""
+
+    text = str(brief or "")
+    lines = text.splitlines()
+    kept: list[str] = []
+    capturing = False
+    for line in lines:
+        if _WORLD_SECTION_RE.match(line):
+            capturing = True
+            kept.append(line.strip())
+            continue
+        if capturing:
+            if re.match(r"(?i)^[ \t]*[A-Z][A-Z0-9 /_\-]{3,}\s*[:\-]", line):
+                # A new labelled section starts: the world block is over.
+                capturing = False
+                continue
+            if line.strip():
+                kept.append(line.strip())
+    world = " ".join(" ".join(kept).split())
+    return world[:limit]
+
+
+def _h3_shot_project_context(brief: str, index: int, total: int) -> str:
+    """What one shot may read from the brief: the world, and its own stage.
+
+    The compiled prompt used to carry the whole brief in every clip — the SUBJECT
+    LOCK, the full cast with each character's wardrobe, and all seven stages. H3 does
+    not need a story bible; it needs one shot. Measured on a real project, clip 1 (a
+    village street at dusk) carried "S3 (Don Aurelio): man, 60 years old … worn
+    yellowish alb, faded chasuble", so the priest was rendered in every scene even
+    after his reference image was removed from the manifest. What repeats in every
+    prompt is what the model draws in every shot.
+
+    The context is now the world/style sections plus the stage this clip's position
+    has reached, and nothing else: no other character's description, no other stage.
+    """
+
+    parts: list[str] = []
+    # The lock's own S1/S2 lines are what number the participants, so they stay; the
+    # "S3-S7 are presence-only" enumeration beside them names every other character
+    # and is dropped with the rest of the cast list. They are re-emitted in the shape
+    # the compiler parses ("<Subject 2> is ALWAYS Figura").
+    for match in re.finditer(
+        r"(?i)subject\s+(\d+)\s+is\s+always\s+([^\n.;]{0,80})", str(brief or "")
+    ):
+        words = [
+            word for word in re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ'\-]+", match.group(2))
+            if word.casefold() not in {"la", "el", "los", "las", "the", "a", "an", "un", "una"}
+        ]
+        if not words:
+            continue
+        parts.append(f"<Subject {int(match.group(1))}> is ALWAYS {words[0]}.")
+    world = _h3_world_context(brief)
+    if world:
+        parts.append(world)
+    try:
+        from services.director.planners.short_film import _brief_stage_list, _stage_for_clip
+
+        stage = _stage_for_clip(_brief_stage_list(brief), index, total)
+    except Exception:
+        stage = None
+    if stage:
+        label = f" ({stage['label']})" if stage["label"] else ""
+        parts.append(f"Stage {stage['number']}{label}: {stage['text'][:400]}")
+    return "\n\n".join(parts)
 
 
 def _director_prompt_diversity_report(
