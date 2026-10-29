@@ -186,9 +186,12 @@ shot? It runs at the end of planning, right before the review pause, so the
 answer arrives while nothing has been rendered yet, and again before the first
 clip is submitted.
 
-It reports three things, and only when they cross a line:
+It reports three things, and only when they cross a line. The line depends on the
+workflow — a podcast is *meant* to hold one studio — so see
+[Scene-policy-per-workflow.md](./Scene-policy-per-workflow.md) for the numbers each
+workflow publishes.
 
-| finding | threshold | what it means |
+| finding | threshold (short film) | what it means |
 |---|---|---|
 | prompts repeated verbatim | any | one clip's prompt is another clip's prompt, character for character |
 | the frame declared still | a fifth of the shots or more | the prompt itself says the frame does not move (`remains visually still`, `No movement visible`, `stands perfectly still`). One or two are a choice; eleven of twenty-six is a slideshow |
@@ -217,6 +220,10 @@ Two things in a brief cause this and are worth writing differently:
 - **A story told in one room.** If the brief's stages all sit in the same place,
   every clip is the same setting with a different line over it.
 
+The planners are told the same thing in their own prompt, per workflow, so this is
+usually fixed before the check finds anything — see
+[Scene-policy-per-workflow.md](./Scene-policy-per-workflow.md).
+
 ## Tests
 
 `tests/test_prompt_contradictions.py` holds one case per code plus the guards the
@@ -234,4 +241,9 @@ quiet, a repeated prompt is named by clip, a fifth of the shots frozen is report
 and two in twelve is not, ambient-only motion is not mistaken for performance, an
 action inside an ambient sentence still counts, eight clips at one altar are one
 run while a move through corridor, chapel and kitchen is not, and the findings are
-published on the pipeline and cleared by a clean re-plan.
+published on the pipeline and cleared by a clean re-plan. It also holds the
+workflow-aware half: the same plan is reported for a short film, silent for a
+podcast, and a music video may hold one stage longer than a short film may.
+`tests/test_scene_policy.py` holds the policy itself — the contract text per
+workflow, the limits, alias and fallback resolution, and that every planner
+interpolates its block into the prompt it sends.

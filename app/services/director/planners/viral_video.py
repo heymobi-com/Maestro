@@ -15,6 +15,7 @@ from ..schema import (
     AssetRef, SubjectRef, DialogueBeat, CameraPlan, AudioPlan,
 )
 from ..policies import build_character_rules_block, build_camera_style_block
+from ..scene_policy import scene_guidance
 from ..dialogue_assignment import assign_rows_to_clips, beats_for_shot, shot_speakers_note
 from ..timeline_planning import (
     batch_note,
@@ -142,6 +143,8 @@ VIRAL VIDEO RULES:
 {char_rules}
 
 {camera_block}
+
+{scene_guidance("viral_video")}
 
 OUTPUT FORMAT — respond with ONLY a JSON array:
 [

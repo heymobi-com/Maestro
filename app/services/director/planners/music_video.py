@@ -21,6 +21,7 @@ from ..schema import (
     SpeakerMapEntry,
 )
 from ..policies import build_character_rules_block, build_camera_style_block
+from ..scene_policy import scene_guidance
 from ..vocal_activity import classify_vocal_intervals
 from ..music_performance import MUSIC_PERFORMANCE_RULES, PERFORMANCE_ROLES
 from ..music_batch_context import whole_timeline_context
@@ -4032,6 +4033,8 @@ MUSIC VIDEO RULES:
   composition, camera and pose.
 
 {physical_continuity_rules}
+
+{scene_guidance("music_video")}
 
 {music_video_rules}
 

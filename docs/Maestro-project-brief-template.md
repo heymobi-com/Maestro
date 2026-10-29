@@ -167,3 +167,8 @@ amber block above the clip list in the composer — see
 [Prompt-audit.md](./Prompt-audit.md#plan-variety-check). It reports; it does not rewrite. Fixing
 it is either an edit to one clip's prompt, or a re-plan with the brief reworded — and re-planning
 keeps the references and the setup.
+
+The planner is also told what kind of film it is writing before it writes anything: a short film
+must keep moving through places and actions, while a podcast is meant to stay in one studio and a
+music video may return to the same stage on purpose. That contract lives in
+[Scene-policy-per-workflow.md](./Scene-policy-per-workflow.md).

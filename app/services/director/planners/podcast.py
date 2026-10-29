@@ -16,6 +16,7 @@ from ..schema import (
     SpeakerMapEntry,
 )
 from ..policies import build_character_rules_block, build_camera_style_block
+from ..scene_policy import scene_guidance
 from ..dialogue_assignment import assign_rows_to_clips, beats_for_shot
 from ..podcast_cast import resolve_cast
 from .base import BasePlanner
@@ -230,6 +231,8 @@ PODCAST PLANNING RULES:
 - Insert B-roll or cutaway for topic transitions or long monologues.
 - Keep visual complexity LOW during crucial discussion points.
 - Speaker changes are natural visual transitions.
+
+{scene_guidance("podcast")}
 
 {cast_section}OUTPUT FORMAT — respond with ONLY a JSON array:
 [

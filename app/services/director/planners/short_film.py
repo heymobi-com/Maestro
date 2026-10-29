@@ -23,6 +23,7 @@ from ..schema import (
     VALID_CONTINUITY_STRATEGIES,
 )
 from ..policies import build_character_rules_block, build_camera_style_block
+from ..scene_policy import scene_guidance
 from ..guide_loader import load_guide as _load_guide_helper
 from ..h3_dialogue import (
     compile_h3_vocal_contract as _inject_h3_vocal_contract,
@@ -7192,11 +7193,18 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
             if uses_generated_images else ""
         )
 
+        # What "well planned" means for this workflow, stated to the writer while it
+        # writes: a short film must keep moving through places and actions, while a
+        # podcast is meant to stay in one studio. See services/director/scene_policy.py.
+        scene_guidance_block = scene_guidance("short_film_audio")
+
         system_prompt = f"""You are a cinematic scene planner for a short film with dialogue audio. Output ONLY the JSON array.
 
 {f"You are given a REFERENCE PHOTO of the characters. Use their visible appearance in all prompts." if has_reference else ""}
 
 {visual_strategy_rules}
+
+{scene_guidance_block}
 
 You are planning visuals for a scene where the AUDIO ALREADY EXISTS. The dialogue is pre-recorded.
 The supplied audio owns every audible voice. dialogue_beats may repeat transcript lines for timing,
@@ -8542,11 +8550,14 @@ SCREENPLAY TO REPAIR:
             if uses_generated_images else ""
         )
 
+        story_scene_guidance_block = scene_guidance("short_film_story")
         pass2_system = f"""You are a film director breaking a screenplay into shots. Output ONLY the JSON array.
 
 {char_rules}
 
 {shot_structure}
+
+{story_scene_guidance_block}
 
 {keyframe_note}
 
@@ -10197,6 +10208,8 @@ SCREENPLAY:
         )
 
         pass2_system = f"""You are a film director breaking a screenplay into shots for MiniMax H3. Output ONLY the JSON array.
+
+{scene_guidance("short_film_story")}
 
 H3 NATIVE SHOT CONTRACT — NON-NEGOTIABLE:
 - Every array item is ONE bounded H3 generation lasting {minimum_seconds:.2f}-{maximum_seconds:.2f} seconds.

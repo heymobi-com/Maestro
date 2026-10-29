@@ -29,10 +29,10 @@ def _plan(prompt: str) -> dict:
     return {"video_prompt": prompt}
 
 
-def _run(plans, pid=""):
+def _run(plans, pid="", kind=""):
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
-        findings = _director_prompt_diversity_report(plans, pid=pid)
+        findings = _director_prompt_diversity_report(plans, pid=pid, kind=kind)
     return findings, buffer.getvalue()
 
 
@@ -216,6 +216,69 @@ class SameSettingRunTests(unittest.TestCase):
         settings = ["Dark background."] * 3 + ["Church altar, golden light."]
 
         findings, _ = _run(self._plans(settings))
+
+        self.assertTrue([f for f in findings if "never leave one setting" in f])
+
+
+class WorkflowAwarenessTests(unittest.TestCase):
+    """The same plan means different things in different workflows."""
+
+    def _plans(self):
+        # Ten consecutive shots in one church, five of them frozen: the measured
+        # 26-clip drama, shortened to the part that matters here.
+        rows = []
+        for number in range(10):
+            still = (
+                "Stone church altar, golden light."
+                if number < 5 else f"Church altar, golden light, angle {number}."
+            )
+            prompt = (
+                f"S1 narrates shot {number} as the altar remains perfectly still."
+                if number < 5
+                else f"Rosa turns toward the altar and kneels, shot {number}."
+            )
+            rows.append({"_director_environment": still, "video_prompt": prompt})
+        return rows
+
+    def test_a_short_film_is_reported_for_one_setting_and_stillness(self):
+        findings, output = _run(self._plans(), kind="short_film_audio")
+
+        self.assertTrue([f for f in findings if "never leave one setting" in f])
+        self.assertTrue([f for f in findings if "frame itself does not move" in f])
+        self.assertIn("short film", output)
+
+    def test_a_podcast_is_not_reported_for_staying_in_its_studio(self):
+        findings, output = _run(self._plans(), kind="podcast")
+
+        self.assertEqual(findings, [])
+        self.assertIn("podcast", output)
+
+    def test_a_podcast_is_still_reported_for_repeating_a_prompt(self):
+        plans = self._plans()
+        plans[1]["video_prompt"] = plans[0]["video_prompt"]
+
+        findings, _ = _run(plans, kind="podcast")
+
+        self.assertTrue([f for f in findings if "verbatim" in f])
+
+    def test_a_music_video_may_hold_one_stage_longer_than_a_short_film(self):
+        # Four consecutive shots in one place: allowed for a music video, which
+        # returns to the same stage on purpose, and a stall for a short film.
+        rows = [{"_director_environment": "Stage, blue light.",
+                 "video_prompt": f"The singer turns and raises the mic, take {n}."}
+                for n in range(4)]
+
+        music, _ = _run(rows, kind="music_video")
+        film, _ = _run(rows, kind="short_film_story")
+
+        self.assertFalse([f for f in music if "never leave one setting" in f])
+        self.assertTrue([f for f in film if "never leave one setting" in f])
+
+    def test_an_unknown_workflow_is_judged_as_a_short_film(self):
+        rows = [{"_director_environment": "Church altar, golden light.",
+                 "video_prompt": "Someone waits in the dark."} for _ in range(4)]
+
+        findings, _ = _run(rows, kind="interpretive_dance")
 
         self.assertTrue([f for f in findings if "never leave one setting" in f])
 

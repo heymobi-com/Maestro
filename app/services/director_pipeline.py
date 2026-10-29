@@ -7612,7 +7612,9 @@ def _run_pipeline(pid: str, resume: bool = False):
         # Reported here, not only at render time: this is the moment before the
         # review pause, so the composer can show a plan that will repeat itself
         # while there is still nothing spent on it.
-        _director_prompt_diversity_report(clip_plans, pid=pid)
+        _director_prompt_diversity_report(
+            clip_plans, pid=pid, kind=str(params.get("pipeline_type") or ""),
+        )
 
         _update_pipeline(pid, clip_plans=clip_plans, llm_streaming=False)
         _save_pipeline_state(pid)  # Save after planning
@@ -9325,7 +9327,12 @@ def _consecutive_same_setting_runs(
     return runs
 
 
-def _director_prompt_diversity_report(clip_plans: list[dict], *, pid: str = "") -> list[str]:
+def _director_prompt_diversity_report(
+    clip_plans: list[dict],
+    *,
+    pid: str = "",
+    kind: str = "",
+) -> list[str]:
     """Say, before any GPU time, when the plan will render as the same shot twice.
 
     Two measured failures motivate this. A 14-clip run repeated one entrance in every
@@ -9335,12 +9342,19 @@ def _director_prompt_diversity_report(clip_plans: list[dict], *, pid: str = "") 
 
     Distinct prompts are not enough on their own, so this reports both: prompts that
     duplicate an earlier one, and shots where nobody in the frame does anything.
+
+    ``kind`` decides what counts as repetition, because the workflows disagree about
+    it: a podcast is meant to stay in one studio with a still frame, and a music video
+    is meant to return to the same stage. See ``director/scene_policy.py``.
     """
 
     import hashlib
 
+    from .director.scene_policy import scene_policy
+
     if not clip_plans:
         return []
+    policy = scene_policy(kind)
     source = [str(plan.get("_director_h3_source_prompt") or plan.get("video_prompt") or "")
               for plan in clip_plans]
     digests = [hashlib.sha1(text.encode("utf-8", "ignore")).hexdigest() for text in source]
@@ -9379,7 +9393,13 @@ def _director_prompt_diversity_report(clip_plans: list[dict], *, pid: str = "") 
 
     settings = [" ".join(str(plan.get("_director_environment") or "").split())
                 for plan in clip_plans]
-    same_setting = _consecutive_same_setting_runs(settings)
+    # A workflow that is meant to stay in one place (podcast) is never reported for
+    # staying in one place; one that must keep moving allows the policy's run length.
+    setting_limit = policy.max_consecutive_same_setting
+    same_setting = (
+        _consecutive_same_setting_runs(settings, minimum_length=setting_limit + 1)
+        if setting_limit > 0 else []
+    )
 
     findings: list[str] = []
     repeated = {digest: shots for digest, shots in duplicates.items() if len(shots) > 1}
@@ -9388,14 +9408,14 @@ def _director_prompt_diversity_report(clip_plans: list[dict], *, pid: str = "") 
             f"clips {', '.join(str(shot) for shot in shots)}" for shots in repeated.values()
         )
         findings.append(f"{len(repeated)} prompt(s) repeat another clip verbatim ({detail})")
-    if len(frozen) * 5 >= len(source):
+    if frozen and len(frozen) > len(source) * policy.stillness_limit:
         findings.append(
             f"{len(frozen)} of {len(source)} shots declare the frame itself does not move "
             f"(clips {', '.join(str(shot) for shot in frozen[:12])}"
             + (", ..." if len(frozen) > 12 else "")
             + "); clustered, they read as one still image repeated"
         )
-    if len(motionless) * 4 >= len(source):
+    if policy.requires_performed_action and len(motionless) * 4 >= len(source):
         findings.append(
             f"{len(motionless)} of {len(source)} shots have no performed action at all - "
             "nobody in the frame does anything, only light, fog or a prop moves "
@@ -9410,20 +9430,27 @@ def _director_prompt_diversity_report(clip_plans: list[dict], *, pid: str = "") 
         )
     if findings:
         header = f"[Pipeline {pid}] " if pid else ""
-        print(header + "Plan variety check:")
+        print(header + f"Plan variety check ({policy.label}):")
         for finding in findings:
             print("  - " + finding)
-        print(
-            "  Every clip is a different prompt; these are shots that will still look "
-            "alike on screen. Give the character something to do, or let the brief ask "
-            "for stillness in one or two places instead of throughout."
-        )
+        if setting_limit > 0:
+            print(
+                "  Every clip is a different prompt; these are shots that will still look "
+                "alike on screen. Give the character something to do, or let the brief ask "
+                "for stillness in one or two places instead of throughout."
+            )
+        else:
+            print(
+                "  This workflow is meant to hold one setting, so staying put is not the "
+                "problem here: repeated prompts are."
+            )
     else:
         header = f"[Pipeline {pid}] " if pid else ""
         print(
             header
-            + f"Plan variety check: {len(set(digests))} distinct shots of {len(source)}, "
-            f"{len(frozen)} declared still, {len(motionless)} without performed action."
+            + f"Plan variety check ({policy.label}): {len(set(digests))} distinct shots "
+            f"of {len(source)}, {len(frozen)} declared still, "
+            f"{len(motionless)} without performed action."
         )
     if pid:
         # The composer shows these above the clip list, so a run is stopped before
@@ -9651,7 +9678,9 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
     release_writer(pid, "video render")
     _apply_h3_music_audio_contract(video_model, clip_plans, params)
     _preflight_h3_director_prompts(video_model, clip_plans, pid=pid)
-    _director_prompt_diversity_report(clip_plans, pid=pid)
+    _director_prompt_diversity_report(
+        clip_plans, pid=pid, kind=str(params.get("pipeline_type") or ""),
+    )
     video_params = params.get("video_params", {})
     video_loras = params.get("video_loras", {})
     # Mirror of the image-LoRA file-existence filter — see _run_image_generation
