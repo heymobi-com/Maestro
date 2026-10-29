@@ -120,6 +120,34 @@ class AudioFilmPromptTests(unittest.TestCase):
         self.assertIn("Describe the ENVIRONMENT in detail for each shot", prompt)
 
 
+class NarrationAuthorityTests(unittest.TestCase):
+    """The clip's own lines outrank the brief's stage inventory."""
+
+    def test_the_prompt_names_the_two_authorities(self):
+        prompt = _audio_film_prompt()
+
+        self.assertIn("NARRATION AUTHORITY", prompt)
+        self.assertIn("its OWN lines", prompt)
+        self.assertIn("not a shot list", prompt)
+
+    def test_the_prompt_forbids_spending_a_later_stage_early(self):
+        prompt = _audio_film_prompt()
+
+        self.assertIn("moves forward only", prompt)
+        self.assertIn("Never spend a stage's set piece", prompt)
+
+    def test_the_prompt_says_what_to_film_when_the_line_is_narration(self):
+        prompt = _audio_film_prompt()
+
+        self.assertIn("film the thing the narration is about", prompt)
+        self.assertIn("Do not substitute an easier scene from the brief", prompt)
+
+    def test_the_prompt_limits_who_appears_in_a_shot(self):
+        prompt = _audio_film_prompt()
+
+        self.assertIn("Only the people the clip's lines name", prompt)
+
+
 class OtherWorkflowPromptTests(unittest.TestCase):
     def test_a_podcast_prompt_asks_for_one_studio(self):
         prompt = _podcast_prompt()

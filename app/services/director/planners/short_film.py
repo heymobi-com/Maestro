@@ -7206,6 +7206,14 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
 
 {scene_guidance_block}
 
+NARRATION AUTHORITY — THE AUDIO DECIDES WHAT EACH SHOT SHOWS (non-negotiable):
+- Each shot covers its OWN lines, listed under "Shots to plan". Those lines are the authority on what appears: who is in frame, what they are doing, and where they are.
+- The project brief is the world, style and cast bible — it is not a shot list. Its stages describe the film as a whole, in the brief's own order. Never spend a stage's set piece (a specific room, a bell between trees, a veil opening, a church altar, a knife in a table) on a shot whose lines are about something else.
+- The film moves forward only. A shot never shows a later stage than the narration has reached, and never returns to an earlier one. When a clip's lines name no place, keep the place the previous shot used and change the subject, the angle or the action instead of inventing a new room.
+- Only the people the clip's lines name — or who must be present for those lines to happen — appear in the shot. A narrator describing the village does not put the whole cast in frame, and a character from a later stage does not appear early.
+- When a line is narration rather than an event ("the children never came out that afternoon", "the fear had been a purification"), film the thing the narration is about: the children, the street, the empty doorway. Do not substitute an easier scene from the brief.
+- Measured failure this replaces: on a real 26-clip drama the opening narration about children trick-or-treating was rendered as the grandmother sitting in a kitchen at dawn with a knife in the table — stage 1 of the brief — and the lines about street lamps flickering were rendered as the bronze bell in the forest. Every shot was filmable and none of them was the shot the narration described.
+
 You are planning visuals for a scene where the AUDIO ALREADY EXISTS. The dialogue is pre-recorded.
 The supplied audio owns every audible voice. dialogue_beats may repeat transcript lines for timing,
 speaker assignment, and acting reference only. Never quote, tag, or request those words as new speech
