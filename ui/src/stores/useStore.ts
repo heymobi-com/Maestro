@@ -1888,7 +1888,7 @@ interface AppState {
   deleteDirectorPreset: (presetId: string) => Promise<void>
   reattachDirectorPipeline: (pid: string, focusDirector?: boolean) => Promise<void>
   deletePipeline: (pid: string) => Promise<void>
-  loadDirectorFromPipeline: (pid: string) => Promise<void>
+  loadDirectorFromPipeline: (pid: string, options?: { clearPlan?: boolean }) => Promise<void>
   directorQueue: DirectorQueueState | null
   directorQueueLoading: boolean
   /** Held entry currently open in the Director editor, if any. */
@@ -5429,11 +5429,12 @@ export const useStore = create<AppState>((set, get) => ({
     })
     get().pollCivitAIDownloads()
   },
-  loadDirectorFromPipeline: async (pid) => {
+  loadDirectorFromPipeline: async (pid, options) => {
     // An explicit Open & Edit owns the Director UI. Prevent a slower startup
     // reconnection from replacing this project after its fetch completes.
     _directorPipelineAttachToken += 1
     _directorPipelinePollToken += 1
+    const clearPlan = Boolean(options?.clearPlan)
     try {
       const pipeline = await api.fetchSavedPipeline(pid)
       const restore = await _buildDirectorRestorePatch(pipeline)
@@ -5446,6 +5447,11 @@ export const useStore = create<AppState>((set, get) => ({
       const videoModel = pipeline.video_model || String(params.video_model || '')
       set(s => ({
         ...restore,
+        // "Fix and plan again" promises an empty plan: the prompts that just failed must
+        // not come back, and the user lands on the step where the brief and the
+        // references are editable. The analysis timeline is kept -- it is what the
+        // audio planner reads, not something that failed.
+        ...(clearPlan ? { directorClipPlans: [], directorStep: 'style' as const } : {}),
         pipelineId: null,
         pipelineStatus: null,
         pipelinePolling: false,

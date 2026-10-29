@@ -712,6 +712,15 @@ export function DirectorChat() {
   const [dragOver, setDragOver] = useState(false)
   const [localBias, setLocalBias] = useState<number | null>(null)
   const [showAnalysisDetails, setShowAnalysisDetails] = useState(false)
+  // The reference editor used to exist only up to the style step; a loaded project
+  // lands later than that and its cast was frozen.
+  const [showReferencesEditor, setShowReferencesEditor] = useState(false)
+  const referenceCount = useStore(s => (
+    s.directorH3References?.length
+    || s.directorCharacterRefPaths.length
+    || s.directorLocationRefPaths.length
+    || (s.directorReferenceImagePath ? 1 : 0)
+  ))
   const sliderRef = useRef<number | null>(null)
   const [chatInput, setChatInput] = useState('')
   const [draftQueuePending, setDraftQueuePending] = useState(false)
@@ -1280,6 +1289,42 @@ export function DirectorChat() {
           </SystemBubble>
         )}
 
+        {/* References, still editable once the project is past the style step.
+            Loading a project lands on plan/review, where the cast used to be frozen:
+            swapping a photo or reordering the manifest is a normal fix before
+            planning again, and it used to require starting over. */}
+        {pastStep('style') && (
+          <SystemBubble>
+            <button
+              type="button"
+              onClick={() => setShowReferencesEditor(open => !open)}
+              data-testid="director-references-toggle"
+              className="flex w-full items-center justify-between gap-2 text-left"
+              aria-expanded={showReferencesEditor}
+            >
+              <span className="text-xs text-text-secondary">
+                References
+                <span className="ml-1.5 text-[10px] text-text-muted">
+                  {referenceCount ? `${referenceCount} loaded — edit before planning again` : 'none loaded'}
+                </span>
+              </span>
+              <span className="text-[10px] text-accent-blue">
+                {showReferencesEditor ? 'Hide' : 'Edit'}
+              </span>
+            </button>
+            {showReferencesEditor && (
+              <div className="mt-2 pt-2 border-t border-border/50" data-testid="director-references-editor">
+                <DirectorReferenceInputs
+                  referenceImage={referenceImage}
+                  refImagePreview={refImagePreview}
+                  setReferenceImage={setReferenceImage}
+                  disabled={loading}
+                />
+              </div>
+            )}
+          </SystemBubble>
+        )}
+
         {/* Error */}
         {error && (
           <div className="text-[11px] text-red-400 bg-red-500/10 rounded px-2 py-1.5 border border-red-500/20">
@@ -1288,10 +1333,12 @@ export function DirectorChat() {
               <div className="mt-1.5 flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => { void openFailedPipeline(failedPipelineId) }}
+                  onClick={() => {
+                    if (failedPipelineId) void openFailedPipeline(failedPipelineId, { clearPlan: true })
+                  }}
                   disabled={reopeningFailedPipeline}
                   className="px-2 py-1 text-[10px] bg-accent-blue/10 border border-accent-blue/30 rounded text-accent-blue hover:bg-accent-blue/20 disabled:opacity-40 transition-colors"
-                  title="Reload this project's brief, references, audio and settings into the editor with the plan cleared, so you can fix the text and plan again"
+                  title="Reload this project's brief, references, audio and settings into the editor with the plan cleared, so you can fix the text or swap a reference and plan again"
                 >
                   {reopeningFailedPipeline ? 'Opening…' : 'Fix and plan again'}
                 </button>
