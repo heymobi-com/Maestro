@@ -130,3 +130,61 @@ se puede incluir de paso.
 Replanificar el mismo proyecto y comparar, por shot: longitud del prompt, similitud con el
 shot anterior y palabras más repetidas. El script usado para el diagnóstico está en
 `logs/_degrade.py` (temporal); se puede guardar en `scripts/` si se quiere repetir.
+
+---
+
+# Segunda ruta del mismo síntoma: el lote que nunca llegó al escritor (28-10-2026)
+
+El síntoma volvió a reportarse con otra forma: *«a medio video dejó de seguir la
+planificación y generó clips sin sentido, genéricos, que inventa cuando no sabe qué hacer»*.
+No era el aplanamiento del tercio medio: era el **relleno de un lote fallido**.
+
+Medido en `outputs/testing/_director_pipeline_e9356d4c.json` (14 clips, `short_film_audio`,
+`minimax_h3_ref2va_fused_turbo`, completado):
+
+| clip | prompt de origen | ¿planificado? |
+|---|---|---|
+| 1-7 | dos hosts, vestuario, atrezo y acción concretos por clip | sí |
+| 8 | solo el párrafo `PROJECT CONTINUITY`, sin acción ni sujetos | **no**: la fila del lote era `"scene_goal": "Shot 8"` y nada más |
+| 9-14 | `SETUP: medium shot \| ACTION: The visible performance follows the audio \| ENDING: The performance continues.` | **no**: `fallback_shot()` para los seis |
+
+La causa está en el propio proyecto, en `llm_drafts[1]`:
+
+```
+LLM request failed: HTTPConnectionPool(host='127.0.0.1', port=58463): Max retries
+exceeded ... WinError 10048: Only one usage of each socket address
+```
+
+Es decir: **un error de socket efímero, no un problema de planificación**. El lote 1
+(clips 9-14) falló en 3,1 s, el helper rellenó los seis clips con `fallback_shot`, el
+pipeline los renderizó y el proyecto terminó en **`completed` sin ningún error visible**.
+
+Además, el lote 0 se aceptó sin validar: el 4B devolvió 8 filas y la octava era un stub
+(`"scene_goal": "Shot 8"`), que también se renderizó.
+
+## Corregido
+
+1. **Reintento de fallos transitorios** (`planners/base.py`): un error que nunca llegó al
+   escritor (`NewConnectionError`, `WinError 10048/10053`, `Connection reset/refused`,
+   `Max retries exceeded`) se reintenta con espera corta antes de darse por vencido. La
+   clase de la excepción no basta: `llm_service` la envuelve en un `RuntimeError`, así que
+   también se mira el texto.
+2. **Un lote sin plan detiene el pase**: `require_planned_rows=True` en los tres skills que
+   renderizan vídeo (short film audio, podcast, viral). Antes de rellenar placeholders se
+   lanza un `RuntimeError` que nombra los clips («global clips 9-14 of 14») y dice qué
+   hacer (replanificar; los lotes ya planificados quedan guardados en el checkpoint). Los
+   planners que no lo piden conservan el relleno acotado de siempre (music video ya usa la
+   vía estricta).
+3. **Fila de relleno rechazada** (`short_film._audio_shot_row_issue`): sólo se rechazan los
+   casos degenerados medidos (`"Shot 8"`, el beat «visible performance follows the audio»,
+   o una fila sin acción, diálogo, sujeto ni lugar). Se repara el clip concreto con una
+   llamada enfocada; el caso medido necesitó **una** reparación.
+4. **El pipeline se niega a renderizar** un plan con prompts de relleno
+   (`_refuse_unplanned_clips`, antes de generar imágenes y antes de generar vídeo), así que
+   aunque llegue un plan así por checkpoint o por API, no se produce un vídeo con clips
+   genéricos.
+
+Verificación: `tests/test_director_batch_integrity.py` (16 pruebas). Sobre el proyecto real
+que falló, `_unplanned_placeholder_clips` señala exactamente los clips 9-14 y
+`_audio_shot_row_issue` rechaza el stub del clip 8.
+

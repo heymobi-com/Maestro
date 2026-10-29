@@ -57,8 +57,11 @@ _DURATION_TEENS = (
 )
 _DURATION_UNITS = rf"(?:{_DURATION_ONES}|{_DURATION_TEENS})"
 _DURATION_TENS = "twenty|thirty|forty|fifty"
+# Spanish number words, so a brief written in the language of the episode can
+# state its length ("una hora", "diez minutos") and be sized like an English one.
+_DURATION_SPANISH = "un|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|quince|veinte|treinta"
 _DURATION_NUMBER_WORD = (
-    rf"(?:{_DURATION_UNITS}|(?:{_DURATION_TENS})(?:[- ](?:{_DURATION_ONES}))?|sixty)"
+    rf"(?:{_DURATION_UNITS}|(?:{_DURATION_TENS})(?:[- ](?:{_DURATION_ONES}))?|sixty|{_DURATION_SPANISH})"
 )
 _DURATION_NUMBER = rf"(?<![\w-])(?P<value>\d+(?:\.\d+)?|{_DURATION_NUMBER_WORD})"
 _DURATION_WORD_VALUES = {
@@ -68,9 +71,24 @@ _DURATION_WORD_VALUES = {
     "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
     "nineteen": 19, "twenty": 20, "thirty": 30, "forty": 40,
     "fifty": 50, "sixty": 60,
+    "un": 1, "uno": 1, "una": 1, "dos": 2, "tres": 3, "cuatro": 4,
+    "cinco": 5, "seis": 6, "siete": 7, "ocho": 8, "nueve": 9, "diez": 10,
+    "once": 11, "doce": 12, "quince": 15, "veinte": 20, "treinta": 30,
 }
-_DURATION_UNIT = r"(?:minutes?|mins?)"
-_DURATION_MEDIA = r"(?:story|dialogue|conversation|monologue|script|speech|narration)"
+_DURATION_UNIT = r"(?:minutes?|mins?|minutos?)"
+_DURATION_MEDIA = (
+    r"(?:story|dialogue|conversation|monologue|script|speech|narration|podcast"
+    r"|historia|di[aá]logo|conversaci[oó]n|mon[oó]logo|guion|gui[oó]n|discurso"
+    r"|narraci[oó]n)"
+)
+# A brief that simply states a length ("unos 8 minutos", "about 10 minutes").
+# Every other pattern required the length to be attached to a medium, so the
+# shortest, most natural way to ask for a long script set no target at all and the
+# writer answered with one paragraph.
+_DURATION_QUALIFIER = (
+    r"(?:about|around|roughly|approximately|approx\.?|some|unos|unas"
+    r"|aproximadamente|cerca\s+de)"
+)
 _DURATION_PATTERNS = (
     # "10-minute story", "10 minutes of dialogue", or "10 minutes long".
     re.compile(
@@ -98,46 +116,75 @@ _DURATION_PATTERNS = (
         rf"{_DURATION_NUMBER}\s*\+?\s*{_DURATION_UNIT}\s+of\s+{_DURATION_MEDIA}\b",
         re.IGNORECASE,
     ),
+    # A qualified length anywhere: "unos 8 minutos", "about 10 minutes".
+    re.compile(
+        rf"\b{_DURATION_QUALIFIER}\s+{_DURATION_NUMBER}\s*\+?\s*{_DURATION_UNIT}\b",
+        re.IGNORECASE,
+    ),
+    # A bare length only where it reads as a statement about the script: at the end
+    # of a clause. "a story about two travelers who waited ten minutes for a train"
+    # is narrative time, not a request, and sizing it at ten minutes was wrong.
+    re.compile(
+        rf"\b{_DURATION_NUMBER}\s*\+?\s*{_DURATION_UNIT}\b(?=\s*(?:[.,;:!?)\]]|$|\n))",
+        re.IGNORECASE,
+    ),
 )
 _HOUR_PATTERNS = (
     re.compile(
-        rf"\b{_DURATION_NUMBER}\s*[- ]?\s*hours?\s*(?:long\b|{_DURATION_MEDIA}\b)",
+        rf"\b{_DURATION_NUMBER}\s*[- ]?\s*(?:hours?|horas?)\s*(?:long\b|{_DURATION_MEDIA}\b)",
         re.IGNORECASE,
     ),
     re.compile(
-        rf"\b{_DURATION_MEDIA}\b\s+(?:for|about|around|in|lasting|lasts?(?:\s+for)?)\s+"
-        rf"(?:about\s+|around\s+)?{_DURATION_NUMBER}\s*hours?\b(?!\s+ago)",
+        rf"\b{_DURATION_MEDIA}\b\s+(?:for|about|around|in|lasting|lasts?(?:\s+for)?|de|dura)\s+"
+        rf"(?:about\s+|around\s+|unos\s+|unas\s+)?{_DURATION_NUMBER}\s*(?:hours?|horas?)\b(?!\s+ago)",
         re.IGNORECASE,
     ),
     re.compile(
-        rf"\b(?:make\s+it|target(?:\s+length)?|aim(?:\s+for)?|duration(?:\s+of)?|runtime(?:\s+of)?)\s*[:=]?\s*"
-        rf"(?:about\s+|around\s+)?{_DURATION_NUMBER}\s*hours?\b",
+        rf"\b(?:make\s+it|target(?:\s+length)?|aim(?:\s+for)?|duration(?:\s+of)?|runtime(?:\s+of)?|duraci[oó]n)\s*[:=]?\s*"
+        rf"(?:about\s+|around\s+|unos\s+|unas\s+)?{_DURATION_NUMBER}\s*(?:hours?|horas?)\b",
+        re.IGNORECASE,
+    ),
+    # A qualified hour anywhere: "about two hours".
+    re.compile(
+        rf"\b{_DURATION_QUALIFIER}\s+{_DURATION_NUMBER}\s*\+?\s*(?:hours?|horas?)\b",
+        re.IGNORECASE,
+    ),
+    # A bare hour only at the end of a clause: "una hora.", "two hours".
+    re.compile(
+        rf"\b{_DURATION_NUMBER}\s*\+?\s*(?:hours?|horas?)\b(?=\s*(?:[.,;:!?)\]]|$|\n))",
         re.IGNORECASE,
     ),
 )
 _SECOND_PATTERNS = (
     re.compile(
-        rf"\b{_DURATION_NUMBER}\s*[- ]?\s*seconds?\s*(?:long\b|{_DURATION_MEDIA}\b)",
+        rf"\b{_DURATION_NUMBER}\s*[- ]?\s*(?:seconds?|segundos?)\s*(?:long\b|{_DURATION_MEDIA}\b)",
         re.IGNORECASE,
     ),
     re.compile(
-        rf"\b{_DURATION_MEDIA}\b\s+(?:for|about|around|lasting|lasts?(?:\s+for)?)\s+"
-        rf"(?:about\s+|around\s+)?{_DURATION_NUMBER}\s*seconds?\b(?!\s+ago)",
+        rf"\b{_DURATION_MEDIA}\b\s+(?:for|about|around|lasting|lasts?(?:\s+for)?|de|dura)\s+"
+        rf"(?:about\s+|around\s+|unos\s+|unas\s+)?{_DURATION_NUMBER}\s*(?:seconds?|segundos?)\b(?!\s+ago)",
         re.IGNORECASE,
     ),
 )
 _WORD_COUNT_RE = re.compile(
-    r"\bword\s+count\s*[:=]\s*(?P<value>\d[\d,]*)\b",
+    r"\b(?:word\s+count|palabras)\s*[:=]?\s*(?P<value>\d[\d,]*)\b",
     re.IGNORECASE,
 )
 _DIRECT_WORDS_RE = re.compile(
     r"\b(?:write|create|produce|aim(?:ing)?\s+for|target(?:ing)?|around|about|"
-    r"approximately|approx\.?|exactly|roughly|at\s+least|up\s+to)\s+"
-    r"(?P<value>\d[\d,]*)\s*(?:spoken\s+)?words?\b",
+    r"approximately|approx\.?|exactly|roughly|at\s+least|up\s+to|escribe|"
+    r"escribir|unas?|aproximadamente)\s+"
+    r"(?P<value>\d[\d,]*)\s*(?:spoken\s+)?(?:words?|palabras?)\b",
     re.IGNORECASE,
 )
 _HYPHENATED_WORDS_RE = re.compile(
-    rf"\b(?P<value>\d[\d,]*)[- ]word\s+(?:{_DURATION_MEDIA})\b", re.IGNORECASE
+    rf"\b(?P<value>\d[\d,]*)[- ](?:word|palabra)\s+(?:{_DURATION_MEDIA})\b",
+    re.IGNORECASE,
+)
+# A brief that only states the size ("1500 palabras") is still a length.
+_BARE_WORDS_RE = re.compile(
+    r"\b(?P<value>\d[\d,]*)\s*(?:spoken\s+)?(?:words?|palabras?)\b",
+    re.IGNORECASE,
 )
 _QUALITATIVE_LONG_RE = re.compile(
     r"\b(?:long(?:[ -]form)?|extended|full[ -]length)"
@@ -285,6 +332,7 @@ def resolve_speech_target(
         _WORD_COUNT_RE.search(source_text)
         or _DIRECT_WORDS_RE.search(source_text)
         or _HYPHENATED_WORDS_RE.search(source_text)
+        or _BARE_WORDS_RE.search(source_text)
     )
     word_count = int(_parse_number(word_match)) if word_match else 0
     if word_count:

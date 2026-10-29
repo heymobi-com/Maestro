@@ -8,6 +8,11 @@ server's own model appears in the list.
 Nothing else has to be configured. The rest of this page is what Maestro changes for it, what it
 cannot do, and how to check it.
 
+Verified on Strata 0.2.7 (engine 0.1.52) on 2026-10-27: `/health` still says `"service": "strata"`,
+`/v1/models` still lists the loaded model with `status` and `auto_load`, and `/v1/unload` and
+`/v1/load` still answer the JSON calls described below. The measurements that follow were taken on
+0.1.41; the 0.2.x server accepts the same fields.
+
 ## What Maestro does differently
 
 Maestro's remote path sends the OpenAI common denominator: it drops the llama.cpp extensions and,
@@ -88,16 +93,17 @@ does not depend on it (the compiled prompts bind identity by name and slot, and 
 handed the picture directly), but the writing does.
 
 So for Director work, keep Strata's vision on. The no-vision mode is for text-only work, and the
-difference in speed is small once the memory is arranged: measured here on real prompts, ~80 tok/s
-with vision against ~84 without, both with 64k context and the 20 GiB arena.
+difference in speed is small once the memory is arranged: measured here on Strata 0.1.41 with real
+prompts, ~80 tok/s with vision against ~84 without, both with 64k context and the 20 GiB arena.
 
 If you do want the images read by a different model, pick a local vision writer — a GGUF with an
 `mmproj` — in the same menu and keep Strata for the text.
 
 ### Turning Strata's own vision on
 
-Strata *can* read pictures; this install answered no when setup asked. The setup log says it in one
-line:
+Since Strata 0.2.x, setup turns images on by default on NVIDIA and AMD cards; this install already
+carries `--vision` and the `vision` block, and 0.2.7 reports `"images": true`. The rest of this
+section is for a 0.1.x install that answered no when setup asked. The setup log said it in one line:
 
 ```
 Images: the model can also read pictures (screenshots, photos, scanned pages). This adds a 0.9 GB ...
@@ -332,3 +338,13 @@ then run any structured step (Director planning, prompt enhancement) and look fo
 JSON rather than an explanation. In Maestro's log, a structured call to Strata reports
 `reasoning=0 tokens`; before this, the same call could report the whole allowance spent on reasoning
 with nothing to show.
+
+## The Strata version in About
+
+The source install carries a small local patch,
+`C:\Strata\local-patches\about-app-version.patch`, that adds a **Strata** row above **Engine** in
+Strata's About tab: `Strata v0.2.7` and `Engine v0.1.52` are the app and the engine, which have
+separate version numbers. The patch touches tracked files, so update with
+`C:\Strata\update-local.ps1` instead of `UPDATE.bat`; the wrapper removes the patch, runs the normal
+git pull and `setup.py --update`, and re-applies it. A plain `UPDATE.bat` will stop at the pull
+while the patch is applied.
