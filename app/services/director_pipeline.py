@@ -2779,6 +2779,18 @@ def _h3_shot_labels(clip_plan: dict) -> tuple[set[str], set[str]]:
     return on_screen, speaking
 
 
+def _h3_reference_name_words(reference: dict) -> set[str]:
+    """The words of an identity reference's role, without its speaker cue."""
+
+    role = _H3_REFERENCE_SPEAKER_RE.sub(" ", str(
+        reference.get("role") or reference.get("character_name") or ""
+    ))
+    return {
+        word for word in re.findall(r"[a-záéíóúüñ0-9'-]+", role.casefold())
+        if len(word) > 2 and word not in _LOCATION_ROLE_FILLER
+    }
+
+
 def _h3_references_for_shot(references: list[dict], clip_plan: dict) -> list[dict]:
     """Keep only the references this shot can actually use.
 
@@ -2789,16 +2801,28 @@ def _h3_references_for_shot(references: list[dict], clip_plan: dict) -> list[dic
     speaks off-camera. Unlabelled references, scene/object images and non-voice
     audio are left alone, and a filter that would remove every visual reference
     falls back to the original manifest.
+
+    Measured on a real 26-clip drama, the manifest was a pile from two projects:
+    five identity pictures with no role at all, `Dona Rosa`, `Los cinco niños del
+    río`, `Veronica` and `Roman (S2)`. Only one carried a speaker cue, so only that
+    one was ever filtered, and every clip bound all five pictures as Subjects --
+    which is why the priest, the shrouded figure and the children came out mixed
+    into scenes whose lines named none of them. An identity picture now also has to
+    be *named* by the shot to be attached, and a picture with no role at all cannot
+    be described, so it is only kept when no other visual reference remains.
     """
 
     if not references or not isinstance(clip_plan, dict):
         return references
     on_screen, speaking = _h3_shot_labels(clip_plan)
-    if not on_screen and not speaking:
+    shot_words = set(re.findall(r"[a-záéíóúüñ0-9'-]+", _h3_shot_text(clip_plan)))
+    if not on_screen and not speaking and not shot_words:
         return references
     visible = on_screen | speaking
     kept: list[dict] = []
     locations: list[dict] = []
+    unnamed: list[dict] = []
+    unidentified: list[dict] = []
     for reference in references:
         kind = str(reference.get("type") or "").strip().lower()
         labels = _h3_reference_speaker_labels(reference)
@@ -2807,11 +2831,22 @@ def _h3_references_for_shot(references: list[dict], clip_plan: dict) -> list[dic
             if intent in {"scene", "background"}:
                 locations.append(reference)
                 continue
-            if labels and intent == "identity" and not (labels & on_screen):
-                continue
+            if intent == "identity":
+                if labels:
+                    if not (labels & on_screen):
+                        continue
+                else:
+                    words = _h3_reference_name_words(reference)
+                    if not words:
+                        unnamed.append(reference)
+                        continue
+                    if not (words & shot_words):
+                        unidentified.append(reference)
+                        continue
         elif kind == "audio":
             intent = str(reference.get("audio_intent") or "voice").strip().lower()
-            if labels and intent == "voice" and not (labels & visible):
+            # Only a shot whose cast is labelled can attribute a voice reference.
+            if labels and intent == "voice" and visible and not (labels & visible):
                 continue
         kept.append(reference)
     kept.extend(_h3_locations_for_shot(locations, clip_plan))
@@ -2819,7 +2854,15 @@ def _h3_references_for_shot(references: list[dict], clip_plan: dict) -> list[dic
         str(reference.get("type") or "").strip().lower() in {"image", "video"}
         for reference in kept
     ):
-        return references
+        # Nothing named survived. Showing one likely protagonist beats binding the
+        # whole pile as Subjects; the manifest order puts the principal character
+        # first in every project measured so far.
+        if unidentified:
+            kept.insert(0, unidentified[0])
+        elif unnamed:
+            kept.insert(0, unnamed[0])
+        else:
+            return references
     return kept
 
 
@@ -7615,6 +7658,7 @@ def _run_pipeline(pid: str, resume: bool = False):
         _director_prompt_diversity_report(
             clip_plans, pid=pid, kind=str(params.get("pipeline_type") or ""),
         )
+        _report_h3_manifest_issues(pid, params)
 
         _update_pipeline(pid, clip_plans=clip_plans, llm_streaming=False)
         _save_pipeline_state(pid)  # Save after planning
@@ -9341,6 +9385,43 @@ _SHOT_MOVE_RE = re.compile(
 )
 
 
+_STAGE_PLACE_WORDS = (
+    "kitchen", "corridor", "hallway", "church", "chapel", "altar", "sacristy",
+    "street", "square", "courtyard", "doorway", "stairs", "staircase", "tower",
+    "forest", "clearing", "field", "meadow", "bedroom", "cellar", "basement",
+    "attic", "garage", "office", "classroom", "stage", "arena", "rooftop",
+    "balcony", "bridge", "riverbank", "shore", "beach", "desert", "cave",
+)
+_PLACE_TRANSITION_RE = re.compile(
+    r"\b(push(?:es)? through[^.]{0,40}\binto\b|walk(?:s)? through[^.]{0,30}\binto\b|"
+    r"enters? the [^.]{0,30}\band (?:continues|walks|moves)\b|"
+    r"transitions? (?:in)?to|moves? (?:in)?to the (?!frame|shot|foreground|background|centre|center)|"
+    r"leads? (?:in)?to the|we (?:then )?see[^.]{0,30}\bthen\b|"
+    r"the camera (?:then )?(?:travels|continues)[^.]{0,40}\binto\b)\b",
+    re.I,
+)
+
+
+def _multi_place_clips(sources: list[str]) -> list[tuple[int, list[str]]]:
+    """Clips that walk through more than one place inside a single bounded shot.
+
+    Measured on a 26-clip drama: one 8-second clip walked villagers down a foggy
+    street, pushed the camera through a doorway into a church, and ended on five
+    children at a golden altar — three places and most of the cast in one shot whose
+    lines were about the grandmother offering the night. A clip is one shot in one
+    place; a location change is the next clip.
+    """
+
+    found: list[tuple[int, list[str]]] = []
+    for index, text in enumerate(sources):
+        lowered = str(text or "").casefold()
+        places = sorted({word for word in _STAGE_PLACE_WORDS if re.search(rf"\b{word}\b", lowered)})
+        moved = bool(_PLACE_TRANSITION_RE.search(lowered))
+        if len(places) >= 3 or (moved and len(places) >= 2):
+            found.append((index + 1, places))
+    return found
+
+
 def _shot_signature(text: str) -> tuple[str, str]:
     """The shot size and the camera move a prompt actually asks for."""
 
@@ -9414,6 +9495,83 @@ def _repeated_camera_runs(
                 runs.append((start + 1, index, size, move))
         start = index
     return runs
+
+
+def _h3_manifest_issues(params: dict) -> list[str]:
+    """References that cannot be matched to this project, named before the render.
+
+    H3 maps every supplied reference to a Subject, so a manifest carrying leftovers
+    from another project puts those pictures into every shot. Measured on a real run:
+    ten references — five with no role at all, `Roman (S2)` and `Veronica` from an
+    earlier project, `Dona Rosa` and `Los cinco niños del río` without any speaker cue —
+    and every clip declared five pictures as present. The result was the priest, the
+    shrouded figure and the children mixed into scenes whose lines named none of them.
+    """
+
+    references = params.get("minimax_h3_references") or []
+    if not isinstance(references, list) or not references:
+        return []
+    brief = " ".join(str(params.get(key) or "") for key in (
+        "scene_description", "director_ui_snapshot",
+    )).casefold()
+    brief_words = set(re.findall(r"[a-záéíóúüñ0-9'-]+", brief))
+    unnamed: list[str] = []
+    foreign: list[str] = []
+    unlabelled: list[str] = []
+    for reference in references:
+        if not isinstance(reference, dict):
+            continue
+        role = str(reference.get("role") or reference.get("character_name") or "").strip()
+        label = f"{role or '(no role)'} · {str(reference.get('filename') or '')[:24]}"
+        if str(reference.get("type") or "").lower() != "image":
+            continue
+        if not role:
+            unnamed.append(label)
+            continue
+        words = _h3_reference_name_words(reference)
+        if words and not (words & brief_words):
+            foreign.append(label)
+        elif words and not _h3_reference_speaker_labels(reference):
+            unlabelled.append(label)
+    issues: list[str] = []
+    if unnamed:
+        issues.append(
+            f"{len(unnamed)} reference image(s) have no role, so H3 cannot describe them "
+            f"and binds them as unknown Subjects in every shot ({', '.join(unnamed[:3])}"
+            + (", ..." if len(unnamed) > 3 else "") + "); give each one a role or remove it"
+        )
+    if foreign:
+        issues.append(
+            f"{len(foreign)} reference image(s) name a character this project's brief "
+            f"never mentions and will appear in shots they do not belong to "
+            f"({', '.join(foreign[:4])}" + (", ..." if len(foreign) > 4 else "") + ")"
+        )
+    if unlabelled:
+        issues.append(
+            f"{len(unlabelled)} identity reference(s) carry no (S1)…(S7) cue, so a shot "
+            "cannot say which participant they are; label them beside the name "
+            f"({', '.join(unlabelled[:4])}" + (", ..." if len(unlabelled) > 4 else "") + ")"
+        )
+    return issues
+
+
+def _report_h3_manifest_issues(pid: str, params: dict) -> list[str]:
+    """Print the reference problems and publish them with the plan warnings."""
+
+    issues = _h3_manifest_issues(params or {})
+    if not issues:
+        return []
+    label = f"[Pipeline {pid}] " if pid else "[Pipeline] "
+    print(label + "Reference manifest check:")
+    for issue in issues:
+        print("  - " + issue)
+    if pid:
+        try:
+            existing = list(_pipelines.get(pid, {}).get("plan_warnings") or [])
+            _update_pipeline(pid, plan_warnings=[*existing, *issues])
+        except Exception:
+            pass
+    return issues
 
 
 def _director_prompt_diversity_report(
@@ -9516,6 +9674,12 @@ def _director_prompt_diversity_report(
         findings.append(
             f"clips {first}-{last} never leave one setting ({settings[first - 1]}); "
             f"{last - first + 1} consecutive shots in the same place read as one scene"
+        )
+    for clip_number, places in _multi_place_clips(source):
+        findings.append(
+            f"clip {clip_number} walks through {len(places)} places in one shot "
+            f"({', '.join(places[:5])}); a clip is one bounded shot in one place, so this "
+            "renders as a montage the audio never asked for"
         )
     # Coverage in a single-set workflow (podcast) is *meant* to repeat its framing, so a
     # camera run is only reported where the plan is also expected to keep moving.
@@ -9782,6 +9946,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
     _director_prompt_diversity_report(
         clip_plans, pid=pid, kind=str(params.get("pipeline_type") or ""),
     )
+    _report_h3_manifest_issues(pid, params)
     video_params = params.get("video_params", {})
     video_loras = params.get("video_loras", {})
     # Mirror of the image-LoRA file-existence filter — see _run_image_generation

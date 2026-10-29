@@ -65,6 +65,34 @@ contract states the difference explicitly:
 Nothing is blocked or rewritten by it. A podcast that holds one studio is not warned
 about holding one studio; a short film that holds one church for ten clips is.
 
+## The cast is per shot, not per project
+
+Two rules keep a character out of a shot it does not belong to.
+
+**In the prompt.** The audio-film planner carries a `NARRATION AUTHORITY` block and a
+`ONE SHOT, ONE MOMENT, ONE PLACE` block. The second one exists because a measured clip
+walked villagers down a street, pushed the camera through a doorway into a church and
+ended on five children at a golden altar — three spaces and most of the cast in one
+eight-second shot whose lines were about the grandmother offering the night.
+
+**In the reference manifest.** H3 maps every supplied reference to a Subject and states
+that the Subject appears in the shot, so a leftover picture is cast into every clip. A
+real manifest carried ten references from two projects: five with no role at all,
+`Roman (S2)` and `Veronica` (characters the brief never mentions), and `Dona Rosa` and
+`Los cinco niños del río` without a speaker cue. Because only one carried `(S2)`, only
+that one could be filtered, and every clip bound five pictures as present — which is how
+the priest, the shrouded figure and the children ended up mixed into scenes whose lines
+named none of them. Two changes:
+
+- an identity picture now has to be *named* by the shot to be attached: a labelled
+  picture follows the shot's labelled cast, an unlabelled one needs its role's words to
+  appear in the shot, and a picture with no role at all is only kept when nothing else
+  survives;
+- `_h3_manifest_issues` names the problems before the render — role-less images, a role
+  the brief never mentions, and identities with no `(S1)…(S7)` cue — in the pipeline log
+  and in the composer's warning block, because no filter can guess that `Veronica` came
+  from another project.
+
 ## Where the brief still wins
 
 The policy is a default, not a veto. A brief that names a single room for a specific

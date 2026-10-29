@@ -7214,6 +7214,14 @@ NARRATION AUTHORITY — THE AUDIO DECIDES WHAT EACH SHOT SHOWS (non-negotiable):
 - When a line is narration rather than an event ("the children never came out that afternoon", "the fear had been a purification"), film the thing the narration is about: the children, the street, the empty doorway. Do not substitute an easier scene from the brief.
 - Measured failure this replaces: on a real 26-clip drama the opening narration about children trick-or-treating was rendered as the grandmother sitting in a kitchen at dawn with a knife in the table — stage 1 of the brief — and the lines about street lamps flickering were rendered as the bronze bell in the forest. Every shot was filmable and none of them was the shot the narration described.
 
+ONE SHOT, ONE MOMENT, ONE PLACE (non-negotiable):
+- One clip is ONE bounded shot in ONE place. Never walk the camera from a street into a church, from a corridor into a kitchen, or through a doorway into another room inside a single clip. A location change is a new clip, and the planner's own segments already give you one.
+- Never stage a montage inside one clip: no "the camera pushes through ... into", no "we then see", no before/after inside the same shot. Pick the single image the audio needs and stay in it.
+- Cast moments are strict. A character appears only where the brief places it and only when its own beat is the one being narrated: the priest exists only inside the opened shroud, the villagers only where they gather, the five children only where they stand. Never bring a character into a shot whose lines are about somebody else, and never keep a character in frame after its moment has passed.
+- A reveal is one subject, not two: a shroud opening to show the person inside is the shroud opening — do not stand the shrouded figure and the revealed person side by side.
+- When the lines are a summary ("the village understood that the children were not disappearing"), choose ONE concrete image that carries it — one face, one doorway, one object — instead of showing the whole cast in two places.
+- Measured failure this replaces: one 8-second clip of that drama walked villagers down a foggy street, pushed the camera through a doorway into a church, and ended on five children at a golden altar, while its lines were about the grandmother offering the night. Three spaces and most of the cast in one shot.
+
 You are planning visuals for a scene where the AUDIO ALREADY EXISTS. The dialogue is pre-recorded.
 The supplied audio owns every audible voice. dialogue_beats may repeat transcript lines for timing,
 speaker assignment, and acting reference only. Never quote, tag, or request those words as new speech
