@@ -196,6 +196,7 @@ workflow publishes.
 | prompts repeated verbatim | any | one clip's prompt is another clip's prompt, character for character |
 | the frame declared still | a fifth of the shots or more | the prompt itself says the frame does not move (`remains visually still`, `No movement visible`, `stands perfectly still`). One or two are a choice; eleven of twenty-six is a slideshow |
 | one setting held too long | three or more consecutive clips in one place | adjacent clips whose settings name the same place (church, altar, corridor, kitchen…), with one place dominant across the run. Wording is ignored, so "Stone church interior, wooden pews" and "Church altar, golden light" are one setting |
+| one framing held too long | three or more consecutive clips with the same shot size and the same camera move | the prompt's own opening ("A medium shot… Camera slow push in") is the same pair each time. Measured on a 26-clip drama after the frozen frames were fixed: clips 18-21 were four `medium shot + push in` in a row, so the climax read as one shot |
 
 Distinct prompts are not the same thing as distinct shots. Measured on a real
 26-clip drama: **26 of 26 prompts were distinct** (highest pairwise similarity
@@ -217,6 +218,12 @@ Two things in a brief cause this and are worth writing differently:
   symmetrical… the frame holds still and lets the absence sit` is applied to every
   shot the planner writes. Name the one or two stages that hold still and say what
   the character does everywhere else.
+- **A camera habit stated as a general rule.** `slow creeping dolly push-ins on S1
+  whenever she is being watched (kitchen, corridor threshold, church)` is obeyed
+  literally: on a real run that line produced seven consecutive `medium shot + push
+  in` shots across the church climax. "Whenever", "always", "every time" and
+  "throughout" make an instruction a habit. Use the move once, where it lands
+  hardest, and let the plan rotate size and move elsewhere.
 - **A story told in one room.** If the brief's stages all sit in the same place,
   every clip is the same setting with a different line over it.
 

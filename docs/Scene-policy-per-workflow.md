@@ -59,6 +59,7 @@ contract states the difference explicitly:
 | prompt repeated verbatim | reported | reported | reported | reported |
 | frame declared motionless | reported above 20% | above 40% | never | above 15% |
 | one setting held | reported from 3 consecutive clips | from 5 | never | from 3 |
+| one framing held | reported from 3 consecutive clips | from 5 | never | from 3 |
 | shot with no performed action | reported | — | — | reported |
 
 Nothing is blocked or rewritten by it. A podcast that holds one studio is not warned

@@ -283,6 +283,75 @@ class WorkflowAwarenessTests(unittest.TestCase):
         self.assertTrue([f for f in findings if "never leave one setting" in f])
 
 
+class CameraRunTests(unittest.TestCase):
+    """The last repetition left after the scene contract: one framing held too long."""
+
+    def _plans(self, framings, setting="Stone village church interior, golden light."):
+        return [
+            {"_director_environment": setting,
+             "video_prompt": f"[Shot 1] {framing}. Rosa turns toward the altar and kneels."}
+            for framing in framings
+        ]
+
+    def test_four_shots_of_one_size_and_move_are_reported(self):
+        findings, _ = _run(self._plans(["A medium shot. Camera slow push in"] * 4))
+
+        runs = [f for f in findings if "frame every shot the same way" in f]
+        self.assertEqual(len(runs), 1)
+        self.assertIn("clips 1-4", runs[0])
+        self.assertIn("medium shot + push in", runs[0])
+
+    def test_rotating_the_size_and_the_move_is_not_reported(self):
+        findings, _ = _run(self._plans([
+            "A wide shot. The camera tracks left",
+            "A medium shot. The camera pushes in slowly",
+            "A close-up. The camera holds steady",
+            "A medium shot. The camera pans right",
+        ]))
+
+        self.assertFalse([f for f in findings if "frame every shot the same way" in f])
+
+    def test_rotating_only_the_size_breaks_the_pair(self):
+        # The contract names the pair: "never repeat the previous shot's size and move
+        # together". A new size on every shot is a real change on screen, so this is
+        # not reported — only an identical pair is.
+        findings, _ = _run(self._plans([
+            "A wide shot. Camera slow push in",
+            "A medium shot. Camera slow push in",
+            "A close-up. Camera slow push in",
+        ]))
+
+        self.assertFalse([f for f in findings if "frame every shot the same way" in f])
+
+    def test_tracks_and_tracking_count_as_one_move(self):
+        # "the camera tracks" and "tracking the figure" are the same instruction.
+        findings, _ = _run(self._plans([
+            "A medium shot. The camera tracks the figure.",
+            "A medium shot. Tracking the figure slowly.",
+            "A medium shot. The camera tracks alongside her.",
+        ]))
+
+        runs = [f for f in findings if "frame every shot the same way" in f]
+        self.assertEqual(len(runs), 1)
+        self.assertIn("medium shot + tracking", runs[0])
+
+    def test_two_shots_are_allowed(self):
+        findings, _ = _run(self._plans(["A medium shot. Camera slow push in"] * 2))
+
+        self.assertFalse([f for f in findings if "frame every shot the same way" in f])
+
+    def test_a_podcast_is_not_reported_for_covering_its_host_identically(self):
+        findings, _ = _run(self._plans(["A medium shot. Camera static"] * 6), kind="podcast")
+
+        self.assertFalse([f for f in findings if "frame every shot the same way" in f])
+
+    def test_a_music_video_tolerates_a_five_clip_run(self):
+        findings, _ = _run(self._plans(["A medium shot. Camera slow push in"] * 4),
+                           kind="music_video")
+
+        self.assertFalse([f for f in findings if "frame every shot the same way" in f])
+
+
 class PersistenceTests(unittest.TestCase):
     def setUp(self):
         self._saved = dict(director_pipeline._pipelines)

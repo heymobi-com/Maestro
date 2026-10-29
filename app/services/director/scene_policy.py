@@ -62,12 +62,12 @@ class ScenePolicy:
 
 
 _SHORT_FILM_GUIDANCE = """SCENE AND SHOT PROGRESSION — SHORT FILM (non-negotiable):
-- A short film is a sequence of places and states, not one image with different lines over it. Each shot must change at least one thing against the shot before it: the place, the time of day, who is in frame, or what the character visibly does.
+- A short film is a sequence of places and states, not one image with different lines over it. Each shot must change at least one thing against the shot before it: the place, the time of day, who is in frame, what the character visibly does, or how the camera frames it.
 - Never place more than two consecutive shots in the same setting. A third shot in one place has to be a genuinely new angle on new business (someone arrives, leaves, crosses, opens, or turns), and a whole film may hold one setting only for its single climax.
+- Inside a long beat in one place, rotate the shot: change the size AND the move from clip to clip (wide establishing, then medium, then close-up, then an insert of a hand or an object), and give somebody new business. Never repeat the previous shot's size and move together, and never restate the same tableau with different words — two clips that both say "the children stand at the altar as their faces glow" are one clip.
 - Stillness is an accent, never the default: at most one shot in five may state that the frame does not move, and never two in a row. Every other shot names a physical action somebody performs. Standing, waiting, watching, and "remains still" are not actions.
-- Change the camera's relation to the subject from shot to shot — size and axis — and never repeat the previous shot's framing and movement together.
 - Variety must be caused, never decorative: a new place has to come from an arrival, a departure, a discovery, or a consequence in the shot before it. Changing the framing, who is in frame, or what the character is doing needs no excuse and is always available, so use those before you invent a location.
-- When the brief's own text asks for stillness or one location throughout, honour it where it names a specific beat and treat it as that beat, not as the rule for every shot."""
+- A camera or stillness rule qualified with "whenever", "always", "every time" or "throughout" is a habit, not a beat. Apply it once, where it lands hardest, then rotate. When the brief details a specific beat, honour it there and treat it as that beat."""
 
 _MUSIC_VIDEO_GUIDANCE = """SCENE AND SHOT PROGRESSION — MUSIC VIDEO (non-negotiable):
 - Cut to the music: a new visual idea at each section boundary (intro, verse, chorus, bridge), not a new location for every clip.

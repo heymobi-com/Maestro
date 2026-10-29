@@ -9327,6 +9327,95 @@ def _consecutive_same_setting_runs(
     return runs
 
 
+_SHOT_SIZE_RE = re.compile(
+    r"\b(extreme close[- ]up|close[- ]up|medium close[- ]up|medium shot|medium wide|"
+    r"wide shot|full shot|long shot|establishing shot|over[- ]the[- ]shoulder|"
+    r"top[- ]down|aerial shot|two[- ]shot)\b",
+    re.I,
+)
+_SHOT_MOVE_RE = re.compile(
+    r"\b(push(?:es)?[- ]in|pull(?:s)?[- ]back|dolly(?:ing)?|pan(?:s|ning)?|tilt(?:s)?|"
+    r"orbit(?:s|ing)?|tracking|track(?:s)?|handheld|crane|zoom(?:s|ing)?|"
+    r"locked[- ]off|static|steadicam|whip)\b",
+    re.I,
+)
+
+
+def _shot_signature(text: str) -> tuple[str, str]:
+    """The shot size and the camera move a prompt actually asks for."""
+
+    sized = [match.group(1).casefold() for match in _SHOT_SIZE_RE.finditer(text or "")]
+    moved = [match.group(1).casefold() for match in _SHOT_MOVE_RE.finditer(text or "")]
+    # First mention wins: prompts open with their own framing ("Wide shot, low angle, ...").
+    size = sized[0] if sized else ""
+    move = moved[0] if moved else ""
+    # One move, one label: "tracks"/"tracking" and "pushes in"/"push in" are the same
+    # instruction to the renderer, so they must not split a run in two.
+    move = _MOVE_SYNONYMS.get(move, move)
+    return size, move
+
+
+_MOVE_SYNONYMS = {
+    "track": "tracking",
+    "tracks": "tracking",
+    "tracking": "tracking",
+    "push in": "push in",
+    "pushes in": "push in",
+    "pull back": "pull back",
+    "pulls back": "pull back",
+    "pan": "pan",
+    "pans": "pan",
+    "panning": "pan",
+    "tilt": "tilt",
+    "tilts": "tilt",
+    "orbit": "orbit",
+    "orbits": "orbit",
+    "orbiting": "orbit",
+    "zoom": "zoom",
+    "zooms": "zoom",
+    "zooming": "zoom",
+    "static": "static",
+    "locked-off": "static",
+    "dolly": "dolly",
+    "dolling": "dolly",
+}
+
+
+def _repeated_camera_runs(
+    sources: list[str],
+    *,
+    minimum_length: int = 3,
+) -> list[tuple[int, int, str, str]]:
+    """Consecutive clips that frame the shot the same way and move the camera the same way.
+
+    Measured on a 26-clip drama after the scene contract stopped the frozen frames:
+    stillness dropped to 1 shot of 26 and the settings followed the script's stages, but
+    clips 18-24 were seven consecutive "medium shot, push in" inside the church, and
+    clips 15-17 were three "medium shot, tracking". A viewer reads that as one shot held
+    too long, however different the words are.
+    """
+
+    runs: list[tuple[int, int, str, str]] = []
+    if len(sources) < minimum_length:
+        return runs
+    signatures = [_shot_signature(text) for text in sources]
+    start = 0
+    for index in range(1, len(sources) + 1):
+        same = (
+            index < len(sources)
+            and signatures[index] == signatures[index - 1]
+            and any(signatures[index])
+        )
+        if same:
+            continue
+        if index - start >= minimum_length:
+            size, move = signatures[start]
+            if size or move:
+                runs.append((start + 1, index, size, move))
+        start = index
+    return runs
+
+
 def _director_prompt_diversity_report(
     clip_plans: list[dict],
     *,
@@ -9428,6 +9517,18 @@ def _director_prompt_diversity_report(
             f"clips {first}-{last} never leave one setting ({settings[first - 1]}); "
             f"{last - first + 1} consecutive shots in the same place read as one scene"
         )
+    # Coverage in a single-set workflow (podcast) is *meant* to repeat its framing, so a
+    # camera run is only reported where the plan is also expected to keep moving.
+    if setting_limit > 0:
+        for first, last, size, move in _repeated_camera_runs(
+            source, minimum_length=max(3, setting_limit + 1),
+        ):
+            framing = " + ".join(part for part in (size, move) if part)
+            findings.append(
+                f"clips {first}-{last} frame every shot the same way ({framing}); "
+                f"{last - first + 1} consecutive shots with one size and one move read as "
+                "one shot held too long - rotate the size and the move"
+            )
     if findings:
         header = f"[Pipeline {pid}] " if pid else ""
         print(header + f"Plan variety check ({policy.label}):")
