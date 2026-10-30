@@ -302,6 +302,75 @@ _STAGE_HEADING_RE = re.compile(
 )
 
 
+_DESCRIPTION_SECTION_RE = re.compile(
+    r"(?im)^[ \t]*(description|story|synopsis|plot)\s*:\s*"
+)
+
+
+def _brief_description_section(brief: str) -> str:
+    """The brief's DESCRIPTION prose, without the sections around it."""
+
+    text = str(brief or "")
+    match = _DESCRIPTION_SECTION_RE.search(text)
+    if not match:
+        return ""
+    rest = text[match.end():]
+    stop = re.search(
+        r"(?im)^[ \t]*(negative|ambience|camera|characters?[^\n:]*|subject lock|"
+        r"voices?|audio[^\n:]*|style|dialogue[^\n:]*)\s*:",
+        rest,
+    )
+    return rest[:stop.start()] if stop else rest
+
+
+def _beats_from_description(brief: str) -> list[dict]:
+    """Beats of a brief written as one paragraph, in the order the brief tells them.
+
+    The first pass of this feature read ``Stage 1 (fog gathering):`` headings, and a
+    brief rewritten without them ("One night in Valdecuna. Dawn-grey kitchen: …;
+    cobbled street: …; broken bronze bell: …") then had no stages at all — every shot
+    was free to invent, which is what characters appearing and disappearing looks
+    like. A beat is a sentence here, and the film still moves through them in order.
+    """
+
+    prose = " ".join(_brief_description_section(brief).split())
+    if not prose:
+        return []
+    sentences = [
+        part.strip(" .;")
+        for part in re.split(r"(?<=[.!?])\s+", prose)
+        if len(part.strip(" .;")) > 12
+    ]
+    # A one-line sentence with no beat in it ("One night in Valdecuna.") is the
+    # film's setting, not a shot: it belongs with the beat that follows it.
+    merged: list[str] = []
+    carry = ""
+    for sentence in sentences:
+        if carry:
+            sentence = f"{carry} {sentence}"
+            carry = ""
+        words = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ']+", sentence)
+        if len(words) < 6 and ":" not in sentence:
+            carry = sentence
+            continue
+        merged.append(sentence)
+    if carry:
+        if merged:
+            merged[-1] = f"{merged[-1]} {carry}"
+        else:
+            merged.append(carry)
+    sentences = merged
+    beats: list[dict] = []
+    for position, sentence in enumerate(sentences, start=1):
+        label_words = re.split(r"[:.]", sentence, maxsplit=1)[0]
+        beats.append({
+            "number": position,
+            "label": " ".join(label_words.split()[:4]),
+            "text": sentence[:400],
+        })
+    return beats
+
+
 def _brief_stage_list(brief: str) -> list[dict]:
     """Split a brief's DESCRIPTION into its ordered stages.
 
@@ -338,7 +407,10 @@ def _brief_stage_list(brief: str) -> list[dict]:
             "label": (match.group(2) or "").strip(),
             "text": body[:400],
         })
-    return stages
+    if stages:
+        return stages
+    # No numbered stages: the description's own sentences are the beats.
+    return _beats_from_description(brief)
 
 
 def _stage_for_clip(stages: list[dict], index: int, total: int) -> Optional[dict]:

@@ -94,5 +94,53 @@ class StageAssignmentTests(unittest.TestCase):
         self.assertIsNone(_stage_for_clip(self.stages, 0, 0))
 
 
+class ParagraphBriefTests(unittest.TestCase):
+    """A brief rewritten without stage labels still has ordered beats."""
+
+    BRIEF = (
+        "AMBIENCE:\n"
+        "Stone mountain village at the edge of a dark forest, fog without rain.\n"
+        "\n"
+        "DESCRIPTION:\n"
+        "One night in Valdecuna. Dawn-grey kitchen: Rosa before a wooden table. "
+        "Cobbled street: children in paper masks, streetlamps flicker in unison. "
+        "Broken bronze bell swaying between twisted trees, blue moonlight. "
+        "Narrow stone corridor: the black door ajar; the Figure enters behind Rosa. "
+        "The Figure's shroud opens, revealing Don Aurelio. Small village church: "
+        "candles lit, Rosa kneels. Rosa's corridor again: the door shut, the clock ticking.\n"
+        "\n"
+        "NEGATIVE:\n"
+        "No extra characters.\n"
+    )
+
+    def test_the_description_becomes_ordered_beats(self):
+        beats = _brief_stage_list(self.BRIEF)
+
+        self.assertGreaterEqual(len(beats), 5)
+        self.assertEqual([b["number"] for b in beats], list(range(1, len(beats) + 1)))
+
+    def test_the_setting_sentence_joins_the_beat_that_follows_it(self):
+        beats = _brief_stage_list(self.BRIEF)
+
+        self.assertIn("Dawn-grey kitchen", beats[0]["text"])
+        self.assertNotEqual(beats[0]["text"], "One night in Valdecuna")
+
+    def test_the_negative_section_is_not_a_beat(self):
+        beats = _brief_stage_list(self.BRIEF)
+
+        self.assertFalse([b for b in beats if "No extra characters" in b["text"]])
+
+    def test_the_priest_appears_in_one_beat_only(self):
+        beats = _brief_stage_list(self.BRIEF)
+
+        self.assertEqual(len([b for b in beats if "Aurelio" in b["text"]]), 1)
+
+    def test_progression_stays_forward(self):
+        beats = _brief_stage_list(self.BRIEF)
+        seen = [_stage_for_clip(beats, index, 26)["number"] for index in range(26)]
+
+        self.assertEqual(seen, sorted(seen))
+
+
 if __name__ == "__main__":
     unittest.main()
