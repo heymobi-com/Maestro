@@ -303,7 +303,7 @@ _STAGE_HEADING_RE = re.compile(
 
 
 _DESCRIPTION_SECTION_RE = re.compile(
-    r"(?im)^[ \t]*(description|story|synopsis|plot)\s*:\s*"
+    r"(?im)^[ \t]*(description|story|synopsis|plot)\b[^\n:]{0,80}:\s*"
 )
 
 
@@ -383,7 +383,12 @@ def _brief_stage_list(brief: str) -> list[dict]:
     """
 
     text = str(brief or "")
-    matches = list(_STAGE_HEADING_RE.finditer(text))
+    # The stages live in DESCRIPTION. A brief also mentions them elsewhere -- "Stage 1:
+    # locked-off" as a camera bullet, "appears only in Stage 5" in the cast rules -- and
+    # reading those first turned the camera list into the film's structure.
+    section = _brief_description_section(text)
+    scope = section if section.strip() else text
+    matches = list(_STAGE_HEADING_RE.finditer(scope))
     # A brief also *mentions* stages in its cast rules ("he appears only inside the
     # opened shroud in Stage 5"), so the sequence is taken from Stage 1 forward and
     # only while the numbers keep counting.
@@ -400,8 +405,8 @@ def _brief_stage_list(brief: str) -> list[dict]:
         expected += 1
     stages: list[dict] = []
     for position, match in enumerate(ordered):
-        end = ordered[position + 1].start() if position + 1 < len(ordered) else len(text)
-        body = " ".join(text[match.end():end].split())
+        end = ordered[position + 1].start() if position + 1 < len(ordered) else len(scope)
+        body = " ".join(scope[match.end():end].split())
         stages.append({
             "number": int(match.group(1)),
             "label": (match.group(2) or "").strip(),

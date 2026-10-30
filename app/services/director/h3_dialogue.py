@@ -5647,6 +5647,9 @@ def _reference_relationships(
 _SUBJECT_LOCK_RE = re.compile(
     r"<Subject\s*(\d+)>\s*(?:es\s+SIEMPRE|is\s+ALWAYS)\s+"
     r"[<\"'“‘*]?"
+    # "la Figura del Purgatorio" names the Figure, not "la": the article is not part
+    # of the participant, and a lock read as {2: "la"} matches no row at all.
+    r"(?:(?:la|el|los|las|the|un|una|a|an)\s+)?"
     r"([A-Za-z\u00c1\u00c9\u00cd\u00d3\u00da\u00dc\u00d1"
     r"\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc\u00f1]+)",
     re.IGNORECASE,
