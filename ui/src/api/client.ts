@@ -981,6 +981,90 @@ export interface PipelineStatus {
   plan_warnings?: string[]
 }
 
+/** One mechanical objection to a freeform brief, in the terms the planner uses. */
+export interface BriefFinding {
+  code: string
+  severity: 'error' | 'warning' | 'info'
+  message: string
+  fix: string
+}
+
+export interface BriefReport {
+  kind: string
+  label: string
+  findings: BriefFinding[]
+  sections: string[]
+  cast: string[]
+  stages: number
+  chars: number
+  subject_lock?: Record<string, string>
+}
+
+export interface BriefStructureResult {
+  brief: string
+  method: 'llm' | 'normalized'
+  before: BriefReport
+  after: BriefReport
+  resolved: string[]
+  remaining: string[]
+}
+
+/** Check a freeform brief without loading a model. */
+export async function reviewDirectorBrief(input: {
+  brief: string
+  pipelineType?: string
+  clipCount?: number
+  transcriptSpeakers?: string[]
+  hasAudio?: boolean
+}): Promise<BriefReport> {
+  const res = await fetch(`${BASE}/api/v1/director/brief/review`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      brief: input.brief,
+      pipeline_type: input.pipelineType || '',
+      clip_count: input.clipCount || 0,
+      transcript_speakers: input.transcriptSpeakers || [],
+      has_audio: Boolean(input.hasAudio),
+    }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Brief review failed' }))
+    throw new Error(err.detail || err.error || 'Brief review failed')
+  }
+  return res.json()
+}
+
+/** Rewrite a freeform brief into the shape the workflow's planner reads. */
+export async function structureDirectorBrief(input: {
+  brief: string
+  pipelineType?: string
+  clipCount?: number
+  transcriptSpeakers?: string[]
+  characters?: string[]
+  hasAudio?: boolean
+  useLlm?: boolean
+}): Promise<BriefStructureResult> {
+  const res = await fetch(`${BASE}/api/v1/director/brief/structure`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      brief: input.brief,
+      pipeline_type: input.pipelineType || '',
+      clip_count: input.clipCount || 0,
+      transcript_speakers: input.transcriptSpeakers || [],
+      characters: input.characters || [],
+      has_audio: Boolean(input.hasAudio),
+      use_llm: input.useLlm !== false,
+    }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Brief structuring failed' }))
+    throw new Error(err.detail || err.error || 'Brief structuring failed')
+  }
+  return res.json()
+}
+
 export async function startPipeline(params: Record<string, unknown>): Promise<{ pipeline_id: string }> {
   const res = await fetch(`${BASE}/api/v1/director/pipeline/start`, {
     method: 'POST',

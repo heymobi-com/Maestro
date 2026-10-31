@@ -10970,6 +10970,25 @@ async def plan_audio_structure(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _brief_generate(prompt, system_prompt, max_new_tokens):
+    """The LLM entry point the brief routes use (kept here so the router stays pure)."""
+    from services import llm_service
+
+    _ensure_llm_loaded()
+    return llm_service.generate(
+        prompt=prompt,
+        system_prompt=system_prompt,
+        max_new_tokens=max_new_tokens,
+        temperature=0.3,
+        enable_thinking=False,
+    )
+
+
+from services.director.brief_api import create_router as _create_brief_router
+
+api.include_router(_create_brief_router(generate=_brief_generate))
+
+
 @api.post("/api/v1/director/classify-sections")
 async def director_classify_sections(request: Request):
     """Use LLM to reclassify section labels based on lyrics content."""

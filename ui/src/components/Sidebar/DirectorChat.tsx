@@ -14,6 +14,7 @@ import { OmniReferenceSection } from './OmniReferenceSection'
 import { GalleryInput } from '../shared/GalleryInput'
 import { InfoTooltip } from './InfoTooltip'
 import { ProjectBriefTemplate } from './ProjectBriefTemplate'
+import { DirectorBriefAssistant } from './DirectorBriefAssistant'
 import { DirectorPresetBar } from './DirectorPresetBar'
 import { ClipContinuityToggle } from './ClipContinuityToggle'
 import { formatSeconds, recommendedWindowProfile } from './DurationSlider'
@@ -1763,6 +1764,26 @@ export function DirectorChat() {
           >
             {draftQueueConfirmation}
           </div>
+        )}
+        {step === 'style' && !mvGenerateSetup && (
+          <DirectorBriefAssistant
+            brief={chatInput}
+            pipelineType={
+              skill === 'music_video' ? 'music_video'
+                : skill === 'podcast' ? 'podcast'
+                  : skill === 'viral_video' ? 'viral_video'
+                    : shortFilmPath === 'story' ? 'short_film_story'
+                      : 'short_film_audio'
+            }
+            clipCount={analysis?.lyrics?.length || 0}
+            transcriptSpeakers={Array.from(new Set(
+              (analysis?.lyrics || []).map(row => String(row.speaker || '').trim()).filter(Boolean),
+            ))}
+            characters={shortFilmCharacters.map(character => character.name).filter(Boolean)}
+            hasAudio={Boolean(useStore.getState().directorAudioPath)}
+            onApply={value => { setChatInput(value); setSceneDescription(value) }}
+            disabled={!chatInputEnabled}
+          />
         )}
       </div>
     </div>
