@@ -10970,17 +10970,45 @@ async def plan_audio_structure(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _brief_generate(prompt, system_prompt, max_new_tokens):
-    """The LLM entry point the brief routes use (kept here so the router stays pure)."""
+def _brief_generate(
+    prompt,
+    system_prompt="",
+    max_new_tokens=256,
+    image_paths=None,
+    image_max_size=None,
+    **kwargs,
+):
+    """The LLM entry point the brief routes use (kept here so the router stays pure).
+
+    The images MUST be forwarded. This took exactly three positional parameters, so
+    every vision call from the brief assistant — the appearance read of a character
+    reference — was made without the picture attached: the model was asked to describe a
+    photo it had never been shown, answered from the prompt text, and the appearance was
+    discarded as unusable. The person had already supplied the picture; nothing was
+    reading it.
+    """
     from services import llm_service
 
     _ensure_llm_loaded()
+    if image_paths and not llm_service.vision_available():
+        # A text-only GGUF has no mmproj, so `generate` would drop the pictures and the
+        # model would answer about a photo it never saw. Say it here, where the app's own
+        # entry point is, instead of letting the caller believe the read succeeded.
+        raise RuntimeError(
+            "The loaded model has no vision (no mmproj), so the reference picture cannot "
+            "be read. Load a vision-capable model first."
+        )
+    temperature = kwargs.pop("temperature", 0.3)
+    enable_thinking = kwargs.pop("enable_thinking", False if not image_paths else None)
     return llm_service.generate(
         prompt=prompt,
         system_prompt=system_prompt,
         max_new_tokens=max_new_tokens,
-        temperature=0.3,
-        enable_thinking=False,
+        image_paths=image_paths,
+        image_max_size=image_max_size,
+        temperature=temperature,
+        enable_thinking=enable_thinking,
+        **kwargs,
     )
 
 

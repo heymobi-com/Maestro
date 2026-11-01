@@ -703,6 +703,7 @@ export function DirectorChat() {
   const characterRefPaths = useStore(s => s.directorCharacterRefPaths)
   const characterRefLabels = useStore(s => s.directorCharacterRefLabels)
   const h3References = useStore(s => s.directorH3References)
+  const directorProjectId = useStore(s => s.directorProjectId)
   const shortFilmSetCharacters = useStore(s => s.shortFilmSetCharacters)
   const shortFilmUploadAndAnalyze = useStore(s => s.shortFilmUploadAndAnalyze)
   const shortFilmSetPacingBias = useStore(s => s.shortFilmSetPacingBias)
@@ -1783,6 +1784,7 @@ export function DirectorChat() {
               (analysis?.lyrics || []).map(row => String(row.speaker || '').trim()).filter(Boolean),
             ))}
             characters={shortFilmCharacters.map(character => character.name).filter(Boolean)}
+            pipelineId={directorProjectId || undefined}
             references={
               // The manifest the pipeline actually renders from wins: it is the one
               // that carries `role` ("Anita (S1)") and `image_intent`.

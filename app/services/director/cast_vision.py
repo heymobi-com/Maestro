@@ -23,6 +23,7 @@ raise — all return nothing and the pipeline behaves exactly as it did before.
 
 from __future__ import annotations
 
+import inspect
 import os
 import re
 from typing import Any, Callable, Iterable, Optional
@@ -130,6 +131,44 @@ def references_for_look(references: Optional[Iterable[Any]]) -> list[dict]:
     return kept
 
 
+def vision_status() -> dict:
+    """Whether a picture can actually be shown to the model right now."""
+
+    try:
+        from services import llm_service
+
+        return {
+            "loaded": bool(llm_service.is_loaded()),
+            "available": bool(llm_service.vision_available()),
+            "model": str(getattr(llm_service, "_model_id", "") or ""),
+        }
+    except Exception:  # noqa: BLE001 - status must never break a request
+        return {"loaded": False, "available": False, "model": ""}
+
+
+def _accepts_images(generate: Callable[..., str]) -> bool:
+    """Whether this callable can carry an image at all.
+
+    The app's own entry point was a wrapper with three positional parameters
+    (``prompt, system_prompt, max_new_tokens``), so every vision call was made with the
+    picture silently dropped and the model described a photo it never saw. A callable
+    that cannot take ``image_paths`` is not a vision callable, and saying so beats asking
+    a text model to look at nothing.
+    """
+
+    try:
+        signature = inspect.signature(generate)
+    except (TypeError, ValueError):
+        return True
+    parameters = signature.parameters
+    if "image_paths" in parameters:
+        return True
+    return any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+
+
 def appearance_from_reference(
     image_path: str,
     *,
@@ -144,6 +183,13 @@ def appearance_from_reference(
             from services import llm_service
 
             generate = llm_service.generate
+        if not _accepts_images(generate):
+            print(
+                "[CastVision] The text generator cannot carry an image (no image_paths "
+                "parameter), so the reference was not read. Fix the caller; do not ask a "
+                "text model to describe a picture."
+            )
+            return ""
         answer = generate(
             prompt=CAST_LOOK_PROMPT,
             system_prompt=(

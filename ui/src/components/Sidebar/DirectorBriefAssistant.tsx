@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { AlertTriangle, Check, Info, Loader2, Sparkles, X } from 'lucide-react'
-import { reviewDirectorBrief, structureDirectorBrief, type BriefReferenceEntry, type BriefReport } from '../../api/client'
+import { reviewDirectorBrief, structureDirectorBrief, type BriefReferenceEntry, type BriefReport, type BriefVisionStatus } from '../../api/client'
 
 /**
  * The brief is the one input a person writes freely, and it is also the input the
@@ -21,6 +21,7 @@ export function DirectorBriefAssistant({
   characters,
   references,
   hasAudio,
+  pipelineId,
   onApply,
   disabled,
 }: {
@@ -31,6 +32,7 @@ export function DirectorBriefAssistant({
   characters: string[]
   references?: unknown[]
   hasAudio: boolean
+  pipelineId?: string
   onApply: (brief: string) => void
   disabled?: boolean
 }) {
@@ -40,6 +42,8 @@ export function DirectorBriefAssistant({
   const [resolved, setResolved] = useState<string[]>([])
   const [looks, setLooks] = useState<{ name: string; look: string }[]>([])
   const [roster, setRoster] = useState<BriefReferenceEntry[]>([])
+  const [vision, setVision] = useState<BriefVisionStatus | null>(null)
+  const [referenceCount, setReferenceCount] = useState<number>(0)
   const [checking, setChecking] = useState(false)
   const [structuring, setStructuring] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -65,6 +69,7 @@ export function DirectorBriefAssistant({
       const result = await structureDirectorBrief({
         brief, pipelineType, clipCount, transcriptSpeakers, characters, hasAudio,
         references: references || [],
+        pipelineId,
       })
       setProposal(result.brief)
       setReport(result.after)
@@ -72,6 +77,8 @@ export function DirectorBriefAssistant({
       setResolved(result.resolved)
       setLooks(result.looks || [])
       setRoster(result.roster || [])
+      setVision(result.vision || null)
+      setReferenceCount(result.references || 0)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Brief structuring failed')
     } finally {
@@ -109,7 +116,7 @@ export function DirectorBriefAssistant({
         {(report || proposal) && (
           <button
             type="button"
-            onClick={() => { setReport(null); setProposal(null); setError(null); setLooks([]); setRoster([]) }}
+            onClick={() => { setReport(null); setProposal(null); setError(null); setLooks([]); setRoster([]); setVision(null) }}
             className="rounded-md p-1 text-text-muted hover:bg-bg-hover hover:text-text-primary"
             title="Dismiss"
           >
@@ -206,6 +213,23 @@ export function DirectorBriefAssistant({
                   {!item.look && <span className="text-amber-400"> — no appearance read</span>}
                 </div>
               ))}
+            </div>
+          )}
+          {proposal && referenceCount > 0 && vision && !vision.available && (
+            <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-[10px] leading-snug text-text-primary" data-testid="brief-vision-warning">
+              <div className="flex items-start gap-1">
+                <AlertTriangle size={10} className="mt-0.5 shrink-0" />
+                <span>
+                  {referenceCount} reference picture{referenceCount === 1 ? '' : 's'} could not be
+                  read: the loaded model has no vision
+                  {vision.model ? ` (${vision.model})` : ''}.
+                </span>
+              </div>
+              <div className="mt-0.5 pl-3.5 text-text-muted">
+                Load a vision-capable model — the ones marked <em>Vision</em> in the model list,
+                which ship an <code>mmproj</code> file — then press Structure again. Until then
+                the appearance can only come from your text.
+              </div>
             </div>
           )}
           {looks.length > 0 && (

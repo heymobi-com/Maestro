@@ -1258,7 +1258,19 @@ def get_status() -> dict:
         "device": _device if loaded else None,
         "provider": _provider,
         "mtp_acceleration": bool(loaded and _mtp_acceleration),
+        "vision": bool(loaded and _vision_available),
     }
+
+
+def vision_available() -> bool:
+    """Whether the loaded model can be shown a picture.
+
+    A text-only GGUF has no mmproj, so ``_user_message`` drops the images and the model
+    answers about a picture it never received. Any caller that intends to read a reference
+    has to ask first, or it will silently produce a description of nothing.
+    """
+
+    return bool(is_loaded() and _vision_available)
 
 
 def _download_gguf(repo_id: str, filename: str, cache_dir: str) -> str:

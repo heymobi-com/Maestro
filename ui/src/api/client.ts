@@ -1017,11 +1017,19 @@ export interface BriefReferenceEntry {
   look: string
 }
 
+export interface BriefVisionStatus {
+  loaded: boolean
+  available: boolean
+  model: string
+}
+
 export interface BriefStructureResult {
   brief: string
   method: 'llm' | 'normalized'
   looks?: BriefCastLook[]
   roster?: BriefReferenceEntry[]
+  vision?: BriefVisionStatus
+  references?: number
   before: BriefReport
   after: BriefReport
   resolved: string[]
@@ -1064,6 +1072,7 @@ export async function structureDirectorBrief(input: {
   hasAudio?: boolean
   useLlm?: boolean
   references?: unknown[]
+  pipelineId?: string
 }): Promise<BriefStructureResult> {
   const res = await fetch(`${BASE}/api/v1/director/brief/structure`, {
     method: 'POST',
@@ -1077,6 +1086,7 @@ export async function structureDirectorBrief(input: {
       has_audio: Boolean(input.hasAudio),
       use_llm: input.useLlm !== false,
       references: input.references || [],
+      pipeline_id: input.pipelineId || '',
     }),
   })
   if (!res.ok) {

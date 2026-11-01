@@ -87,6 +87,13 @@ _STAGE_RE = re.compile(
 # instruction, and the planner then read a cast row with no character in it. The
 # heading "PRESENCES (only what this workflow needs):" leaked the same way.
 _PLACEHOLDER_LINE_RE = re.compile(r"^\s*<[^>\n]{1,60}>\s*:")
+# A value the prompt used as a placeholder, copied back as if it were content:
+# "REFERENCES:\n(none supplied)". Measured on a real proposal.
+_PLACEHOLDER_VALUE_RE = re.compile(
+    r"(?i)^\s*[\(\[]?\s*"
+    r"(?:none supplied|not supplied|no references?|no characters?|none|n/?a|unknown)"
+    r"\s*[\)\]]?\s*\.?\s*$"
+)
 _INSTRUCTION_HEADING_RE = re.compile(r"\s*\((?:only )?what (?:this workflow|the workflow)[^)]*\)")
 
 # The lock with its cue kept raw, so a wrong cue can be named in a finding rather than
@@ -329,10 +336,34 @@ def strip_template_placeholders(brief: str) -> str:
     for line in str(brief or "").splitlines():
         if _PLACEHOLDER_LINE_RE.match(line):
             continue
+        if _PLACEHOLDER_VALUE_RE.match(line):
+            continue
         cleaned = _INSTRUCTION_HEADING_RE.sub("", line)
         if cleaned.strip() or not line.strip():
             kept.append(cleaned)
-    return "\n".join(kept)
+    return "\n".join(_drop_empty_sections(kept))
+
+
+def _drop_empty_sections(lines: list[str]) -> list[str]:
+    """Remove a heading that has no content of its own.
+
+    ``REFERENCES:`` followed by ``(none supplied)`` was the leak; once the placeholder is
+    gone the heading is left standing over nothing. Only a heading whose next non-blank
+    line is another heading (or the end) is dropped -- a heading followed by prose is the
+    normal shape of a brief.
+    """
+
+    heading = re.compile(r"^[ \t]*[A-Z][A-Z0-9 /_\-()]{2,50}\s*:\s*$")
+    kept: list[str] = []
+    for index, line in enumerate(lines):
+        if heading.match(line):
+            following = next(
+                (item for item in lines[index + 1:] if item.strip()), ""
+            )
+            if not following or heading.match(following):
+                continue
+        kept.append(line)
+    return kept
 
 
 def _sections(brief: str) -> dict[str, str]:

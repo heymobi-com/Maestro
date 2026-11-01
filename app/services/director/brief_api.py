@@ -7,6 +7,8 @@ from, so its check has to be testable on its own.
 
 from __future__ import annotations
 
+import json
+import os
 import re
 
 from fastapi import APIRouter, Request
@@ -36,6 +38,61 @@ def strip_code_fences(text: str) -> str:
     return parts[1] if len(parts) > 1 else text
 
 
+def _outputs_root() -> str:
+    """Where Director writes its projects, relative to ``app``."""
+
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "outputs")
+
+
+def _saved_references(pipeline_id: str) -> list:
+    """The reference manifest a saved project carries, when the app sends none.
+
+    The panel already sends the manifest it is showing, but a request can arrive without
+    it — an older UI build, a script, a resumed project. Without references the assistant
+    honestly reports "no picture reached this check" while the project plainly has three,
+    which reads as a bug in the assistant. The project's own state file is the durable
+    truth, so it is read here by id.
+    """
+
+    pid = str(pipeline_id or "").strip()
+    if not pid:
+        return []
+    root = _outputs_root()
+    if not os.path.isdir(root):
+        return []
+    matches: list[str] = []
+    for workspace in os.listdir(root):
+        candidate = os.path.join(root, workspace, f"_director_pipeline_{pid}.json")
+        if os.path.isfile(candidate):
+            matches.append(candidate)
+    if not matches:
+        return []
+    try:
+        with open(max(matches, key=os.path.getmtime), encoding="utf-8") as handle:
+            state = json.load(handle)
+    except Exception as exc:  # noqa: BLE001 - a fallback may fail quietly
+        print(f"[Director] Could not read the saved manifest for {pid}: {exc}")
+        return []
+    snapshot = state.get("_params_snapshot") or {}
+    references = snapshot.get("minimax_h3_references") or state.get("minimax_h3_references") or []
+    references = [item for item in references if isinstance(item, dict)]
+    if references:
+        print(
+            f"[Director] Brief check used the manifest saved with project {pid} "
+            f"({len(references)} reference(s))."
+        )
+    return references
+
+
+def _references_of(body: dict) -> list:
+    """The references this request knows about: the panel's, or the project's own."""
+
+    supplied = body.get("references") or []
+    if supplied:
+        return [item for item in supplied if isinstance(item, dict)]
+    return _saved_references(str(body.get("pipeline_id") or body.get("project_id") or ""))
+
+
 def _report_of(brief: str, body: dict) -> dict:
     return diagnose_brief(
         brief,
@@ -43,7 +100,7 @@ def _report_of(brief: str, body: dict) -> dict:
         clip_count=int(body.get("clip_count") or 0),
         transcript_speakers=body.get("transcript_speakers") or (),
         has_audio=bool(body.get("has_audio")),
-        references=body.get("references") or (),
+        references=_references_of(body),
     )
 
 
@@ -57,7 +114,7 @@ def _cast_looks(body: dict, generate=None) -> dict:
 
     from .cast_vision import cast_descriptions
 
-    return cast_descriptions(body.get("references") or (), generate=generate)
+    return cast_descriptions(_references_of(body), generate=generate)
 
 
 def create_router(*, generate=None) -> APIRouter:
@@ -85,10 +142,14 @@ def create_router(*, generate=None) -> APIRouter:
         """
         body = await request.json()
         looks = _cast_looks(body, generate=generate)
+        from .cast_vision import vision_status
+
         return {
             "looks": [{"name": name, "look": look} for name, look in looks.items()],
             "count": len(looks),
             "available": bool(looks),
+            "references": len(_references_of(body)),
+            "vision": vision_status(),
         }
 
     @router.post("/api/v1/director/brief/structure")
@@ -100,7 +161,7 @@ def create_router(*, generate=None) -> APIRouter:
         clip_count = int(body.get("clip_count") or 0)
         speakers = body.get("transcript_speakers") or ()
         characters = body.get("characters") or ()
-        references = body.get("references") or ()
+        references = _references_of(body)
 
         from .cast_vision import (
             apply_cast_descriptions,
@@ -160,6 +221,8 @@ def create_router(*, generate=None) -> APIRouter:
                 print(f"[Director] Brief structuring fell back to the mechanical pass: {exc}")
 
         after = _report_of(proposal, body)
+        from .cast_vision import vision_status
+
         return {
             "brief": proposal,
             "method": method,
@@ -167,6 +230,8 @@ def create_router(*, generate=None) -> APIRouter:
             "roster": roster,
             "speakers": after.get("speakers") or [],
             "speaker_map": after.get("speaker_map") or {},
+            "vision": vision_status(),
+            "references": len(references),
             "before": before,
             "after": after,
             "resolved": sorted(

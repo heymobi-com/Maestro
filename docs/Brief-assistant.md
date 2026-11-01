@@ -101,10 +101,24 @@ reason the face stays coherent, so the read is not a caption:
 | `LOOK_LIMIT` | 900 chars | the sentence travels into every shot that shows the character, so it is bounded |
 | `looks_block(limit=)` | 1400 chars | three detailed reads must not spend the shot's prompt budget on wardrobe |
 
-`generate(..., image_max_size=…)` is the switch: it threads through `_user_message` to
-`_image_to_data_url`, so any caller can choose the resolution the picture is sent at.
-`describe_image` had been passing the *filename* and nothing else — it answered from the
-name alone; it now attaches the image and accepts the same size argument.
+**The picture has to actually reach the model.** `launch.py`'s `_brief_generate` — the entry
+point the routes are given — was declared with exactly three positional parameters
+(`prompt, system_prompt, max_new_tokens`), so `image_paths` was dropped on the floor: the
+model was asked to describe a photo it had never been shown, answered from the prompt text,
+and the appearance was discarded as unusable. That is why the references the user had
+already supplied produced nothing. Three guards now:
+
+- `_brief_generate` forwards `image_paths` and `image_max_size`;
+- `_accepts_images` refuses to call a callable that cannot carry an image, so a wrapper
+  cannot silently swallow it again;
+- `_brief_generate` raises a readable error when the loaded model has no `mmproj`, and
+  `/cast` and `/structure` return `vision: {loaded, available, model}` so the panel can say
+  "load a vision-capable model" instead of showing silence.
+
+`generate(..., image_max_size=…)` threads through `_user_message` to `_image_to_data_url`,
+so any caller can choose the resolution the picture is sent at. `describe_image` had been
+passing the *filename* and nothing else — it answered from the name alone; it now attaches
+the image and accepts the same size argument.
 
 A row the writer already described is kept: the picture is evidence for a gap, not a
 replacement for a choice. Everything fails soft, so no vision model, no image or a model
@@ -305,7 +319,7 @@ mechanical normalization — sections reordered, beats numbered from prose, a po
 given stages, the ideas never rewritten — and `TemplateLeakTests`, the four faults above
 plus the two stripping passes and the prompt rules that forbid them.
 
-`tests/test_director_cast_vision.py` (74) holds the read-from-the-picture path: which
+`tests/test_director_cast_vision.py` (84) holds the read-from-the-picture path: which
 references are character sheets, one read per name, the picture being what is sent, the
 2K reference being sent at full detail, the prompt covering every visible detail, the
 answer being the appearance, labels and refusals discarded, a raise or a missing model
@@ -316,9 +330,11 @@ match), the roster (manifest order, the cue, the appearance, idempotency, the br
 spelling winning), the cast consolidation, the `(S1)` binding end to end — including the
 raw `SPEAKER_00` cue being repaired and the mechanical pass deriving a lock it can prove —
 plus the per-shot `<Picture N>` map (every picture numbered with its person, the planner
-told not to write the tag), and the documentary case: the Anita prose yields no stages,
-reports `narration-driven` with audio and `abstract-beats` without it, and the prompt
-forbids inventing stages while a story brief still gets them.
+told not to write the tag), the vision routing (the shipped entry point must forward the
+picture, a callable that cannot carry one is refused rather than asked to invent), the
+saved-project manifest fallback, and the documentary case: the Anita prose yields no
+stages, reports `narration-driven` with audio and `abstract-beats` without it, and the
+prompt forbids inventing stages while a story brief still gets them.
 
 `tests/test_director_brief_api.py` (10) drives the routes over ASGI: a prose brief is
 reported, the route works with no model, the mechanical pass still fixes the shape, a

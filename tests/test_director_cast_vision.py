@@ -21,6 +21,7 @@ from services.director.cast_vision import (  # noqa: E402
     CAST_LOOK_PROMPT,
     LOOK_IMAGE_MAX_SIZE,
     LOOK_LIMIT,
+    _accepts_images,
     appearance_from_reference,
     apply_cast_descriptions,
     apply_reference_roster,
@@ -37,8 +38,9 @@ from services.director.cast_vision import (  # noqa: E402
 )
 from services.director.brief_assistant import (  # noqa: E402
     consolidate_cast_rows,
-    normalized_brief,
     normalize_speaker_cues,
+    normalized_brief,
+    strip_template_placeholders,
 )
 
 ANITA_LOOK = (
@@ -780,6 +782,100 @@ class PictureMapTests(unittest.TestCase):
         from services.director_pipeline import _h3_picture_map_for_shot
 
         self.assertEqual(_h3_picture_map_for_shot({}, {"video_prompt": "x"}, brief=""), "")
+
+
+class PlaceholderValueTests(unittest.TestCase):
+    def test_a_placeholder_value_is_not_content(self):
+        out = strip_template_placeholders(
+            "CHARACTERS:\nAnita: white shirt.\n\nREFERENCES:\n(none supplied)\n"
+        )
+
+        self.assertIn("Anita: white shirt.", out)
+        self.assertNotIn("(none supplied)", out)
+
+    def test_a_section_left_empty_by_that_removal_disappears(self):
+        out = strip_template_placeholders("Anita: white shirt.\n\nREFERENCES:\n(none supplied)\n")
+
+        self.assertNotIn("REFERENCES:", out)
+
+
+class SavedManifestTests(unittest.TestCase):
+    """A request without references must still find the project's pictures."""
+
+    def test_the_saved_project_manifest_is_used(self):
+        from services.director.brief_api import _saved_references
+
+        refs = _saved_references("f0e1fca4")
+
+        self.assertEqual(len(refs), 3)
+        self.assertEqual([ref.get("role") for ref in refs], ["Anita (S1)", "David", "Goliat"])
+
+    def test_an_unknown_project_is_empty(self):
+        from services.director.brief_api import _saved_references
+
+        self.assertEqual(_saved_references("does-not-exist"), [])
+
+    def test_the_panel_references_win_over_the_saved_ones(self):
+        from services.director.brief_api import _references_of
+
+        supplied = [{"type": "image", "path": "a.png", "role": "Anita (S1)"}]
+
+        self.assertEqual(_references_of({"references": supplied}), supplied)
+
+
+class VisionRoutingTests(unittest.TestCase):
+    """The picture must reach the model, or the read is a lie."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.image = os.path.join(self.tmp, "anita.png")
+        with open(self.image, "wb") as handle:
+            handle.write(b"\x89PNG\r\n\x1a\n")
+
+    def test_a_callable_without_image_support_is_refused_loudly(self):
+        def text_only(prompt, system_prompt="", max_new_tokens=0):
+            raise AssertionError("a text-only callable must not be called")
+
+        self.assertFalse(_accepts_images(text_only))
+        self.assertEqual(appearance_from_reference(self.image, generate=text_only), "")
+
+    def test_a_wrapper_that_forwards_kwargs_is_accepted(self):
+        def wrapper(*args, **kwargs):
+            return "white shirt"
+
+        self.assertTrue(_accepts_images(wrapper))
+
+    def test_the_shipped_entry_point_forwards_the_picture(self):
+        # The measured bug: _brief_generate took three positional parameters, so
+        # image_paths was dropped and the model described a photo it never saw.
+        source = open(
+            os.path.join(os.path.dirname(__file__), "..", "app", "launch.py"),
+            encoding="utf-8",
+        ).read()
+        start = source.index("def _brief_generate(")
+        body = source[start:start + 2200]
+
+        self.assertIn("image_paths=image_paths", body)
+        self.assertIn("image_max_size=image_max_size", body)
+
+    def test_a_text_only_model_refuses_rather_than_describing_nothing(self):
+        source = open(
+            os.path.join(os.path.dirname(__file__), "..", "app", "launch.py"),
+            encoding="utf-8",
+        ).read()
+        start = source.index("def _brief_generate(")
+        body = source[start:start + 1600]
+
+        self.assertIn("vision_available()", body)
+        self.assertIn("no mmproj", body)
+
+    def test_vision_status_reports_the_loaded_model(self):
+        from services.director.cast_vision import vision_status
+
+        status = vision_status()
+
+        self.assertIn("available", status)
+        self.assertIn("model", status)
 
 
 if __name__ == "__main__":
