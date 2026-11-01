@@ -20,6 +20,8 @@ if str(APP) not in sys.path:
 
 from services.director.brief_assistant import (  # noqa: E402
     CANONICAL_SECTIONS,
+    _number_stages,
+    _stage_texts,
     diagnose_brief,
     normalized_brief,
     strip_template_placeholders,
@@ -366,6 +368,135 @@ class StructurePromptTests(unittest.TestCase):
         )
 
         self.assertIn("S1, S2", user)
+
+
+class PipelineVocabularyTests(unittest.TestCase):
+    """The planner's own words are not members of the cast.
+
+    Measured on a real run: "Beat" was reported as "appears in the story but has no entry
+    in CHARACTERS". It came from the staged-progression guidance, not from the film.
+    """
+
+    BRIEF = (
+        "SUBJECT LOCK:\n<Subject 1> (S1) is ALWAYS Anita.\n\n"
+        "CHARACTERS:\nAnita (S1): young woman, hair tied back, white shirt.\n\n"
+        "DESCRIPTION:\n"
+        "Beat 1: Anita stands at the centre of the scene she describes.\n"
+        "Beat 2: A process with stages is one continuous action told across several "
+        "shots, and the Shot changes as the Clip continues.\n"
+    )
+
+    def _codes(self) -> set[str]:
+        return {
+            finding["code"]
+            for finding in diagnose_brief(
+                self.BRIEF, kind="short_film_audio", clip_count=20,
+                has_audio=True, transcript_speakers=["S1"],
+            )["findings"]
+        }
+
+    def test_a_planning_word_is_not_an_undescribed_character(self):
+        self.assertNotIn("undescribed-character", self._codes())
+
+    def test_an_invented_name_is_still_reported(self):
+        brief = self.BRIEF.replace(
+            "Beat 1: Anita stands at the centre of the scene she describes.",
+            "Beat 1: Anita stands beside Abuela Rosa, and Abuela Rosa turns.",
+        )
+
+        self.assertIn("undescribed-character", {
+            finding["code"]
+            for finding in diagnose_brief(
+                brief, kind="short_film_audio", clip_count=20,
+                has_audio=True, transcript_speakers=["S1"],
+            )["findings"]
+        })
+
+    def test_numbering_writes_no_planning_word_into_the_brief(self):
+        out = _number_stages(
+            "DESCRIPTION:\nOne night. Dawn-grey kitchen: Rosa lifts the cup. "
+            "Cobbled street: the children walk in silence.\n"
+        )
+
+        self.assertIn("Stage 1:", out)
+        self.assertNotIn("beat", out.casefold())
+
+    def test_a_beat_heading_is_read_as_a_stage(self):
+        stages = _stage_texts(
+            "DESCRIPTION:\nBeat 1: Rosa lifts the cup in the kitchen.\n"
+            "Beat 2: Rosa crosses the street.\n"
+        )
+
+        self.assertEqual([number for number, _body in stages], [1, 2])
+
+    def test_the_planner_guide_no_longer_calls_a_process_a_beat(self):
+        path = Path(__file__).resolve().parents[1] / "app" / "services" / "llm_guides" / (
+            "director/maestro_staged_progression_rules.md"
+        )
+        text = path.read_text(encoding="utf-8")
+
+        self.assertNotIn("story beat", text.casefold())
+
+
+class NumberingOnlyShootableSentencesTests(unittest.TestCase):
+    """A stage number is a promise of a shot; only a shootable sentence gets one.
+
+    Measured on a real brief: seventeen sentences about *how* the film is made were frozen
+    into Stage 1 … Stage 17, and the check then reported all seventeen as naming no place
+    and no action. True, and caused by the numbering itself.
+    """
+
+    CONTRACT = (
+        "DESCRIPTION:\n"
+        "Anita narrates the biblical story and moves immersively through the settings. "
+        "Anita always stands at the center of the cinematic action. "
+        "She shows and explains what is happening with the characters. "
+        "The documentary presents epic biblical scenes. "
+        "The scenes illustrate what is being narrated. "
+        "The biblical figures appear around Anita. "
+        "In the valley of Elah Anita walks between the tents. "
+        "On the ridge Anita turns to the camera. "
+        "At the stream David lifts five stones.\n"
+    )
+
+    def test_only_the_concrete_sentences_are_numbered(self):
+        out = _number_stages(self.CONTRACT)
+
+        self.assertIn("Stage 1: In the valley of Elah", out)
+        self.assertIn("Stage 2: On the ridge", out)
+        self.assertIn("Stage 3: At the stream", out)
+        self.assertNotIn("Stage 4", out)
+
+    def test_a_habit_is_not_a_stage(self):
+        out = _number_stages(self.CONTRACT)
+
+        self.assertNotIn("Stage 1: Anita always stands", out)
+
+    def test_the_contract_stays_as_context(self):
+        out = _number_stages(self.CONTRACT)
+
+        self.assertIn("Anita narrates the biblical story", out)
+
+    def test_the_numbered_result_has_no_abstract_stage(self):
+        from services.director.brief_assistant import _stage_texts
+
+        stages = _stage_texts(_number_stages(self.CONTRACT))
+
+        self.assertEqual(len(stages), 3)
+        for _number, body in stages:
+            self.assertTrue(
+                any(word in body.casefold() for word in
+                    ("valley", "ridge", "stream", "tents", "camera", "stones")),
+                msg=body,
+            )
+
+    def test_a_prose_brief_with_nothing_shootable_is_left_alone(self):
+        text = (
+            "DESCRIPTION:\nAnita narrates the story. She shows what is happening. "
+            "The documentary illustrates the account.\n"
+        )
+
+        self.assertEqual(_number_stages(text), text)
 
 
 if __name__ == "__main__":

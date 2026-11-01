@@ -194,6 +194,23 @@ unambiguous: exactly one voice, and one name the text itself calls the speaker (
 "narrates the story of David" does not crown David). A wrong lock is worse than none, so
 two voices or two candidates leave the text alone.
 
+### A number is a promise of a shot
+
+`_number_stages` only numbers a sentence that can actually be shot: it names a place, or
+somebody visibly does something, and it is not a habit. Measured on a real brief, seventeen
+sentences about *how* the film is made were frozen into `Stage 1` … `Stage 17`, and the
+check then reported all seventeen as stages that name no place and no action — true, and
+caused by the numbering itself. A sentence that is not shootable stays in the description as
+context, before the numbered stages, where it reads as a rule.
+
+The `abstract-beats` message now says what to write instead:
+
+> Replace the number with the place and the action it stands for: `Stage 3: the cobbled
+> street at dusk — the children lift their lanterns and walk past the well`, not `Stage 3`.
+
+`Beat 1:` and `Shot 2:` are read as stage headings too, because they are the vocabulary a
+model reaches for when it has read the planner's own guidance.
+
 ## The lock carries the voice, and the text carries the pictures
 
 A structured brief from an earlier run came back like this:

@@ -2,9 +2,10 @@ STAGED PROGRESSION — A PROCESS IS TOLD ACROSS SHOTS, NOT INSIDE ONE:
 
 - A process with stages (a plant sprouting, blooming and drying; a storm arriving and
   clearing; rain starting and stopping; someone changing clothes; light falling) is ONE
-  story beat spread over SEVERAL consecutive shots. Give each shot ONE stage: the seed,
-  the sprout, the bloom, the withering. Never write the whole process into a single shot,
-  and never repeat an already completed process in a later shot.
+  continuous action that belongs ACROSS several consecutive shots, never inside one. Give
+  each shot ONE stage: the seed, the sprout, the bloom, the withering. Never write the
+  whole process into a single shot, and never repeat an already completed process in a
+  later shot.
 - Fit the stage to the shot's own duration. Each shot has the length listed for it: a
   three-second shot holds one small visible change, not three. Compressing a multi-stage
   effect into a short shot is what makes effects flash past and lose their intention.

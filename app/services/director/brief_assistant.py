@@ -78,7 +78,8 @@ _CAST_ROW_RE = re.compile(
     r"(?im)^[ \t]*(?:S(\d)\s*)?[\(\[]?([A-ZÁÉÍÓÚÜÑ][^:\n]{2,60}?)[\)\]]?\s*:\s*\S"
 )
 _STAGE_RE = re.compile(
-    r"(?i)\bstage\s+(\d+)\b|^\s*(?:scene|beat|section)\s+(\d+)\b", re.MULTILINE,
+    r"(?i)\b(?:stage|beat|shot|scene)\s+(\d+)\b|^\s*(?:scene|beat|section)\s+(\d+)\b",
+    re.MULTILINE,
 )
 
 # A line whose key is in angle brackets is a template placeholder, not content.
@@ -217,15 +218,29 @@ def normalize_speaker_cues(
 
 
 # Capitalized words that open a sentence or describe the film rather than name a person.
-_NOT_A_NAME = {
+#: The pipeline's own vocabulary. A brief can quote it back — the planner's guidance talks
+#: about a shot, a stage, a clip, a beat — and a validator that reads those as characters
+#: invents cast out of its own instructions: measured on a real run, "Beat" was reported as
+#: "appears in the story but has no entry in CHARACTERS".
+_PIPELINE_VOCAB = {
+    "beat", "beats", "stage", "stages", "shot", "shots", "clip", "clips", "scene",
+    "scenes", "frame", "frames", "act", "acts", "section", "sections", "part", "parts",
+    "take", "takes", "cut", "cuts", "panel", "panels", "storyboard", "timeline",
+    "sequence", "prompt", "prompts", "reference", "references", "character",
+    "characters", "cast", "presence", "presences", "subject", "subjects", "camera",
+    "lens", "palette", "lighting", "ambience", "audio", "voice", "voices", "dialogue",
+    "subtitle", "subtitles", "caption", "captions", "style", "mood", "tone", "note",
+    "notes", "rule", "rules", "guide", "guides", "brief", "project", "workflow",
+    "director", "planner", "plan", "planning", "model", "render", "renderer",
+}
+
+_NOT_A_NAME = _PIPELINE_VOCAB | {
     "this", "the", "a", "an", "no", "not", "only", "every", "each", "all", "any",
-    "narrator", "documentary", "film", "story", "scene", "shot", "stage", "act",
-    "camera", "ambience", "characters", "description", "negative", "presences",
-    "subject", "lock", "references", "biblical", "ancient", "figure", "figures",
-    "people", "soldiers", "world", "audience", "viewer", "voice", "sound", "light",
-    "chapter", "part", "title", "note", "rule", "standing", "then", "when", "while",
-    "after", "before", "because", "and", "but", "so", "if", "once", "still", "here",
-    "there", "they", "she", "he", "it", "we", "you", "i", "his", "her", "their",
+    "narrator", "documentary", "film", "story", "biblical", "ancient", "figure",
+    "figures", "people", "soldiers", "world", "audience", "viewer", "sound", "light",
+    "chapter", "title", "standing", "then", "when", "while", "after", "before",
+    "because", "and", "but", "so", "if", "once", "still", "here", "there", "they",
+    "she", "he", "it", "we", "you", "i", "his", "her", "their", "one", "two", "three",
 }
 
 
@@ -547,7 +562,9 @@ def _stage_texts(brief: str) -> list[tuple[int, str]]:
     prose = _description_prose(brief)
     if not prose.strip():
         prose = str(brief or "")
-    matches = list(re.finditer(r"(?i)stage\s+(\d+)\s*(?:\(([^)]{0,60})\))?\s*:", prose))
+    matches = list(re.finditer(
+        r"(?i)\b(?:stage|beat|shot|scene)\s+(\d+)\s*(?:\(([^)]{0,60})\))?\s*:", prose
+    ))
     if matches:
         stages: list[tuple[int, str]] = []
         for position, match in enumerate(matches):
@@ -723,13 +740,18 @@ def diagnose_brief(
             # A place ("Kitchen:") and a sentence opener are not cast.
             if lowered.split()[0] in _PLACE_WORDS:
                 continue
+            # "Beat 3", "Shot 2": a planning unit followed by its number.
+            if re.match(
+                r"\s*(?:#|no\.?)?\s*\d",
+                story[match.end():],
+                re.IGNORECASE,
+            ) and lowered.split()[0] in _PIPELINE_VOCAB:
+                continue
             if story[match.end():match.end() + 1] == ":":
                 continue
-            if lowered.split()[0] in {
-                "stage", "no", "the", "and", "only", "small", "narrow", "one", "then",
-                "subject", "standing", "she", "he", "they", "it", "his", "her", "we",
-                "you", "i", "that", "this", "there", "when", "while", "after", "before",
-            }:
+            if lowered.split()[0] in _NOT_A_NAME:
+                continue
+            if story[match.end():match.end() + 1] == ":":
                 continue
             # A name used once is usually the town or the night; a person the story
             # acts with recurs. A two-word name is specific enough to flag either way.
@@ -814,11 +836,15 @@ def diagnose_brief(
                 "Nothing to change. Keep the narrator's position in the action explicit, "
                 "as a standing rule, so every clip shows it.")
         elif abstract:
+            numbers = ", ".join(str(number) for number in abstract[:4])
             add("abstract-beats", "warning",
-                f"{len(abstract)} stage(s) name no place and no action "
-                f"({', '.join(str(number) for number in abstract[:4])}), so the planner "
-                "has to invent what happens in them.",
-                "Write each stage as a place plus who is in it plus what visibly happens.")
+                f"{len(abstract)} stage(s) name no place and no action ({numbers}"
+                + (", ..." if len(abstract) > 4 else "")
+                + "): a number is a promise of a shot, and the planner has to invent "
+                "what is inside it.",
+                "Replace the number with the place and the action it stands for: "
+                "'Stage 3: the cobbled street at dusk — the children lift their lanterns "
+                "and walk past the well', not 'Stage 3'.")
 
     # 6d. Someone the story acts with, listed only as a presence. Measured on the
     # David-y-Goliat brief: "David: presence in the biblical action stages." — David and
@@ -940,7 +966,18 @@ def normalized_brief(
 
 
 def _number_stages(text: str) -> str:
-    """Give the DESCRIPTION's beats ``Stage N (label):`` headings if they lack them."""
+    """Give the DESCRIPTION's beats ``Stage N:`` headings, but only the ones that are beats.
+
+    A number is a promise: the planner reads ``Stage 4:`` as "here is a shot", and a
+    sentence that names no place and no action leaves it to invent both. Measured on a real
+    brief, seventeen sentences of prose about *how* the film is made were frozen into
+    ``Stage 1`` … ``Stage 17``, and the check then reported all seventeen as stages that
+    name nothing — which is true, and was caused here.
+
+    So a sentence becomes a stage only when it says where and what happens. A sentence that
+    does not is context: it stays in the description, before the numbered stages, where it
+    reads as a rule rather than a shot.
+    """
 
     heading = re.search(r"(?im)^[ \t]*(DESCRIPTION|STORY|NARRATIVE)\b[^\n:]{0,60}:\s*", text)
     if not heading:
@@ -953,7 +990,7 @@ def _number_stages(text: str) -> str:
     )
     body_end = rest_start + (following.start() if following else len(text) - rest_start)
     body = text[rest_start:body_end]
-    if re.search(r"(?i)stage\s+\d", body):
+    if re.search(r"(?i)(?:stage|beat|shot|scene)\s+\d", body):
         return text
     sentences = [
         " ".join(part.split())
@@ -978,14 +1015,46 @@ def _number_stages(text: str) -> str:
             merged.append(carry)
     if not merged:
         return text
+    # A number is only given to a sentence that can be shot.
+    context: list[str] = []
+    beats: list[str] = []
+    for sentence in merged:
+        if _is_shootable(sentence):
+            beats.append(sentence)
+        elif beats:
+            # It qualifies the stage just named ("the fog does not lift"), so it belongs
+            # to that stage rather than to a numbered one of its own.
+            beats[-1] = f"{beats[-1]} {sentence}"
+        else:
+            context.append(sentence)
+    if not beats:
+        return text
     staged = "\n".join(
-        f"Stage {index} (beat {index}): {sentence}"
-        for index, sentence in enumerate(merged, start=1)
+        f"Stage {index}: {sentence}"
+        for index, sentence in enumerate(beats, start=1)
     )
+    if context:
+        staged = "\n".join(context) + "\n" + staged
     tail = text[body_end:]
     if tail and not tail.startswith("\n\n"):
         tail = "\n" + tail.lstrip("\n")
-    return text[:rest_start] + "\n" + staged + "\n" + tail
+    return text[:rest_start] + "\n" + staged.strip("\n") + "\n" + tail
+
+
+def _is_shootable(sentence: str) -> bool:
+    """Whether a sentence can be a shot: a place, or somebody visibly doing something.
+
+    A habit is not a shot. "Anita always stands at the centre of the cinematic action"
+    contains a verb and no place, and numbering it made the planner read a rule as a
+    scene — the seventeen abstract stages measured on a real brief.
+    """
+
+    body = str(sentence or "")
+    if re.search(r"\b(always|every|never|whenever|throughout|constantly|all the time)\b", body, re.I):
+        return False
+    if any(re.search(rf"\b{word}\b", body, re.I) for word in _PLACE_WORDS):
+        return True
+    return beat_states_an_event(body)
 
 
 def structure_prompt(

@@ -297,7 +297,7 @@ def _bounded_long_form_durations(
 
 
 _STAGE_HEADING_RE = re.compile(
-    r"stage\s+(\d+)\s*(?:[\(\[]\s*([^)\]\n:]{0,60})[)\]]\s*)?:?\s*",
+    r"(?:stage|beat|shot|scene)\s+(\d+)\s*(?:[\(\[]\s*([^)\]\n:]{0,60})[)\]]\s*)?:?\s*",
     re.IGNORECASE,
 )
 
