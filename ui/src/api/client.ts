@@ -998,6 +998,10 @@ export interface BriefReport {
   stages: number
   chars: number
   subject_lock?: Record<string, string>
+  /** Canonical speaker labels (S1, S2) in first-appearance order. */
+  speakers?: string[]
+  /** Raw transcript id to canonical label, e.g. SPEAKER_00 -> S1. */
+  speaker_map?: Record<string, string>
 }
 
 export interface BriefCastLook {

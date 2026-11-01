@@ -9956,7 +9956,7 @@ def _h3_shot_project_context(
     # compiler fell back to row order — which is the guess that hands one participant's
     # voice to another.
     for match in re.finditer(
-        r"(?i)subject\s+(\d+)\s*>?\s*(?:\(\s*S\s*(\d+)\s*\)\s*)?is\s+always\s+([^\n.;]{0,80})",
+        r"(?i)subject\s+(\d+)\s*>?\s*(?:\(([^)\n]{1,24})\)\s*)?is\s+always\s+([^\n.;]{0,80})",
         str(brief or ""),
     ):
         words = [
@@ -9965,7 +9965,10 @@ def _h3_shot_project_context(
         ]
         if not words:
             continue
-        cue = f" (S{int(match.group(2))})" if match.group(2) else ""
+        from services.director.cast_vision import canonical_speaker_label
+
+        cue_label = canonical_speaker_label(match.group(2))
+        cue = f" ({cue_label})" if cue_label else ""
         parts.append(f"<Subject {int(match.group(1))}>{cue} is ALWAYS {words[0]}.")
     world = _h3_world_context(brief)
     if world:

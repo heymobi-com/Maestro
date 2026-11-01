@@ -702,6 +702,7 @@ export function DirectorChat() {
   const shortFilmCharacters = useStore(s => s.shortFilmCharacters)
   const characterRefPaths = useStore(s => s.directorCharacterRefPaths)
   const characterRefLabels = useStore(s => s.directorCharacterRefLabels)
+  const h3References = useStore(s => s.directorH3References)
   const shortFilmSetCharacters = useStore(s => s.shortFilmSetCharacters)
   const shortFilmUploadAndAnalyze = useStore(s => s.shortFilmUploadAndAnalyze)
   const shortFilmSetPacingBias = useStore(s => s.shortFilmSetPacingBias)
@@ -1782,12 +1783,23 @@ export function DirectorChat() {
               (analysis?.lyrics || []).map(row => String(row.speaker || '').trim()).filter(Boolean),
             ))}
             characters={shortFilmCharacters.map(character => character.name).filter(Boolean)}
-            references={characterRefPaths.map((path, index) => ({
-              type: 'image',
-              path,
-              role: characterRefLabels[index] || '',
-              image_intent: 'identity',
-            }))}
+            references={
+              // The manifest the pipeline actually renders from wins: it is the one
+              // that carries `role` ("Anita (S1)") and `image_intent`.
+              h3References.length > 0
+                ? h3References.map(reference => ({
+                    type: reference.type,
+                    path: reference.path,
+                    role: reference.role || reference.character_name || '',
+                    image_intent: reference.image_intent || 'identity',
+                  }))
+                : characterRefPaths.map((path, index) => ({
+                    type: 'image',
+                    path,
+                    role: characterRefLabels[index] || '',
+                    image_intent: 'identity',
+                  }))
+            }
             hasAudio={Boolean(useStore.getState().directorAudioPath)}
             onApply={value => { setChatInput(value); setSceneDescription(value) }}
             disabled={!chatInputEnabled}

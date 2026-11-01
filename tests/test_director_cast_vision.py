@@ -24,6 +24,8 @@ from services.director.cast_vision import (  # noqa: E402
     appearance_from_reference,
     apply_cast_descriptions,
     apply_reference_roster,
+    canonical_speaker_label,
+    canonical_speaker_labels,
     cast_descriptions,
     looks_block,
     match_name,
@@ -33,7 +35,11 @@ from services.director.cast_vision import (  # noqa: E402
     same_name,
     speaker_cue_for,
 )
-from services.director.brief_assistant import consolidate_cast_rows  # noqa: E402
+from services.director.brief_assistant import (  # noqa: E402
+    consolidate_cast_rows,
+    normalized_brief,
+    normalize_speaker_cues,
+)
 
 ANITA_LOOK = (
     "early 30s; slim; fair skin; brunette hair tied back in a low bun; brown eyes; "
@@ -625,6 +631,103 @@ class StandbyLabelTests(unittest.TestCase):
         from services.director.scene_policy import beat_states_an_event
 
         self.assertTrue(beat_states_an_event("Kitchen: Rosa lifts the cup."))
+
+
+class SpeakerCueTests(unittest.TestCase):
+    """The transcript says SPEAKER_00; every label the compiler reads is (S1)."""
+
+    def test_a_raw_diarization_id_becomes_the_first_label(self):
+        self.assertEqual(canonical_speaker_label("SPEAKER_00"), "S1")
+        self.assertEqual(canonical_speaker_label("speaker_01"), "S2")
+
+    def test_a_canonical_label_is_left_alone(self):
+        self.assertEqual(canonical_speaker_label("(S2)"), "S2")
+        self.assertEqual(canonical_speaker_label("s3"), "S3")
+
+    def test_a_name_is_not_a_cue(self):
+        self.assertEqual(canonical_speaker_label("Anita"), "")
+
+    def test_the_labels_follow_first_appearance_not_the_suffix(self):
+        self.assertEqual(canonical_speaker_labels(["SPEAKER_03"]), ["S1"])
+        self.assertEqual(
+            canonical_speaker_labels(["SPEAKER_00", "SPEAKER_01"]), ["S1", "S2"]
+        )
+
+    def test_a_mixed_list_does_not_reuse_a_number(self):
+        labels = canonical_speaker_labels(["S1", "SPEAKER_00"])
+
+        self.assertEqual(labels[0], "S1")
+        self.assertNotEqual(labels[1], "S1")
+
+    def test_the_model_answer_is_repaired(self):
+        brief = (
+            "SUBJECT LOCK:\n"
+            "<Subject 1> (SPEAKER_00) is ALWAYS Anita.\n"
+            "<Subject 2> (speaker_1) is ALWAYS Ricardo.\n"
+        )
+
+        out = normalize_speaker_cues(brief, ["SPEAKER_00", "SPEAKER_01"])
+
+        self.assertIn("<Subject 1> (S1) is ALWAYS Anita.", out)
+        self.assertIn("<Subject 2> (S2) is ALWAYS Ricardo.", out)
+
+    def test_a_brief_with_a_raw_cue_still_parses(self):
+        from services.director.h3_dialogue import (
+            project_subject_lock,
+            project_subject_lock_cues,
+        )
+
+        text = "SUBJECT LOCK:\n<Subject 1> (SPEAKER_00) is ALWAYS Anita.\n"
+
+        self.assertEqual(project_subject_lock(text), {1: "Anita"})
+        self.assertEqual(project_subject_lock_cues(text), {1: "S1"})
+
+
+class DeriveLockTests(unittest.TestCase):
+    """The mechanical pass must not leave a prose brief without a lock."""
+
+    PROSE = (
+        "This documentary contains only one narrator. The narrator is Anita, and Anita "
+        "is the only person who speaks. Anita narrates the biblical story of David and "
+        "Goliath. The only characters who ever appear are Anita and David, Goliath."
+    )
+
+    def test_one_voice_and_one_narrator_gives_a_lock(self):
+        out = normalized_brief(
+            self.PROSE, kind="short_film_audio", transcript_speakers=["SPEAKER_00"]
+        )
+
+        self.assertIn("<Subject 1> (S1) is ALWAYS Anita.", out)
+
+    def test_the_narration_mentioning_another_name_does_not_win(self):
+        # "narrates the story of David" put David near a speaking verb.
+        out = normalized_brief(
+            self.PROSE, kind="short_film_audio", transcript_speakers=["SPEAKER_00"]
+        )
+
+        self.assertNotIn("ALWAYS David", out)
+
+    def test_two_voices_is_not_unambiguous(self):
+        out = normalized_brief(
+            self.PROSE, kind="short_film_audio",
+            transcript_speakers=["SPEAKER_00", "SPEAKER_01"],
+        )
+
+        self.assertNotIn("SUBJECT LOCK", out)
+
+    def test_no_audio_means_no_lock(self):
+        self.assertNotIn(
+            "SUBJECT LOCK", normalized_brief(self.PROSE, kind="short_film_audio")
+        )
+
+    def test_an_existing_lock_is_never_rewritten(self):
+        brief = "SUBJECT LOCK:\n<Subject 1> (S2) is ALWAYS Ricardo.\n"
+
+        out = normalized_brief(
+            brief, kind="short_film_audio", transcript_speakers=["SPEAKER_00"]
+        )
+
+        self.assertIn("ALWAYS Ricardo", out)
 
 
 if __name__ == "__main__":

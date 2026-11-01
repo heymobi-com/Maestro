@@ -129,6 +129,18 @@ export function DirectorBriefAssistant({
           <div className="text-[10px] text-text-muted">
             {report.label}: {report.chars} chars, {report.stages} beat{report.stages === 1 ? '' : 's'},{' '}
             {report.cast.length} cast row{report.cast.length === 1 ? '' : 's'}
+            {(report.speakers?.length || 0) > 0 && (
+              <>
+                {' · audio voice'}
+                {report.speakers!.length === 1 ? ' ' : 's '}
+                {report.speakers!.join(', ')}
+                {report.speaker_map && Object.keys(report.speaker_map).length > 0 && (
+                  <span className="text-text-muted/70">
+                    {' '}({Object.entries(report.speaker_map).map(([raw, label]) => `${raw}→${label}`).join(', ')})
+                  </span>
+                )}
+              </>
+            )}
             {errors.length === 0 && warnings.length === 0 && ' — no structural fault found'}
           </div>
           {[...errors, ...warnings, ...infos].map(finding => (

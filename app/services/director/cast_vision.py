@@ -34,6 +34,8 @@ __all__ = [
     "appearance_from_reference",
     "apply_cast_descriptions",
     "apply_reference_roster",
+    "canonical_speaker_label",
+    "canonical_speaker_labels",
     "cast_descriptions",
     "looks_block",
     "reference_roster",
@@ -180,6 +182,72 @@ def _clean(answer: Any) -> str:
     if "presence" in lowered or "appears in" in lowered:
         return ""
     return text[:LOOK_LIMIT]
+
+
+_RAW_SPEAKER_RE = re.compile(r"(?i)^\W*(?:speaker[_\s-]?)?(\d+)\W*$")
+
+
+def canonical_speaker_label(value: Any) -> str:
+    """A speaker identifier in the ``(S1)`` form the compiler parses, or ``""``.
+
+    The transcript is diarized by pyannote, which names its voices ``SPEAKER_00``,
+    ``SPEAKER_01``; Maestro numbers them by first appearance. A raw id that reached the
+    brief was copied into the lock verbatim, and a lock whose cue is not ``(Sn)`` does not
+    parse at all — measured on a real project the whole STRUCTURE came back with
+    ``<Subject 1> (SPEAKER_00) is ALWAYS Anita.`` and every check downstream then reported
+    "no SUBJECT LOCK the compiler can parse".
+
+    ``SPEAKER_00`` is the first voice, so its number is one higher than the suffix only
+    when the project numbers from 1; the mapping is therefore done by position elsewhere
+    (``canonical_speaker_labels``). Here a bare number is read as a suffix, which is what
+    the only unambiguous case is.
+    """
+
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    match = re.fullmatch(r"\(?\s*S\s*(\d+)\s*\)?", raw, re.I)
+    if match:
+        return f"S{int(match.group(1))}"
+    match = _RAW_SPEAKER_RE.match(raw)
+    if match:
+        number = int(match.group(1))
+        # pyannote counts from 00; Maestro labels from S1.
+        return f"S{number + 1}"
+    return ""
+
+
+def canonical_speaker_labels(speakers: Optional[Iterable[Any]]) -> list[str]:
+    """The speaker list in first-appearance order, as ``["S1", "S2"]``.
+
+    Position is the authority: Maestro numbers voices in the order they first speak, not
+    by their pyannote suffix, so a project whose first voice is ``SPEAKER_03`` still calls
+    it ``S1``. Already-canonical labels keep their number.
+    """
+
+    labels: list[str] = []
+    used: set[int] = set()
+    pending: list[int] = []
+    for position, raw in enumerate(speakers or (), start=1):
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        match = re.fullmatch(r"\(?\s*S\s*(\d+)\s*\)?", text, re.I)
+        if match:
+            number = int(match.group(1))
+            labels.append(f"S{number}")
+            used.add(number)
+            continue
+        labels.append("")
+        pending.append(position - 1)
+    next_number = 1
+    for position in pending:
+        while next_number in used:
+            next_number += 1
+        labels[position] = f"S{next_number}"
+        used.add(next_number)
+        next_number += 1
+    return labels
 
 
 def _name_key(name: str) -> str:

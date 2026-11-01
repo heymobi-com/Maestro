@@ -5645,7 +5645,7 @@ def _reference_relationships(
 # Without this the lock parsed to nothing and every identity bound only by a
 # reference picture lost its name.
 _SUBJECT_LOCK_RE = re.compile(
-    r"<Subject\s*(\d+)>\s*(?:\(\s*S\s*(\d+)\s*\)\s*)?"
+    r"<Subject\s*(\d+)>\s*(?:\(([^)\n]{1,24})\)\s*)?"
     r"(?:es\s+SIEMPRE|is\s+ALWAYS)\s+"
     r"[<\"'“‘*]?"
     # "la Figura del Purgatorio" names the Figure, not "la": the article is not part
@@ -5673,12 +5673,19 @@ def project_subject_lock_cues(project_context: str) -> dict[int, str]:
     the voice. The cue is what lets the compiler attribute a spoken line without
     guessing from row order, and it was being dropped by a lock regex that only looked
     for the name.
+
+    The cue is accepted in any spelling and normalized. A brief that copied the raw
+    diarization id (``(SPEAKER_00)``) used to break the regex itself, so the whole lock
+    failed to parse and every shot fell back to row order.
     """
+
+    from .cast_vision import canonical_speaker_label
 
     cues: dict[int, str] = {}
     for match in _SUBJECT_LOCK_RE.finditer(str(project_context or "")):
-        if match.group(2):
-            cues[int(match.group(1))] = f"S{int(match.group(2))}"
+        cue = canonical_speaker_label(match.group(2))
+        if cue:
+            cues[int(match.group(1))] = cue
     return cues
 
 

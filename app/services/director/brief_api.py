@@ -113,18 +113,23 @@ def create_router(*, generate=None) -> APIRouter:
 
         def ground(text: str) -> str:
             """Everything the manifest knows, written into the text, mechanically."""
-            grounded = apply_cast_descriptions(text, looks) if looks else text
+            from .brief_assistant import consolidate_cast_rows, normalize_speaker_cues
+
+            grounded = normalize_speaker_cues(text, speakers)
+            grounded = apply_cast_descriptions(grounded, looks) if looks else grounded
             if roster:
                 grounded = apply_reference_roster(grounded, references, looks)
-            from .brief_assistant import consolidate_cast_rows
-
             return consolidate_cast_rows(grounded)
 
         before = _report_of(brief, body)
         # The cue, the roster and the picture's own sentences go in before the model
         # reads the text, so what it reorganises already names the speaker and holds the
         # face instead of describing a person it has never seen.
-        mechanical = ground(normalized_brief(brief, kind=kind))
+        mechanical = ground(
+            normalized_brief(
+                brief, kind=kind, transcript_speakers=speakers, references=references,
+            )
+        )
 
         proposal = mechanical
         method = "normalized"
@@ -160,6 +165,8 @@ def create_router(*, generate=None) -> APIRouter:
             "method": method,
             "looks": [{"name": name, "look": look} for name, look in looks.items()],
             "roster": roster,
+            "speakers": after.get("speakers") or [],
+            "speaker_map": after.get("speaker_map") or {},
             "before": before,
             "after": after,
             "resolved": sorted(

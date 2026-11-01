@@ -39,7 +39,9 @@ a fix for each:
 | `abstract-beats` | warning | a stage that names no place and no action, so the planner has to invent the film from it |
 | `cast-without-appearance` | warning | a character who acts in a stage but is only listed as a *presence*, so every clip invents a different face |
 | `cast-not-bound-to-picture` | warning | a supplied picture names a character the brief gives no appearance |
+| `lock-cue-not-canonical` | error | a cue written as a diarization id (`SPEAKER_00`) instead of `(S1)` |
 | `lock-missing-cue` | warning | the lock names participants but binds none to the audio's `(Sx)` label |
+| `no-references` | info | no picture reached the check, so the appearance can only come from text |
 | `narration-driven` | info | the description states how the film is made, not what happens in it; correct when a narration drives the clips |
 | `speakers-unbound` | warning | audio speakers that the lock binds to no Subject |
 | `podcast-stages` | info | staged locations in a workflow that is one studio |
@@ -131,6 +133,35 @@ have. Instead the prompt requires one `STANDING` line saying where the narrator 
 to the action, and forbids relocating her. The diagnosis reports `narration-driven` as
 `info` in that case, and only reports `abstract-beats` when there is no narration to carry
 the beats.
+
+## The cue is `(S1)`, never `SPEAKER_00`
+
+The transcript is diarized by pyannote, which names its voices `SPEAKER_00`, `SPEAKER_01`;
+Maestro numbers them by first appearance. The assistant was handed the raw ids and copied
+one straight into the lock:
+
+    <Subject 1> (SPEAKER_00) is ALWAYS Anita.
+
+That cue is not a number, so the lock regex matched nothing, the lock was discarded, and
+the plan then inferred every voice from row order. Worse, the panel then reported *"No
+SUBJECT LOCK the compiler can parse"* about a brief that plainly had one.
+
+Three layers now close it:
+
+| layer | what it does |
+| --- | --- |
+| `canonical_speaker_labels` | turns any list of ids into `["S1", "S2"]`, by first-appearance position, never by the `_00` suffix |
+| `normalize_speaker_cues` | rewrites a cue in the model's answer (`(SPEAKER_00)` → `(S1)`) before it becomes the proposal |
+| `_SUBJECT_LOCK_RE` | accepts any short parenthetical as a cue and normalizes it, so a saved brief with a bad cue still parses |
+
+The structure prompt is told the canonical labels, is told never to write a diarization id,
+and the report shows what the audio actually offers (`audio voice S1 (SPEAKER_00→S1)`).
+
+`derive_subject_lock` closes the fallback too: when the model is unavailable or answers
+nothing usable, the mechanical pass writes the lock itself if — and only if — the answer is
+unambiguous: exactly one voice, and one name the text itself calls the speaker (scored, so
+"narrates the story of David" does not crown David). A wrong lock is worse than none, so
+two voices or two candidates leave the text alone.
 
 ## The lock carries the voice, and the text carries the pictures
 
@@ -259,7 +290,7 @@ mechanical normalization — sections reordered, beats numbered from prose, a po
 given stages, the ideas never rewritten — and `TemplateLeakTests`, the four faults above
 plus the two stripping passes and the prompt rules that forbid them.
 
-`tests/test_director_cast_vision.py` (58) holds the read-from-the-picture path: which
+`tests/test_director_cast_vision.py` (70) holds the read-from-the-picture path: which
 references are character sheets, one read per name, the picture being what is sent, the
 2K reference being sent at full detail, the prompt covering every visible detail, the
 answer being the appearance, labels and refusals discarded, a raise or a missing model
@@ -267,10 +298,11 @@ leaving the brief untouched, the cap, the per-shot filter and its budget, and th
 pass — a presence row replaced, the writer's own description kept, a missing row added. It
 also pins the name matching (`Goliat`/`Goliath`, honorifics, different people never
 match), the roster (manifest order, the cue, the appearance, idempotency, the brief's own
-spelling winning), the cast consolidation, the `(S1)` binding end to end, and the
-documentary case: the Anita prose yields no stages, reports `narration-driven` with audio
-and `abstract-beats` without it, and the prompt forbids inventing stages while a story
-brief still gets them.
+spelling winning), the cast consolidation, the `(S1)` binding end to end — including the
+raw `SPEAKER_00` cue being repaired and the mechanical pass deriving a lock it can prove —
+and the documentary case: the Anita prose yields no stages, reports `narration-driven` with
+audio and `abstract-beats` without it, and the prompt forbids inventing stages while a
+story brief still gets them.
 
 `tests/test_director_brief_api.py` (10) drives the routes over ASGI: a prose brief is
 reported, the route works with no model, the mechanical pass still fixes the shape, a

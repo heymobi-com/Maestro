@@ -48,8 +48,10 @@ from .scene_policy import (
 __all__ = [
     "CANONICAL_SECTIONS",
     "consolidate_cast_rows",
+    "derive_subject_lock",
     "description_states_events",
     "diagnose_brief",
+    "normalize_speaker_cues",
     "normalized_brief",
     "strip_template_placeholders",
     "structure_prompt",
@@ -86,6 +88,19 @@ _STAGE_RE = re.compile(
 # heading "PRESENCES (only what this workflow needs):" leaked the same way.
 _PLACEHOLDER_LINE_RE = re.compile(r"^\s*<[^>\n]{1,60}>\s*:")
 _INSTRUCTION_HEADING_RE = re.compile(r"\s*\((?:only )?what (?:this workflow|the workflow)[^)]*\)")
+
+# The lock with its cue kept raw, so a wrong cue can be named in a finding rather than
+# silently dropped. Mirrors `h3_dialogue._SUBJECT_LOCK_RE`.
+_SUBJECT_LOCK_RAW_RE = re.compile(
+    r"<Subject\s*(\d+)>\s*(?:\(([^)\n]{1,24})\)\s*)?(?:es\s+SIEMPRE|is\s+ALWAYS)",
+    re.IGNORECASE,
+)
+
+
+def _is_canonical_cue(cue: str) -> bool:
+    """Whether a cue is in the ``S1`` form the compiler reads."""
+
+    return bool(re.fullmatch(r"\(?\s*S\s*\d+\s*\)?", str(cue or "").strip(), re.IGNORECASE))
 
 # A stage is concrete when somebody does something in it. A beat that only describes
 # the format -- "epic scenes illustrate what is being narrated" -- leaves the planner
@@ -142,15 +157,164 @@ def description_states_events(brief: str) -> bool:
     stages = _stage_texts(str(brief or ""))
     if not stages:
         return False
+    # An explicit "Stage N" is the person asking for a sequence, whatever the words are.
+    if re.search(r"(?i)\bstage\s+\d", _description_prose(brief)):
+        return True
     bodies = [body for _number, body in stages]
     places = {
         word for body in bodies for word in PLACE_WORDS
         if re.search(rf"\b{word}\b", body, re.I)
     }
+    # Two different places the film goes to is a shot list. A contract says "the
+    # settings", "the spaces", "the world" — those are not places.
     if len(places) >= 2:
         return True
-    events = sum(1 for body in bodies if beat_states_an_event(body))
-    return events * 2 >= len(bodies)
+    # One place plus performed actions is also a shot list ("the kitchen: she lifts the
+    # cup"). One place and no action is a tableau, and a narration is a better plan.
+    if len(places) == 1:
+        events = sum(1 for body in bodies if beat_states_an_event(body))
+        return events * 2 >= len(bodies)
+    return False
+
+
+def normalize_speaker_cues(
+    brief: str,
+    transcript_speakers: Optional[Iterable[Any]] = None,
+) -> str:
+    """Rewrite a raw diarization id in a cue to the ``(S1)`` label the compiler reads.
+
+    A model given ``("SPEAKER_00",)`` wrote ``<Subject 1> (SPEAKER_00) is ALWAYS Anita.``
+    verbatim. That cue is not a number, so the lock regex matched nothing, the lock was
+    discarded, and the plan then inferred every voice from row order.
+    """
+
+    from .cast_vision import canonical_speaker_labels
+
+    labels = canonical_speaker_labels(transcript_speakers or ())
+    fallback = labels[0] if labels else "S1"
+
+    def replace(match: re.Match) -> str:
+        cue = match.group(1).strip()
+        if _is_canonical_cue(cue):
+            return f"({cue if cue.startswith('S') else 'S' + cue.lstrip('Ss').strip('()')})"
+        number = re.search(r"(\d+)", cue)
+        if number:
+            index = int(number.group(1))
+            if index < len(labels):
+                return f"({labels[index]})"
+            if index == 0 and labels:
+                return f"({labels[0]})"
+        return f"({fallback})"
+
+    return re.sub(r"\(\s*([^()\n]{1,24})\s*\)(?=\s*(?:is\s+ALWAYS|es\s+SIEMPRE))", replace, brief, flags=re.I)
+
+
+# Capitalized words that open a sentence or describe the film rather than name a person.
+_NOT_A_NAME = {
+    "this", "the", "a", "an", "no", "not", "only", "every", "each", "all", "any",
+    "narrator", "documentary", "film", "story", "scene", "shot", "stage", "act",
+    "camera", "ambience", "characters", "description", "negative", "presences",
+    "subject", "lock", "references", "biblical", "ancient", "figure", "figures",
+    "people", "soldiers", "world", "audience", "viewer", "voice", "sound", "light",
+    "chapter", "part", "title", "note", "rule", "standing", "then", "when", "while",
+    "after", "before", "because", "and", "but", "so", "if", "once", "still", "here",
+    "there", "they", "she", "he", "it", "we", "you", "i", "his", "her", "their",
+}
+
+
+def derive_subject_lock(
+    brief: str,
+    transcript_speakers: Optional[Iterable[Any]] = None,
+    references: Optional[Iterable[Any]] = None,
+) -> str:
+    """Write the ``SUBJECT LOCK`` a prose brief never had, when the answer is unambiguous.
+
+    A brief written as prose has no lock, so the compiler numbers the participants from
+    the planner's own list — the mistake that puts one character's voice on another. The
+    model usually fixes that, but the model is not always available or correct, and the
+    mechanical pass is what the person falls back to.
+
+    It only acts when nothing has to be guessed: exactly one voice on the audio, and
+    exactly one name the brief presents as the speaker (a name near "narrates", "speaks",
+    "voice", "host", "tells"), or a single-name cast. Anything else is left to the model,
+    because a wrong lock is worse than none.
+    """
+
+    from .cast_vision import canonical_speaker_labels
+
+    text = str(brief or "")
+    from .h3_dialogue import project_subject_lock
+
+    if project_subject_lock(text):
+        return text
+    labels = canonical_speaker_labels(transcript_speakers or ())
+    if len(labels) != 1:
+        return text
+    label = labels[0]
+
+    names = list(_cast_rows(text))
+    if not names:
+        names = [item["name"] for item in _roster_names(references)]
+    if not names:
+        # A prose brief casts nobody explicitly; the names it uses are its cast.
+        seen: set[str] = set()
+        for match in re.finditer(
+            r"\b([A-ZÁÉÍÓÚÜÑ][a-záéíóúüñ]{2,}(?:\s+[A-ZÁÉÍÓÚÜÑ][a-záéíóúüñ]{2,})?)", text
+        ):
+            candidate = match.group(1)
+            key = candidate.casefold()
+            if key in seen:
+                continue
+            if key in _NOT_A_NAME or key.split()[0] in _NOT_A_NAME:
+                continue
+            if key.split()[0] in _PLACE_WORDS:
+                continue
+            seen.add(key)
+            names.append(candidate)
+    # Score, rather than flag, because "narrates the story of David" also puts a name
+    # close to a speaking verb. A name the sentence itself calls the speaker wins over a
+    # name the narration merely mentions.
+    scored: list[tuple[int, str]] = []
+    for name in names:
+        score = 0
+        if re.search(
+            rf"\b{re.escape(name)}\b[^.!\n]{{0,60}}\b"
+            r"(narrat\w*|speak\w*|says|telling|tells|voice|host\w*|present\w*)\b",
+            text, re.I,
+        ):
+            score += 3
+        if re.search(
+            rf"\b(narrat\w*|speak\w*|voice|host\w*|present\w*|tells?)\b"
+            rf"[^.!\n]{{0,28}}\b{re.escape(name)}\b",
+            text, re.I,
+        ):
+            score += 2
+        if score:
+            scored.append((score, name))
+    if not scored:
+        if len(names) != 1:
+            return text
+        narrator = names[0]
+    else:
+        scored.sort(reverse=True)
+        if len(scored) > 1 and scored[0][0] == scored[1][0]:
+            return text  # two plausible narrators is not unambiguous
+        narrator = scored[0][1]
+
+    lock = f"SUBJECT LOCK:\n<Subject 1> ({label}) is ALWAYS {narrator}.\n"
+    rest = "\n".join(
+        line for line in text.splitlines()
+        if not re.match(r"(?i)^\s*subject\s+lock\s*:", line)
+    ).lstrip()
+    return f"{lock}\n{rest}" if rest else lock
+
+
+def _roster_names(references: Optional[Iterable[Any]]) -> list[dict]:
+    if not references:
+        return []
+    from .cast_vision import reference_roster
+
+    return reference_roster(references)
 
 
 def strip_template_placeholders(brief: str) -> str:
@@ -392,6 +556,17 @@ def diagnose_brief(
     sections = _sections(text)
     findings: list[dict[str, str]] = []
 
+    # The transcript names its voices the way the diarizer does ("SPEAKER_00"); everything
+    # downstream speaks "(S1)". Canonicalize once, here, so every message and every prompt
+    # speaks the language the compiler parses.
+    from .cast_vision import canonical_speaker_labels
+
+    raw_speakers = [
+        str(speaker).strip() for speaker in (transcript_speakers or ()) if str(speaker).strip()
+    ]
+    canonical_speakers = canonical_speaker_labels(raw_speakers)
+    speaker_map = dict(zip(raw_speakers, canonical_speakers))
+
     def add(code: str, severity: str, message: str, fix: str) -> None:
         findings.append({
             "code": code, "severity": severity, "message": message, "fix": fix,
@@ -402,7 +577,8 @@ def diagnose_brief(
             "The project text is empty, so the plan has nothing but the audio.",
             "Describe the cast, the world and the film's beats.")
         return {"kind": policy.kind, "label": policy.label, "findings": findings,
-                "sections": [], "cast": [], "stages": 0, "chars": 0}
+                "sections": [], "cast": [], "stages": 0, "chars": 0,
+                "speakers": canonical_speakers, "speaker_map": speaker_map}
 
     # 1. The lock. This one decides how every participant is numbered.
     from services.director.h3_dialogue import project_subject_lock, project_subject_lock_cues
@@ -420,10 +596,22 @@ def diagnose_brief(
     # 1b. The lock names the participant; the audio has a voice. Nothing tied the two
     # together, so a plan described the narrator with no (S1) and the compiler had to
     # infer the speaker from row order.
+    raw_cues = {
+        match.group(2)
+        for match in _SUBJECT_LOCK_RAW_RE.finditer(text)
+        if match.group(2)
+    }
+    wrong_cue = [cue for cue in raw_cues if not _is_canonical_cue(cue)]
+    if lock and has_audio and wrong_cue:
+        add("lock-cue-not-canonical", "error",
+            "The SUBJECT LOCK labels a participant with "
+            f"{', '.join(sorted(wrong_cue))}, which is the diarizer's id and not the "
+            "speaker label the compiler reads. The lock then parses to a participant with "
+            "no voice, and a line cannot be attributed.",
+            f"Write the label the transcript uses: '{canonical_speakers[0] if canonical_speakers else 'S1'}' "
+            f"as '(<label>)' — '<Subject 1> (S1) is ALWAYS <name>.'")
     if lock and has_audio and not lock_cues:
-        speakers_here = sorted(
-            str(speaker).strip() for speaker in (transcript_speakers or ()) if str(speaker).strip()
-        )
+        speakers_here = canonical_speakers
         add("lock-missing-cue", "warning",
             "The SUBJECT LOCK names the participants but binds none of them to the "
             "audio's speaker label"
@@ -490,15 +678,16 @@ def diagnose_brief(
                 "Say in which stage each one appears, or move them out of CHARACTERS.")
 
     # 5. Characters named in the story but never described.
-    described = {name.casefold() for name in cast_rows}
     if stages:
+        from .cast_vision import same_name
+
         story = " ".join(body for _, body in stages)
         for match in re.finditer(
             r"\b([A-ZÁÉÍÓÚÜÑ][a-záéíóúüñ]{2,}(?:\s+[A-ZÁÉÍÓÚÜÑ][a-záéíóúüñ]{2,})?)", story
         ):
             candidate = match.group(1)
             lowered = candidate.casefold()
-            if any(lowered in name for name in described):
+            if any(same_name(candidate, name) for name in cast_rows):
                 continue
             # A place ("Kitchen:") and a sentence opener are not cast.
             if lowered.split()[0] in _PLACE_WORDS:
@@ -555,10 +744,16 @@ def diagnose_brief(
                 f"appearance ({', '.join(unbound[:4])}"
                 + (", ..." if len(unbound) > 4 else "")
                 + "), so nothing in the text holds the face and each shot invents one.",
-                "Press Structure — it reads the appearance from each picture — or write "
-                "hair, wardrobe and build for each name in CHARACTERS.")
+                "Press Structure: it reads the appearance from each picture. If the rows "
+                "still have no hair or wardrobe, the local model has no vision (load one "
+                "with mmproj), or write hair, build and wardrobe yourself.")
 
-    # 6b. The assistant's own template reaching the planner as content. Measured on a
+    if not references:
+        add("no-references", "info",
+            "No character reference picture reached this check, so the appearance can "
+            "only come from the text.",
+            "Add the character pictures to the project, then press Structure — the "
+            "assistant reads them instead of asking you to describe a face.")
     # real brief: "<every other character>: named as presences and objects" and the
     # heading "PRESENCES (only what this workflow needs):" were both copied verbatim.
     placeholders = [
@@ -660,15 +855,25 @@ def diagnose_brief(
         "stages": len(stages),
         "chars": len(text),
         "subject_lock": {int(number): name for number, name in lock.items()},
+        "lock_cues": lock_cues,
+        "speakers": canonical_speakers,
+        "speaker_map": speaker_map,
     }
 
 
-def normalized_brief(brief: str, *, kind: str = SHORT_FILM_AUDIO) -> str:
+def normalized_brief(
+    brief: str,
+    *,
+    kind: str = SHORT_FILM_AUDIO,
+    transcript_speakers: Optional[Iterable[Any]] = None,
+    references: Optional[Iterable[Any]] = None,
+) -> str:
     """The same brief with the mechanical faults repaired, no model involved.
 
     This is what the assistant can guarantee without an LLM: headings in the canonical
-    order and case, `Stage N` numbering restored, cast rows the story never places given
-    a placeholder stage note removed, and the whole thing trimmed. Ideas are untouched.
+    order and case, `Stage N` numbering restored, the SUBJECT LOCK derived when the answer
+    is unambiguous, cast rows the story never places given a placeholder stage note
+    removed, and the whole thing trimmed. Ideas are untouched.
     """
 
     policy = scene_policy(kind)
@@ -690,7 +895,9 @@ def normalized_brief(brief: str, *, kind: str = SHORT_FILM_AUDIO) -> str:
         ordered = ["DESCRIPTION:\n" + " ".join(str(brief or "").split())]
 
     text = "\n\n".join(ordered)
+    text = normalize_speaker_cues(text, transcript_speakers)
     text = consolidate_cast_rows(text)
+    text = derive_subject_lock(text, transcript_speakers, references)
 
     # Numbering the beats of a brief that describes the film instead of its events
     # would invent a shot list out of a contract: a narrated documentary would be
@@ -791,8 +998,9 @@ def structure_prompt(
     ) or "- none"
     speakers = ", ".join(sorted(str(s) for s in (transcript_speakers or ()))) or "(none supplied)"
     cast = ", ".join(sorted(str(c) for c in (characters or ()))) or "(not supplied)"
-    from .cast_vision import roster_block
+    from .cast_vision import canonical_speaker_labels, roster_block
 
+    speaker_labels = canonical_speaker_labels(transcript_speakers or ())
     pictures = roster_block(roster or [])
 
     if narration_driven:
@@ -844,6 +1052,9 @@ What each section holds:
   The cue in parentheses is the audio's speaker label and it is NOT optional: it is the
   only thing that says which numbered participant owns which voice. Keep every cue the
   text already carries, and add one from the roster below when a picture states it.
+  The cue must be written exactly as one of these: {", ".join(speaker_labels) or "(S1)"}.
+  Never write a diarization id such as SPEAKER_00 — that form does not parse, and the
+  whole lock is then discarded.
   Then one sentence naming the characters that never become a Subject.
 - CHARACTERS: one line per character, "<name>: appearance, age, wardrobe."
   Every character the story shows by name gets its own line. Never replace named
@@ -885,7 +1096,8 @@ Hard rules:
   a model with unlimited context."""
 
     user = f"""The film is planned as {clip_count or 'an unknown number of'} clips.
-The audio's speakers are: {speakers}
+The audio's speakers, in first-appearance order, are: {", ".join(speaker_labels) or "(none supplied)"}
+(their raw transcript ids are {speakers}; never copy those into the brief)
 The cast supplied with the project is: {cast}
 
 REFERENCE PICTURES THE MODEL WILL BE GIVEN:
