@@ -700,6 +700,8 @@ export function DirectorChat() {
 
   // Short film specific
   const shortFilmCharacters = useStore(s => s.shortFilmCharacters)
+  const characterRefPaths = useStore(s => s.directorCharacterRefPaths)
+  const characterRefLabels = useStore(s => s.directorCharacterRefLabels)
   const shortFilmSetCharacters = useStore(s => s.shortFilmSetCharacters)
   const shortFilmUploadAndAnalyze = useStore(s => s.shortFilmUploadAndAnalyze)
   const shortFilmSetPacingBias = useStore(s => s.shortFilmSetPacingBias)
@@ -1780,6 +1782,12 @@ export function DirectorChat() {
               (analysis?.lyrics || []).map(row => String(row.speaker || '').trim()).filter(Boolean),
             ))}
             characters={shortFilmCharacters.map(character => character.name).filter(Boolean)}
+            references={characterRefPaths.map((path, index) => ({
+              type: 'image',
+              path,
+              role: characterRefLabels[index] || '',
+              image_intent: 'identity',
+            }))}
             hasAudio={Boolean(useStore.getState().directorAudioPath)}
             onApply={value => { setChatInput(value); setSceneDescription(value) }}
             disabled={!chatInputEnabled}

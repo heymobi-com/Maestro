@@ -414,7 +414,16 @@ def _brief_stage_list(brief: str) -> list[dict]:
         })
     if stages:
         return stages
-    # No numbered stages: the description's own sentences are the beats.
+    # No numbered stages: the description's own sentences are the beats -- but only if
+    # those sentences say what happens. A brief that describes how the film is made
+    # ("Anita narrates the story, moving through the settings, the biblical figures
+    # appear around her") is a contract, not a shot list: read as stages it pins the
+    # narrator to one invented location for a seventh of the film, which is the static
+    # tableau a narrated documentary must not have. There the narration is the stage.
+    from ..brief_assistant import description_states_events
+
+    if not description_states_events(brief):
+        return []
     return _beats_from_description(brief)
 
 

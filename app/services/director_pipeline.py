@@ -8773,6 +8773,7 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
         if shot_images_required(_director_effective_shot_image_policy(params))
         else "t2va"
     )
+    cast_looks = _h3_cast_looks(params) if is_h3_model else {}
     for index, shot in enumerate(plan.shots):
         metadata = getattr(shot, "metadata", None) or {}
         continuity_group = str(metadata.get("continuity_group") or "").strip()
@@ -8837,6 +8838,10 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
                 "_director_h3_model_family": h3_model_family,
                 "_director_project_context": _h3_shot_project_context(
                     scene_description, index, len(clip_plans),
+                    cast_looks=_h3_looks_for_shot(
+                        cast_looks,
+                        (clip_plans[index].get("video_prompt", "") if index < len(clip_plans) else ""),
+                    ),
                 ),
                 "_director_environment": getattr(shot, "environment", ""),
                 "_director_audio_policy": metadata.get("_director_audio_policy") or director_audio_policy(scene_description),
@@ -9869,7 +9874,61 @@ def _h3_world_context(brief: str, *, limit: int = 700) -> str:
     return world[:limit]
 
 
-def _h3_shot_project_context(brief: str, index: int, total: int) -> str:
+def _h3_cast_looks(params: dict) -> dict:
+    """Appearances read from the identity references, once per pipeline.
+
+    Cached on the params so a 42-clip run makes one vision call per character, not one
+    per clip, and so a re-plan after the first does not pay for it again.
+    """
+
+    if not isinstance(params, dict):
+        return {}
+    cached = params.get("_director_cast_looks")
+    if isinstance(cached, dict):
+        return cached
+    try:
+        from services.director.cast_vision import cast_descriptions
+
+        looks = cast_descriptions(params.get("minimax_h3_references") or [])
+    except Exception as exc:  # noqa: BLE001 - continuity is an enhancement
+        print(f"[Pipeline] Could not read reference appearances: {exc}")
+        return {}
+    if looks:
+        params["_director_cast_looks"] = looks
+        print(
+            "[Pipeline] Read the look of "
+            + ", ".join(sorted(looks))
+            + " from their reference pictures."
+        )
+    return looks
+
+
+def _h3_looks_for_shot(looks: dict, shot_text: str) -> str:
+    """The appearance lines for whoever this shot actually shows, and nobody else.
+
+    The look of every character in one prompt is the failure this pipeline spent a
+    round of work removing: a wardrobe mentioned in every clip is a wardrobe drawn in
+    every clip. So a name reaches this shot only if the shot's own text says it.
+    """
+
+    if not looks:
+        return ""
+    try:
+        from services.director.cast_vision import looks_block
+
+        text = str(shot_text or "")
+        names = [
+            name for name in looks
+            if re.search(rf"\b{re.escape(name)}\b", text, re.I)
+        ]
+        return looks_block(looks, names)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _h3_shot_project_context(
+    brief: str, index: int, total: int, cast_looks: str = "",
+) -> str:
     """What one shot may read from the brief: the world, and its own stage.
 
     The compiled prompt used to carry the whole brief in every clip — the SUBJECT
@@ -9885,6 +9944,8 @@ def _h3_shot_project_context(brief: str, index: int, total: int) -> str:
     """
 
     parts: list[str] = []
+    if cast_looks:
+        parts.append(cast_looks)
     # The lock's own S1/S2 lines are what number the participants, so they stay; the
     # "S3-S7 are presence-only" enumeration beside them names every other character
     # and is dropped with the rest of the cast list. They are re-emitted in the shape

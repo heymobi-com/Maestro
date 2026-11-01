@@ -21,6 +21,7 @@ its system prompt.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 # The workflows Maestro actually runs (see director_model_compat.DIRECTOR_PIPELINE_TYPES).
@@ -147,3 +148,54 @@ def scene_guidance(kind: str | None) -> str:
     """The prompt block for ``kind``, ready to interpolate into a system prompt."""
 
     return scene_policy(kind).guidance
+
+
+#: Words that name a place, used to tell a beat that happens somewhere from a beat
+#: that only describes the film.
+PLACE_WORDS = (
+    "kitchen", "corridor", "hallway", "church", "chapel", "altar", "sacristy", "street",
+    "square", "courtyard", "doorway", "stairs", "tower", "forest", "clearing", "field",
+    "bedroom", "cellar", "attic", "office", "stage", "rooftop", "balcony", "bridge",
+    "river", "riverbank", "shore", "beach", "cave", "room", "house", "village", "town",
+    "valley", "camp", "battlefield", "desert", "studio", "desk", "throne", "gate",
+    "temple", "market", "hillside", "slope", "ridge", "well", "stream", "road", "path",
+)
+
+#: Verbs that mean somebody does something visible on screen. A beat built only from
+#: "the documentary presents epic scenes that illustrate the narration" has none of
+#: these, and a clip planned from it has nothing to show.
+EVENT_ACTION_RE = re.compile(
+    r"\b(walks?|walking|enters?|entering|kneels?|kneeling|stands?|standing|sits?|sitting|"
+    r"turns?|turning|raises?|raising|lifts?|holds?|holding|carries?|carrying|throws?|"
+    r"throwing|strikes?|striking|climbs?|climbing|runs?|running|opens?|closes?|"
+    r"falls?|falling|rises?|arrives?|leaves?|steps?|crosses?|reaches?|touches?|"
+    r"prays?|praying|fights?|fighting|draws?|aims?|shoots?|washes?|builds?|"
+    r"sleeps?|wakes?|weeps?|cries?|laughs?|shouts?|plants|swings|releases|crouches?)\b",
+    re.I,
+)
+
+#: Verbs that describe the film's narration rather than anything happening in it. A
+#: brief written as a contract ("Anita narrates the story, showing and explaining what
+#: is happening") is almost all of these, and must never be read as a shot list.
+_TELLING_RE = re.compile(
+    r"\b(narrat\w*|explain\w*|describ\w*|introduc\w*|illustrat\w*|present\w*|"
+    r"transport\w*|documentary|documentaries|audience|viewer\w*|speaks?|speaking|"
+    r"voice|narration)\b",
+    re.I,
+)
+
+
+def beat_states_an_event(text: str) -> bool:
+    """True when a beat says somebody does something somewhere, not what the film is.
+
+    A brief can read as a story ("Dawn-grey kitchen: Abuela Rosa lifts the cup") or as
+    a contract for making one ("The documentary presents epic biblical scenes that
+    visually illustrate what is being narrated"). Only the first gives a planner a
+    shot; a film planned from the second is invented from nothing, which is the
+    wandering measured on a real 42-clip project.
+    """
+
+    body = str(text or "")
+    if _TELLING_RE.search(body):
+        return False
+    return bool(EVENT_ACTION_RE.search(body))

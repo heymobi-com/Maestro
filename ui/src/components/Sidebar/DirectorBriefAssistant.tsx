@@ -19,6 +19,7 @@ export function DirectorBriefAssistant({
   clipCount,
   transcriptSpeakers,
   characters,
+  references,
   hasAudio,
   onApply,
   disabled,
@@ -28,6 +29,7 @@ export function DirectorBriefAssistant({
   clipCount: number
   transcriptSpeakers: string[]
   characters: string[]
+  references?: unknown[]
   hasAudio: boolean
   onApply: (brief: string) => void
   disabled?: boolean
@@ -36,6 +38,7 @@ export function DirectorBriefAssistant({
   const [proposal, setProposal] = useState<string | null>(null)
   const [method, setMethod] = useState<'llm' | 'normalized' | null>(null)
   const [resolved, setResolved] = useState<string[]>([])
+  const [looks, setLooks] = useState<{ name: string; look: string }[]>([])
   const [checking, setChecking] = useState(false)
   const [structuring, setStructuring] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -60,11 +63,13 @@ export function DirectorBriefAssistant({
     try {
       const result = await structureDirectorBrief({
         brief, pipelineType, clipCount, transcriptSpeakers, characters, hasAudio,
+        references: references || [],
       })
       setProposal(result.brief)
       setReport(result.after)
       setMethod(result.method)
       setResolved(result.resolved)
+      setLooks(result.looks || [])
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Brief structuring failed')
     } finally {
@@ -174,6 +179,18 @@ export function DirectorBriefAssistant({
           <pre className="max-h-56 overflow-y-auto whitespace-pre-wrap rounded-lg border border-border bg-bg-secondary p-2 text-[10px] leading-snug text-text-primary scrollbar-visible">
             {proposal}
           </pre>
+          {looks.length > 0 && (
+            <div className="rounded-lg border border-border bg-bg-secondary px-2 py-1.5 text-[10px] leading-snug text-text-muted">
+              <div className="text-text-secondary">
+                Read from the reference pictures (the vision model, not the text):
+              </div>
+              {looks.map(item => (
+                <div key={item.name} className="mt-0.5">
+                  <span className="text-text-primary">{item.name}</span>: {item.look}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>

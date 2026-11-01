@@ -34,18 +34,23 @@ import re
 from typing import Any, Iterable, Optional
 
 from .scene_policy import (
+    EVENT_ACTION_RE,
     MUSIC_VIDEO,
+    PLACE_WORDS,
     PODCAST,
     SHORT_FILM_AUDIO,
     SHORT_FILM_STORY,
     VIRAL_VIDEO,
+    beat_states_an_event,
     scene_policy,
 )
 
 __all__ = [
     "CANONICAL_SECTIONS",
+    "description_states_events",
     "diagnose_brief",
     "normalized_brief",
+    "strip_template_placeholders",
     "structure_prompt",
 ]
 
@@ -64,12 +69,7 @@ CANONICAL_SECTIONS = (
 _GLOBAL_RULE_WORDS = ("whenever", "always", "every time", "throughout", "constant", "non-stop")
 
 #: Words that name a place, used to detect a stage that wanders.
-_PLACE_WORDS = (
-    "kitchen", "corridor", "hallway", "church", "chapel", "altar", "sacristy", "street",
-    "square", "courtyard", "doorway", "stairs", "tower", "forest", "clearing", "field",
-    "bedroom", "cellar", "attic", "office", "stage", "rooftop", "balcony", "bridge",
-    "river", "riverbank", "shore", "beach", "cave", "room", "house", "village", "town",
-)
+_PLACE_WORDS = PLACE_WORDS
 
 _CAST_ROW_RE = re.compile(
     r"(?im)^[ \t]*(?:S(\d)\s*)?[\(\[]?([A-ZÁÉÍÓÚÜÑ][^:\n]{2,60}?)[\)\]]?\s*:\s*\S"
@@ -89,15 +89,7 @@ _INSTRUCTION_HEADING_RE = re.compile(r"\s*\((?:only )?what (?:this workflow|the 
 # A stage is concrete when somebody does something in it. A beat that only describes
 # the format -- "epic scenes illustrate what is being narrated" -- leaves the planner
 # to invent the whole film from it, which is the wandering the user reported.
-_CONCRETE_ACTION_RE = re.compile(
-    r"\b(walks?|walking|enters?|entering|kneels?|kneeling|stands?|standing|sits?|sitting|"
-    r"turns?|turning|raises?|raising|lifts?|holds?|holding|carries?|carrying|throws?|"
-    r"throwing|strikes?|striking|climbs?|climbing|runs?|running|opens?|closes?|"
-    r"falls?|falling|rises?|arrives?|leaves?|steps?|crosses?|reaches?|touches?|"
-    r"prays?|praying|fights?|fighting|draws?|aims?|shoots?|washes?|builds?|"
-    r"sleeps?|wakes?|weeps?|cries?|laughs?|shouts?)\b",
-    re.I,
-)
+_CONCRETE_ACTION_RE = EVENT_ACTION_RE
 
 
 # A presence row that names what someone looks like is an appearance; one that says when
@@ -123,6 +115,39 @@ def _describes_appearance(text: str) -> bool:
     """True when a cast row says what someone looks like, not merely when they appear."""
 
     return bool(_APPEARANCE_RE.search(text))
+
+
+def description_states_events(brief: str) -> bool:
+    """True when a brief's beats are events rather than a description of the format.
+
+    Two briefs measured on this codebase, and the difference is not length:
+
+        "Dawn-grey kitchen: Rosa before a wooden table. Cobbled street: children in
+         paper masks. … Small village church: candles lit, Rosa kneels."
+
+        "Anita narrates the biblical story in a photorealistic documentary in which
+         Anita moves immersively through the settings. The documentary presents epic
+         biblical scenes that visually illustrate what is being narrated."
+
+    The first names places the film goes to; the second names 'the settings', 'the
+    events' and 'the audience'. So a description is a shot list when it visits at least
+    two places, or when most of its beats state a performed action. Neither test alone
+    is enough: a prose brief is often mostly tableaux, and a contract can contain one
+    stray verb.
+    """
+
+    stages = _stage_texts(str(brief or ""))
+    if not stages:
+        return False
+    bodies = [body for _number, body in stages]
+    places = {
+        word for body in bodies for word in PLACE_WORDS
+        if re.search(rf"\b{word}\b", body, re.I)
+    }
+    if len(places) >= 2:
+        return True
+    events = sum(1 for body in bodies if beat_states_an_event(body))
+    return events * 2 >= len(bodies)
 
 
 def strip_template_placeholders(brief: str) -> str:
@@ -375,14 +400,24 @@ def diagnose_brief(
             f"({', '.join(placeholders[:2])[:80]})",
             "Remove them, or press Structure again — the assistant strips them now.")
 
-    # 6c. A stage that only describes the format leaves the planner to invent the film.
+    # 6c. A stage that only describes the format leaves the planner to invent the film —
+    # unless a driving narration supplies each clip's moment, in which case the brief is
+    # *meant* to be a contract and the stages are not used at all.
     if policy.max_consecutive_same_setting > 0 and stages:
         abstract = [
             number for number, body in stages
             if not _CONCRETE_ACTION_RE.search(body)
             and not {word for word in _PLACE_WORDS if re.search(rf"\b{word}\b", body, re.I)}
         ]
-        if abstract:
+        narration_carries_it = bool(has_audio) and not description_states_events(text)
+        if narration_carries_it:
+            add("narration-driven", "info",
+                "DESCRIPTION describes how the film is made rather than what happens in "
+                "it. With a driving narration that is correct: every clip takes its "
+                "moment from the audio and no stage is imposed on it.",
+                "Nothing to change. Keep the narrator's position in the action explicit, "
+                "as a standing rule, so every clip shows it.")
+        elif abstract:
             add("abstract-beats", "warning",
                 f"{len(abstract)} stage(s) name no place and no action "
                 f"({', '.join(str(number) for number in abstract[:4])}), so the planner "
@@ -486,7 +521,11 @@ def normalized_brief(brief: str, *, kind: str = SHORT_FILM_AUDIO) -> str:
 
     text = "\n\n".join(ordered)
 
-    if policy.max_consecutive_same_setting > 0:
+    # Numbering the beats of a brief that describes the film instead of its events
+    # would invent a shot list out of a contract: a narrated documentary would be
+    # pinned to one constructed location per stage. Leave it as prose; the narration
+    # supplies each clip's moment.
+    if policy.max_consecutive_same_setting > 0 and description_states_events(text):
         text = _number_stages(text)
     return text.strip()
 
@@ -548,18 +587,30 @@ def structure_prompt(
     clip_count: int = 0,
     transcript_speakers: Optional[Iterable[str]] = None,
     characters: Optional[Iterable[str]] = None,
+    has_audio: Optional[bool] = None,
 ) -> tuple[str, str]:
     """``(system, user)`` for the pass that rewrites the brief into the canonical shape.
 
     The model's job is only ever to reorganise and fill gaps: the person's ideas, names,
     images and beats are what the film is. It may not invent a character or a scene that
     is not in the text, and it must keep every name the person wrote.
+
+    Two shapes, decided by the text itself. A brief that tells the story gets numbered
+    stages. A brief that describes *how the film is made* — a narrated documentary where
+    the narrator walks through the scenes she describes — must not be given stages at
+    all: the narration supplies each clip's moment, and stages invented from a contract
+    pin the narrator to a location the film never asked for.
     """
 
     policy = scene_policy(kind)
+    narration_driven = (
+        description_states_events(brief) is False
+        and (bool(transcript_speakers) if has_audio is None else bool(has_audio))
+    )
     report = diagnosis or diagnose_brief(
         brief, kind=kind, clip_count=clip_count,
-        transcript_speakers=transcript_speakers, has_audio=bool(transcript_speakers),
+        transcript_speakers=transcript_speakers,
+        has_audio=bool(transcript_speakers) if has_audio is None else bool(has_audio),
     )
     problems = "\n".join(
         f"- [{finding['severity']}] ({finding['code']}) {finding['message']} "
@@ -568,6 +619,42 @@ def structure_prompt(
     ) or "- none"
     speakers = ", ".join(sorted(str(s) for s in (transcript_speakers or ()))) or "(none supplied)"
     cast = ", ".join(sorted(str(c) for c in (characters or ()))) or "(not supplied)"
+
+    if narration_driven:
+        camera_rule = (
+            '- CAMERA: the lens, the palette, and where the narrator stands relative to the '
+            "action. No per-stage list: there are no stages. Never \"whenever\", \"always\", "
+            "\"every time\" or \"throughout\"."
+        )
+        description_rule = (
+            "- DESCRIPTION: the story is told by the narration, not by this section. Do NOT "
+            "write Stage 1, Stage 2 or any numbered stage, and do not invent a location the "
+            "narrator visits. Write two things instead: (a) one STANDING line saying where "
+            "the narrator is relative to the action in every shot, in the person's own "
+            "terms — inside the scene, moving through the settings, at the centre of what "
+            "is happening, the figures reacting around her; and (b) the world the narration "
+            "moves through, as the person described it. Example shape: \"STANDING RULE: the "
+            "narrator is inside every scene she describes, never beside it.\""
+        )
+        extra_rules = (
+            "- The narration decides each shot's moment. Your job is to state who is always "
+            "on screen, how they look, the world, and the rules — not to list events.\n"
+            "- If the person says the narrator moves through the story, is at the centre of "
+            "the action, or that the figures appear around her, that is a standing rule for "
+            "every shot and it must survive the rewrite word for word in meaning. Never "
+            "relocate the narrator to a studio, a desk, a ridge or any other place the "
+            "person did not write.\n"
+        )
+    else:
+        camera_rule = (
+            '- CAMERA: the lens and palette, then one line per stage. Never "whenever", '
+            '"always", "every time" or "throughout".'
+        )
+        description_rule = (
+            "- DESCRIPTION: one stage per story beat, written \"Stage N (label): ...\" and "
+            "each stage names ONE place, WHO is in it, and WHAT visibly happens there."
+        )
+        extra_rules = ""
 
     system = f"""You reorganise a film brief into the shape a shot planner can read. You are
 not writing a new film. Every name, image, action and idea in the user's text is theirs:
@@ -586,13 +673,14 @@ What each section holds:
   only what the text implies they are (era, role, age if stated) and stop there: no
   invented hair colour, no invented costume, and never the word "presence". A line
   that describes when someone appears instead of how they look is a fault, because
-  every shot then invents a different face.
-- PRESENCES: only the characters that appear without speaking, one line each.
-- CAMERA: the lens and palette, then one line per stage. Never "whenever", "always",
-  "every time" or "throughout".
+  every shot then invents a different face. Keep the person's own adjectives for a
+  character they did describe ("young, beautiful and charismatic" stays theirs).
+- PRESENCES: only the characters that appear without speaking, one line each. A named
+  group the person listed ("the Israelite soldiers") belongs here, with what it looks
+  like.
+{camera_rule}
 - AMBIENCE: place, palette, texture, light.
-- DESCRIPTION: one stage per story beat, written "Stage N (label): ..." and each stage
-  names ONE place, WHO is in it, and WHAT visibly happens there.
+{description_rule}
 - NEGATIVE: what must not appear.
 
 Hard rules:
@@ -603,7 +691,7 @@ Hard rules:
 - Every stage must name a place and a visible action. Never write a stage that only
   describes the format ("epic scenes illustrate what is being narrated"), because the
   planner then has to invent the film from it.
-- Never output a line whose key is in angle brackets, and never repeat an instruction
+{extra_rules}- Never output a line whose key is in angle brackets, and never repeat an instruction
   from this prompt as if it were content.
 - Keep the person's own words for names, places and images; you may translate
   structure, not content.

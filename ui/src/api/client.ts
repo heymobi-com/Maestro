@@ -1000,9 +1000,15 @@ export interface BriefReport {
   subject_lock?: Record<string, string>
 }
 
+export interface BriefCastLook {
+  name: string
+  look: string
+}
+
 export interface BriefStructureResult {
   brief: string
   method: 'llm' | 'normalized'
+  looks?: BriefCastLook[]
   before: BriefReport
   after: BriefReport
   resolved: string[]
@@ -1044,6 +1050,7 @@ export async function structureDirectorBrief(input: {
   characters?: string[]
   hasAudio?: boolean
   useLlm?: boolean
+  references?: unknown[]
 }): Promise<BriefStructureResult> {
   const res = await fetch(`${BASE}/api/v1/director/brief/structure`, {
     method: 'POST',
@@ -1056,6 +1063,7 @@ export async function structureDirectorBrief(input: {
       characters: input.characters || [],
       has_audio: Boolean(input.hasAudio),
       use_llm: input.useLlm !== false,
+      references: input.references || [],
     }),
   })
   if (!res.ok) {

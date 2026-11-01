@@ -46,6 +46,19 @@ def _report_of(brief: str, body: dict) -> dict:
     )
 
 
+def _cast_looks(body: dict, generate=None) -> dict:
+    """Appearances read from the identity references the project already carries.
+
+    The writer should not have to describe a face that is in a picture. The look is
+    read once per name and then used to fill CHARACTERS, so the brief and the image
+    say the same thing.
+    """
+
+    from .cast_vision import cast_descriptions
+
+    return cast_descriptions(body.get("references") or (), generate=generate)
+
+
 def create_router(*, generate=None) -> APIRouter:
     """Build the brief routes.
 
@@ -62,6 +75,21 @@ def create_router(*, generate=None) -> APIRouter:
         body = await request.json()
         return _report_of(str(body.get("brief") or ""), body)
 
+    @router.post("/api/v1/director/brief/cast")
+    async def read_cast(request: Request):
+        """Read who each identity reference shows, with the vision model.
+
+        Returned on its own so the panel can show the sentences before anything is
+        written into the brief, and so a caller can reuse them.
+        """
+        body = await request.json()
+        looks = _cast_looks(body, generate=generate)
+        return {
+            "looks": [{"name": name, "look": look} for name, look in looks.items()],
+            "count": len(looks),
+            "available": bool(looks),
+        }
+
     @router.post("/api/v1/director/brief/structure")
     async def structure_brief(request: Request):
         """Rewrite a brief into the canonical shape, then re-check it."""
@@ -72,8 +100,16 @@ def create_router(*, generate=None) -> APIRouter:
         speakers = body.get("transcript_speakers") or ()
         characters = body.get("characters") or ()
 
+        looks = _cast_looks(body, generate=generate)
+
         before = _report_of(brief, body)
         mechanical = normalized_brief(brief, kind=kind)
+        if looks:
+            # The appearance is in the picture, not in the prose: write it in before the
+            # model sees the text, so the row it works from already holds the face.
+            from .cast_vision import apply_cast_descriptions
+
+            mechanical = apply_cast_descriptions(mechanical, looks)
 
         proposal = mechanical
         method = "normalized"
@@ -81,6 +117,7 @@ def create_router(*, generate=None) -> APIRouter:
             system, user = structure_prompt(
                 mechanical, kind=kind, diagnosis=before, clip_count=clip_count,
                 transcript_speakers=speakers, characters=characters,
+                has_audio=bool(body.get("has_audio") or speakers),
             )
             try:
                 raw = generate(
@@ -100,11 +137,16 @@ def create_router(*, generate=None) -> APIRouter:
                     method = "llm"
             except Exception as exc:  # never block the person on the model
                 print(f"[Director] Brief structuring fell back to the mechanical pass: {exc}")
+            if looks:
+                from .cast_vision import apply_cast_descriptions
+
+                proposal = apply_cast_descriptions(proposal, looks)
 
         after = _report_of(proposal, body)
         return {
             "brief": proposal,
             "method": method,
+            "looks": [{"name": name, "look": look} for name, look in looks.items()],
             "before": before,
             "after": after,
             "resolved": sorted(
