@@ -1005,10 +1005,19 @@ export interface BriefCastLook {
   look: string
 }
 
+export interface BriefReferenceEntry {
+  number: number
+  name: string
+  cue: string
+  intent: string
+  look: string
+}
+
 export interface BriefStructureResult {
   brief: string
   method: 'llm' | 'normalized'
   looks?: BriefCastLook[]
+  roster?: BriefReferenceEntry[]
   before: BriefReport
   after: BriefReport
   resolved: string[]

@@ -5645,7 +5645,8 @@ def _reference_relationships(
 # Without this the lock parsed to nothing and every identity bound only by a
 # reference picture lost its name.
 _SUBJECT_LOCK_RE = re.compile(
-    r"<Subject\s*(\d+)>\s*(?:es\s+SIEMPRE|is\s+ALWAYS)\s+"
+    r"<Subject\s*(\d+)>\s*(?:\(\s*S\s*(\d+)\s*\)\s*)?"
+    r"(?:es\s+SIEMPRE|is\s+ALWAYS)\s+"
     r"[<\"'“‘*]?"
     # "la Figura del Purgatorio" names the Figure, not "la": the article is not part
     # of the participant, and a lock read as {2: "la"} matches no row at all.
@@ -5661,8 +5662,24 @@ def project_subject_lock(project_context: str) -> dict[int, str]:
 
     lock: dict[int, str] = {}
     for match in _SUBJECT_LOCK_RE.finditer(str(project_context or "")):
-        lock[int(match.group(1))] = match.group(2)
+        lock[int(match.group(1))] = match.group(3)
     return lock
+
+
+def project_subject_lock_cues(project_context: str) -> dict[int, str]:
+    """The ``{subject: "S1"}`` the lock states, when it states one.
+
+    A lock written ``<Subject 1> (S1) is ALWAYS Anita.`` names both the participant and
+    the voice. The cue is what lets the compiler attribute a spoken line without
+    guessing from row order, and it was being dropped by a lock regex that only looked
+    for the name.
+    """
+
+    cues: dict[int, str] = {}
+    for match in _SUBJECT_LOCK_RE.finditer(str(project_context or "")):
+        if match.group(2):
+            cues[int(match.group(1))] = f"S{int(match.group(2))}"
+    return cues
 
 
 _H3_SUBJECT_SLOT_RE = re.compile(r"<\s*Subject\s+(\d+)\s*>", re.IGNORECASE)

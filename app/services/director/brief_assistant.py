@@ -47,6 +47,7 @@ from .scene_policy import (
 
 __all__ = [
     "CANONICAL_SECTIONS",
+    "consolidate_cast_rows",
     "description_states_events",
     "diagnose_brief",
     "normalized_brief",
@@ -174,20 +175,8 @@ def _sections(brief: str) -> dict[str, str]:
     """``{"SUBJECT LOCK": "...", ...}`` for the headed sections of a brief."""
 
     found: dict[str, str] = {}
-    current = ""
-    lines: list[str] = []
-    for line in str(brief or "").splitlines():
-        heading = re.match(r"^[ \t]*([A-Z][A-Z0-9 /_\-()]{2,50}?)\s*(?:\([^)]*\))?\s*:\s*(.*)$", line)
-        if heading:
-            if current:
-                found[current] = "\n".join(lines).strip()
-            current = " ".join(heading.group(1).split()).upper()
-            lines = [heading.group(2)] if heading.group(2).strip() else []
-            continue
-        if current:
-            lines.append(line)
-    if current:
-        found[current] = "\n".join(lines).strip()
+    for name, body in _section_order(brief):
+        found.setdefault(name, body)
     return found
 
 
@@ -207,6 +196,117 @@ def _cast_rows(brief: str) -> dict[str, str]:
                 label = " ".join(match.group(1).split())
                 rows.setdefault(label, " ".join(match.group(2).split()))
     return rows
+
+
+def consolidate_cast_rows(brief: str) -> str:
+    """One row per character, keeping every fact both rows carried.
+
+    A structured brief routinely lists the same person twice — ``David`` in CHARACTERS
+    with an appearance read from his picture, and ``David`` again in PRESENCES with "does
+    not speak". The row in PRESENCES has no appearance, so it read as a character the
+    brief never describes, and a name spelled ``Goliath`` in one section and ``Goliat``
+    in the other read as two people.
+
+    The two rows are merged into one in CHARACTERS: the appearance first, then whatever
+    the presence row said that the character row did not. Only the duplicate changes.
+    """
+
+    text = str(brief or "")
+    sections = _sections(text)
+    characters = ""
+    presences = ""
+    for name, body in sections.items():
+        if name.startswith("CHARACTER"):
+            characters = body
+        elif name.startswith("PRESENCE"):
+            presences = body
+    if not characters or not presences:
+        return text
+
+    from .cast_vision import same_name
+
+    def rows(body: str) -> list[tuple[str, str]]:
+        found: list[tuple[str, str]] = []
+        for line in body.splitlines():
+            match = re.match(r"^\s*(?:[-*]\s*)?([^:\n]{2,50}?)\s*:\s*(.+)$", line)
+            if match:
+                found.append((" ".join(match.group(1).split()), " ".join(match.group(2).split())))
+        return found
+
+    character_rows = rows(characters)
+    presence_rows = rows(presences)
+    kept_presence: list[tuple[str, str]] = []
+    merged = list(character_rows)
+    for presence_name, presence_text in presence_rows:
+        target = next(
+            (index for index, (name, _body) in enumerate(merged) if same_name(name, presence_name)),
+            None,
+        )
+        if target is None:
+            kept_presence.append((presence_name, presence_text))
+            continue
+        name, body = merged[target]
+        if presence_text.casefold() in body.casefold():
+            continue
+        body = body.rstrip()
+        if body.endswith("."):
+            body = body[:-1]
+        separator = " " if body.endswith((";", ",", ":")) else "; "
+        merged[target] = (name, f"{body}{separator}{presence_text}")
+
+    def render(items: list[tuple[str, str]]) -> str:
+        return "\n".join(f"{name}: {body}" for name, body in items)
+
+    # Rebuilt section by section so nothing else in the brief moves: this pass may only
+    # change the two cast sections.
+    by_name = {name: body for name, body in _sections(text).items()}
+    for name in list(by_name):
+        if name.startswith("CHARACTER"):
+            by_name[name] = render(merged)
+        elif name.startswith("PRESENCE"):
+            by_name[name] = render(kept_presence)
+    rebuilt: list[str] = []
+    for name, body in _section_order(text):
+        if by_name.get(name, "").strip():
+            rebuilt.append(f"{name}:\n{by_name[name].strip()}")
+    for name, body in by_name.items():  # anything the order walk missed
+        if name not in {item for item, _ in _section_order(text)} and body.strip():
+            rebuilt.append(f"{name}:\n{body.strip()}")
+    return "\n\n".join(rebuilt) + "\n"
+
+
+def _section_order(brief: str) -> list[tuple[str, str]]:
+    """The sections of a brief, in the order they are written, unparsed.
+
+    Only a heading this module knows is a section. A brief may open its DESCRIPTION with
+    its own label ("STANDING RULE: the narrator is inside every scene she describes"),
+    and treating that label as a section moved the description into a section of its own
+    and left STANDING RULE where the prose belonged.
+    """
+
+    known = {
+        "SUBJECT LOCK", "CHARACTERS", "CHARACTER", "CAST", "PRESENCES", "PRESENCE",
+        "CAMERA", "CINEMATOGRAPHY", "AMBIENCE", "DESCRIPTION", "STORY", "SYNOPSIS",
+        "PLOT", "NEGATIVE", "REFERENCES", "STYLE", "VOICES", "AUDIO",
+    }
+    order: list[tuple[str, str]] = []
+    current = ""
+    lines: list[str] = []
+    for line in str(brief or "").splitlines():
+        heading = re.match(
+            r"^[ \t]*([A-Z][A-Z0-9 /_\-()]{2,50}?)\s*(?:\([^)]*\))?\s*:\s*(.*)$", line
+        )
+        if heading and " ".join(heading.group(1).split()).upper() in known:
+            if current:
+                order.append((current, "\n".join(lines).strip()))
+            current = " ".join(heading.group(1).split()).upper()
+            lines = [heading.group(2)] if heading.group(2).strip() else []
+            continue
+        if current:
+            lines.append(line)
+    if current:
+        order.append((current, "\n".join(lines).strip()))
+    return order
 
 
 def _name_words(name: str) -> list[str]:
@@ -277,6 +377,7 @@ def diagnose_brief(
     clip_count: int = 0,
     transcript_speakers: Optional[Iterable[str]] = None,
     has_audio: bool = False,
+    references: Optional[Iterable[Any]] = None,
 ) -> dict[str, Any]:
     """Everything that will go wrong with this brief, in the code's own terms.
 
@@ -304,9 +405,10 @@ def diagnose_brief(
                 "sections": [], "cast": [], "stages": 0, "chars": 0}
 
     # 1. The lock. This one decides how every participant is numbered.
-    from services.director.h3_dialogue import project_subject_lock
+    from services.director.h3_dialogue import project_subject_lock, project_subject_lock_cues
 
     lock = project_subject_lock(text)
+    lock_cues = project_subject_lock_cues(text)
     cast_rows = _cast_rows(text)
     if not lock:
         add("no-subject-lock", "error",
@@ -315,13 +417,27 @@ def diagnose_brief(
             "one character's voice on another.",
             "Write '<Subject 1> is ALWAYS <name>.' and '<Subject 2> is ALWAYS <name>.'")
 
+    # 1b. The lock names the participant; the audio has a voice. Nothing tied the two
+    # together, so a plan described the narrator with no (S1) and the compiler had to
+    # infer the speaker from row order.
+    if lock and has_audio and not lock_cues:
+        speakers_here = sorted(
+            str(speaker).strip() for speaker in (transcript_speakers or ()) if str(speaker).strip()
+        )
+        add("lock-missing-cue", "warning",
+            "The SUBJECT LOCK names the participants but binds none of them to the "
+            "audio's speaker label"
+            + (f" ({', '.join(speakers_here)})" if speakers_here else "")
+            + ", so which <Subject N> owns a spoken line is left to row order.",
+            "Write the cue beside the name: '<Subject 1> (S1) is ALWAYS Anita.'")
+
     # 2. Stages. Short film only: a podcast is one studio by design.
     stages = _stage_texts(text)
     # A brief that describes how the film is made, in a workflow whose narration supplies
     # each clip's moment, is *meant* to have no shot list: the cast is a standing roster
     # and no stage has to name everybody. Checks that assume stages must stand down.
     narration_carries_it = bool(has_audio) and not description_states_events(text)
-    if policy.max_consecutive_same_setting > 0:
+    if policy.max_consecutive_same_setting > 0 and not narration_carries_it:
         if not stages:
             add("no-stages", "error",
                 "No stages, so a clip has no position in the story: characters appear "
@@ -417,6 +533,30 @@ def diagnose_brief(
             f"The audio has {len(speakers)} speaker(s) and the brief binds none of them to "
             "a Subject.",
             "Number each speaker in the lock: '<Subject 1> is ALWAYS <name>.'")
+
+    # 6a. A supplied picture with no appearance in the text. Measured on a real project
+    # three pictures were attached (Anita, David, Goliath) and the brief gave Anita one
+    # adjective and the other two nothing at all, so each shot invented them.
+    if references:
+        from .cast_vision import reference_roster, same_name
+
+        roster = reference_roster(references)
+        unbound: list[str] = []
+        for item in roster:
+            match = next(
+                (body for name, body in cast_rows.items() if same_name(name, item["name"])),
+                "",
+            )
+            if not _describes_appearance(match):
+                unbound.append(item["name"])
+        if unbound:
+            add("cast-not-bound-to-picture", "warning",
+                f"{len(unbound)} supplied picture(s) name a character the brief gives no "
+                f"appearance ({', '.join(unbound[:4])}"
+                + (", ..." if len(unbound) > 4 else "")
+                + "), so nothing in the text holds the face and each shot invents one.",
+                "Press Structure — it reads the appearance from each picture — or write "
+                "hair, wardrobe and build for each name in CHARACTERS.")
 
     # 6b. The assistant's own template reaching the planner as content. Measured on a
     # real brief: "<every other character>: named as presences and objects" and the
@@ -550,6 +690,7 @@ def normalized_brief(brief: str, *, kind: str = SHORT_FILM_AUDIO) -> str:
         ordered = ["DESCRIPTION:\n" + " ".join(str(brief or "").split())]
 
     text = "\n\n".join(ordered)
+    text = consolidate_cast_rows(text)
 
     # Numbering the beats of a brief that describes the film instead of its events
     # would invent a shot list out of a contract: a narrated documentary would be
@@ -618,6 +759,7 @@ def structure_prompt(
     transcript_speakers: Optional[Iterable[str]] = None,
     characters: Optional[Iterable[str]] = None,
     has_audio: Optional[bool] = None,
+    roster: Optional[list[dict]] = None,
 ) -> tuple[str, str]:
     """``(system, user)`` for the pass that rewrites the brief into the canonical shape.
 
@@ -649,6 +791,9 @@ def structure_prompt(
     ) or "- none"
     speakers = ", ".join(sorted(str(s) for s in (transcript_speakers or ()))) or "(none supplied)"
     cast = ", ".join(sorted(str(c) for c in (characters or ()))) or "(not supplied)"
+    from .cast_vision import roster_block
+
+    pictures = roster_block(roster or [])
 
     if narration_driven:
         camera_rule = (
@@ -695,7 +840,10 @@ SUBJECT LOCK, CHARACTERS, PRESENCES, CAMERA, AMBIENCE, DESCRIPTION, NEGATIVE.
 
 What each section holds:
 - SUBJECT LOCK: one line per speaking participant, written exactly as
-  "<Subject 1> is ALWAYS <name>."  and  "<Subject 2> is ALWAYS <name>."
+  "<Subject 1> (S1) is ALWAYS <name>."  and  "<Subject 2> (S2) is ALWAYS <name>."
+  The cue in parentheses is the audio's speaker label and it is NOT optional: it is the
+  only thing that says which numbered participant owns which voice. Keep every cue the
+  text already carries, and add one from the roster below when a picture states it.
   Then one sentence naming the characters that never become a Subject.
 - CHARACTERS: one line per character, "<name>: appearance, age, wardrobe."
   Every character the story shows by name gets its own line. Never replace named
@@ -712,9 +860,15 @@ What each section holds:
 - AMBIENCE: place, palette, texture, light.
 {description_rule}
 - NEGATIVE: what must not appear.
+- REFERENCES: copy the roster you are given, unchanged. Every name in it already has a
+  supplied picture, so write that name exactly as the roster writes it (with its cue when
+  it has one) and never add, remove or renumber an entry.
 
 Hard rules:
 - This brief is for a {policy.label}. {policy.guidance}
+- Every character with a picture already looks like something. Copy the appearance you
+  are given for it and never invent a different one: a mismatch between the text and the
+  picture is re-drawn in every shot.
 - A stage is ONE place and ONE moment. If a beat names several places, split it.
 - A character exists only in the stage where the story puts it. Never move anyone into
   a stage to make it busier.
@@ -733,6 +887,9 @@ Hard rules:
     user = f"""The film is planned as {clip_count or 'an unknown number of'} clips.
 The audio's speakers are: {speakers}
 The cast supplied with the project is: {cast}
+
+REFERENCE PICTURES THE MODEL WILL BE GIVEN:
+{pictures or '(none supplied)'}
 
 PROBLEMS TO FIX (from a mechanical check of the same text):
 {problems}

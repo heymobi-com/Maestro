@@ -193,9 +193,14 @@ def beat_states_an_event(text: str) -> bool:
     visually illustrate what is being narrated"). Only the first gives a planner a
     shot; a film planned from the second is invented from nothing, which is the
     wandering measured on a real 42-clip project.
+
+    A leading label is dropped before the words are judged. "STANDING RULE: the narrator
+    is inside every scene she describes" is the rule's name, not somebody standing, and
+    reading it as an action turned the one correct shape for a narrated documentary into
+    a shot list.
     """
 
-    body = str(text or "")
+    body = re.sub(r"^\s*[A-Z][A-Z ]{2,30}\s*:\s*", "", str(text or ""))
     if _TELLING_RE.search(body):
         return False
     return bool(EVENT_ACTION_RE.search(body))

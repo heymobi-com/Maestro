@@ -23,10 +23,17 @@ from services.director.cast_vision import (  # noqa: E402
     LOOK_LIMIT,
     appearance_from_reference,
     apply_cast_descriptions,
+    apply_reference_roster,
     cast_descriptions,
     looks_block,
+    match_name,
+    reference_roster,
     references_for_look,
+    roster_block,
+    same_name,
+    speaker_cue_for,
 )
+from services.director.brief_assistant import consolidate_cast_rows  # noqa: E402
 
 ANITA_LOOK = (
     "early 30s; slim; fair skin; brunette hair tied back in a low bun; brown eyes; "
@@ -378,6 +385,246 @@ class VisionCallIsOptionalTests(unittest.TestCase):
         self.assertEqual(first, {"Anita": ANITA_LOOK})
         self.assertEqual(second, first)
         self.assertEqual(described.call_count, 1)
+
+
+class NameMatchingTests(unittest.TestCase):
+    """A picture and a brief spell the same person differently often enough to matter."""
+
+    def test_one_letter_apart_is_the_same_person(self):
+        self.assertTrue(same_name("Goliat", "Goliath"))
+
+    def test_case_and_padding_do_not_matter(self):
+        self.assertTrue(same_name("  anita ", "Anita"))
+        self.assertTrue(same_name("Anita (S1)", "Anita"))
+
+    def test_an_honorific_may_be_dropped(self):
+        self.assertTrue(same_name("Abuela Rosa", "Rosa"))
+
+    def test_different_people_never_match(self):
+        self.assertFalse(same_name("David", "Saul"))
+        self.assertFalse(same_name("Anita", "Goliat"))
+
+    def test_a_short_name_is_not_matched_loosely(self):
+        self.assertFalse(same_name("Ana", "Anita"))
+
+
+class RosterTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.paths = {}
+        for name in ("anita", "david", "goliat"):
+            path = os.path.join(self.tmp, name + ".png")
+            with open(path, "wb") as handle:
+                handle.write(b"\x89PNG\r\n\x1a\n")
+            self.paths[name] = path
+
+    def _refs(self):
+        return [
+            {"type": "image", "path": self.paths["anita"], "role": "Anita (S1)",
+             "image_intent": "identity"},
+            {"type": "image", "path": self.paths["david"], "role": "David",
+             "image_intent": "identity"},
+            {"type": "image", "path": self.paths["goliat"], "role": "Goliat",
+             "image_intent": "identity"},
+        ]
+
+    def test_the_roster_keeps_manifest_order_and_the_cue(self):
+        roster = reference_roster(self._refs())
+
+        self.assertEqual([item["number"] for item in roster], [1, 2, 3])
+        self.assertEqual([item["name"] for item in roster], ["Anita", "David", "Goliat"])
+        self.assertEqual(roster[0]["cue"], "S1")
+        self.assertEqual(roster[1]["cue"], "")
+
+    def test_the_roster_carries_the_appearance_when_one_was_read(self):
+        roster = reference_roster(self._refs(), {"Anita": "white shirt, blue skirt"})
+
+        self.assertEqual(roster[0]["look"], "white shirt, blue skirt")
+
+    def test_the_block_names_every_picture_and_forbids_invention(self):
+        block = roster_block(reference_roster(self._refs()))
+
+        self.assertIn("REFERENCES:", block)
+        self.assertIn("Anita (S1)", block)
+        self.assertIn("2. David", block)
+        self.assertIn("Never invent their face", block)
+
+
+class RosterApplyTests(unittest.TestCase):
+    BRIEF = (
+        "SUBJECT LOCK:\n"
+        "<Subject 1> is ALWAYS Anita.\n"
+        "The biblical figures (David, Goliath) never become a Subject.\n\n"
+        "CHARACTERS:\n"
+        "Anita: young, beautiful and charismatic woman.\n\n"
+        "DESCRIPTION:\n"
+        "STANDING RULE: Anita is in every shot.\n"
+    )
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.refs = []
+        for name, role in (("anita", "Anita (S1)"), ("david", "David"), ("goliat", "Goliat")):
+            path = os.path.join(self.tmp, name + ".png")
+            with open(path, "wb") as handle:
+                handle.write(b"\x89PNG\r\n\x1a\n")
+            self.refs.append(
+                {"type": "image", "path": path, "role": role, "image_intent": "identity"}
+            )
+
+    def test_the_cue_reaches_the_lock_and_the_cast_row(self):
+        out = apply_reference_roster(self.BRIEF, self.refs)
+
+        self.assertIn("<Subject 1> (S1) is ALWAYS Anita.", out)
+        self.assertIn("Anita (S1): young, beautiful", out)
+
+    def test_the_section_is_appended_once(self):
+        once = apply_reference_roster(self.BRIEF, self.refs)
+        twice = apply_reference_roster(once, self.refs)
+
+        self.assertEqual(once.count("REFERENCES:"), 1)
+        self.assertEqual(twice.count("REFERENCES:"), 1)
+        self.assertNotIn("(S1) (S1)", twice)
+
+    def test_the_brief_spelling_wins_over_the_manifest(self):
+        brief = self.BRIEF.replace("Goliath", "Goliath").replace(
+            "CHARACTERS:", "CHARACTERS:\nGoliath: bronze scale armour."
+        )
+
+        out = apply_reference_roster(brief, self.refs)
+
+        self.assertIn("3. Goliath —", out)
+        self.assertNotIn("3. Goliat —", out)
+
+    def test_a_picture_with_no_cue_does_not_touch_the_lock(self):
+        refs = [self.refs[1]]
+        out = apply_reference_roster(self.BRIEF, refs)
+
+        self.assertIn("<Subject 1> is ALWAYS Anita.", out)
+        self.assertIn("REFERENCES:", out)
+
+    def test_no_references_is_no_change(self):
+        self.assertEqual(apply_reference_roster(self.BRIEF, []), self.BRIEF)
+
+
+class ConsolidationTests(unittest.TestCase):
+    def test_a_duplicate_row_becomes_one_row_keeping_both_facts(self):
+        brief = (
+            "CHARACTERS:\nAnita: white shirt.\nDavid: undyed tunic.\n\n"
+            "PRESENCES:\nDavid: does not speak.\nKing Saul: does not speak.\n"
+        )
+
+        out = consolidate_cast_rows(brief)
+
+        self.assertEqual(out.count("David:"), 1)
+        self.assertIn("undyed tunic", out)
+        self.assertIn("does not speak", out)
+        self.assertIn("King Saul: does not speak.", out)
+
+    def test_two_spellings_of_one_person_merge(self):
+        brief = (
+            "CHARACTERS:\nGoliat: bronze armour.\n\n"
+            "PRESENCES:\nGoliath: does not speak.\n"
+        )
+
+        out = consolidate_cast_rows(brief)
+
+        self.assertEqual(out.count("bronze armour"), 1)
+        self.assertNotIn("Goliath: does not speak.", out)
+
+    def test_a_label_inside_the_description_is_not_a_section(self):
+        brief = (
+            "CHARACTERS:\nAnita: white shirt.\n\n"
+            "DESCRIPTION:\nSTANDING RULE: Anita is in every shot.\n\n"
+            "NEGATIVE:\nNo invented person.\n"
+        )
+
+        out = consolidate_cast_rows(brief)
+
+        self.assertIn("DESCRIPTION:\nSTANDING RULE: Anita is in every shot.", out)
+        self.assertNotIn("STANDING RULE:\nAnita", out)
+
+    def test_a_brief_without_presences_is_unchanged(self):
+        brief = "CHARACTERS:\nAnita: white shirt.\n"
+
+        self.assertEqual(consolidate_cast_rows(brief), brief)
+
+
+class CueBindingTests(unittest.TestCase):
+    """The lock must carry the audio's speaker label, and the compiler must read it."""
+
+    def test_the_lock_parses_with_the_cue(self):
+        from services.director.h3_dialogue import (
+            project_subject_lock,
+            project_subject_lock_cues,
+        )
+
+        text = "SUBJECT LOCK:\n<Subject 1> (S1) is ALWAYS Anita.\n"
+
+        self.assertEqual(project_subject_lock(text), {1: "Anita"})
+        self.assertEqual(project_subject_lock_cues(text), {1: "S1"})
+
+    def test_a_lock_without_a_cue_still_names_the_participant(self):
+        from services.director.h3_dialogue import project_subject_lock
+
+        self.assertEqual(project_subject_lock("<Subject 2> is ALWAYS Figura."), {2: "Figura"})
+
+    def test_the_shot_context_repeats_the_cue(self):
+        from services.director_pipeline import _h3_shot_project_context
+
+        brief = "SUBJECT LOCK:\n<Subject 1> (S1) is ALWAYS Anita.\n\nThe story.\n"
+
+        self.assertIn("<Subject 1> (S1) is ALWAYS Anita.", _h3_shot_project_context(brief, 0, 8))
+
+    def test_a_missing_cue_is_reported_when_the_audio_has_speakers(self):
+        from services.director.brief_assistant import diagnose_brief
+
+        brief = (
+            "SUBJECT LOCK:\n<Subject 1> is ALWAYS Anita.\n\n"
+            "DESCRIPTION:\nSTANDING RULE: Anita is in every shot.\n"
+        )
+        codes = {
+            finding["code"]
+            for finding in diagnose_brief(
+                brief, kind="short_film_audio", has_audio=True,
+                transcript_speakers=["S1"],
+            )["findings"]
+        }
+
+        self.assertIn("lock-missing-cue", codes)
+
+    def test_a_present_cue_is_not_reported(self):
+        from services.director.brief_assistant import diagnose_brief
+
+        brief = (
+            "SUBJECT LOCK:\n<Subject 1> (S1) is ALWAYS Anita.\n\n"
+            "DESCRIPTION:\nSTANDING RULE: Anita is in every shot.\n"
+        )
+        codes = {
+            finding["code"]
+            for finding in diagnose_brief(
+                brief, kind="short_film_audio", has_audio=True,
+                transcript_speakers=["S1"],
+            )["findings"]
+        }
+
+        self.assertNotIn("lock-missing-cue", codes)
+
+
+class StandbyLabelTests(unittest.TestCase):
+    def test_a_standing_rule_is_not_an_action(self):
+        from services.director.scene_policy import beat_states_an_event
+
+        self.assertFalse(
+            beat_states_an_event(
+                "STANDING RULE: Anita is at the center of the cinematic action in every shot."
+            )
+        )
+
+    def test_a_performed_action_still_counts(self):
+        from services.director.scene_policy import beat_states_an_event
+
+        self.assertTrue(beat_states_an_event("Kitchen: Rosa lifts the cup."))
 
 
 if __name__ == "__main__":

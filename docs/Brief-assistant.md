@@ -38,6 +38,8 @@ a fix for each:
 | `template-placeholder` | error | a line whose key is in angle brackets, or a heading carrying the instruction in parentheses — the assistant's own template reaching the planner as content |
 | `abstract-beats` | warning | a stage that names no place and no action, so the planner has to invent the film from it |
 | `cast-without-appearance` | warning | a character who acts in a stage but is only listed as a *presence*, so every clip invents a different face |
+| `cast-not-bound-to-picture` | warning | a supplied picture names a character the brief gives no appearance |
+| `lock-missing-cue` | warning | the lock names participants but binds none to the audio's `(Sx)` label |
 | `narration-driven` | info | the description states how the film is made, not what happens in it; correct when a narration drives the clips |
 | `speakers-unbound` | warning | audio speakers that the lock binds to no Subject |
 | `podcast-stages` | info | staged locations in a workflow that is one studio |
@@ -130,6 +132,50 @@ to the action, and forbids relocating her. The diagnosis reports `narration-driv
 `info` in that case, and only reports `abstract-beats` when there is no narration to carry
 the beats.
 
+## The lock carries the voice, and the text carries the pictures
+
+A structured brief from an earlier run came back like this:
+
+    SUBJECT LOCK:
+    <Subject 1> is ALWAYS Anita.
+    CHARACTERS:
+    Anita: young, beautiful and charismatic woman, photorealistic documentary narrator.
+
+Three pictures were attached to the project — Anita, David, Goliath — and nothing in the
+text said so. No `(S1)` tied the Subject to the voice on the audio, no row held a face, and
+David and Goliath were not described at all. The plan then invented both and, because no
+row matched the picture, every shot re-drew them.
+
+`apply_reference_roster` writes what the manifest already knows into the text, and only
+that:
+
+| the manifest says | the brief gets |
+| --- | --- |
+| `role: "Anita (S1)"` | `<Subject 1> (S1) is ALWAYS Anita.` and `Anita (S1): …` |
+| `role: "David"` | a `REFERENCES:` entry, no cue — David never speaks |
+| a path per identity picture | `REFERENCES:` naming every picture in manifest order |
+
+The `REFERENCES:` section is a roster for the writer, not a promise about numbering: the
+compiler renumbers pictures per shot after filtering, so a literal `<Picture 2>` in every
+prompt would be wrong in any shot that drops a reference.
+
+`_SUBJECT_LOCK_RE` accepts the cue (`<Subject 1> (S1) is ALWAYS Anita.`) and
+`project_subject_lock_cues` reads it back, so the compiler no longer infers the speaker
+from row order. `_h3_shot_project_context` re-emits the line with its cue, and the same
+regex now also accepts the plain `<Subject 1> is ALWAYS …` form.
+
+Three mechanical repairs come with it, because a brief written by a model repeats itself:
+
+- **`consolidate_cast_rows`** merges a person listed in both `CHARACTERS` and `PRESENCES`
+  into one row that keeps both facts ("…undyed tunic, leather sling; does not speak").
+- **`same_name`** treats `Goliat`/`Goliath`, `Abuela Rosa`/`Rosa` and casing as one
+  person, so a picture cannot land on a row that does not exist and one character cannot
+  read as two.
+- **A label inside the description is not a section**: `STANDING RULE: …` stays in
+  `DESCRIPTION`, and `beat_states_an_event` ignores the label's words — "STANDING" used
+  to match the verb *standing*, which turned the one correct shape for a narrated
+  documentary into a shot list and produced three false findings.
+
 ## The leak this was fixed for
 
 The first version of this assistant produced briefs that were worse than the prose they
@@ -199,8 +245,8 @@ a short film, the strictest case.
 
 | file | what it is |
 | --- | --- |
-| [brief_assistant.py](../app/services/director/brief_assistant.py) | `diagnose_brief`, `normalized_brief`, `structure_prompt`, `description_states_events` |
-| [cast_vision.py](../app/services/director/cast_vision.py) | `cast_descriptions`, `appearance_from_reference`, `apply_cast_descriptions`, `looks_block` |
+| [brief_assistant.py](../app/services/director/brief_assistant.py) | `diagnose_brief`, `normalized_brief`, `consolidate_cast_rows`, `structure_prompt`, `description_states_events` |
+| [cast_vision.py](../app/services/director/cast_vision.py) | `cast_descriptions`, `appearance_from_reference`, `apply_cast_descriptions`, `reference_roster`, `apply_reference_roster`, `same_name`, `looks_block` |
 | [brief_api.py](../app/services/director/brief_api.py) | the three routes, with the LLM injected so they are testable |
 | [DirectorBriefAssistant.tsx](../ui/src/components/Sidebar/DirectorBriefAssistant.tsx) | the two buttons, the findings, the Apply/Discard proposal, the read looks |
 
@@ -213,15 +259,18 @@ mechanical normalization — sections reordered, beats numbered from prose, a po
 given stages, the ideas never rewritten — and `TemplateLeakTests`, the four faults above
 plus the two stripping passes and the prompt rules that forbid them.
 
-`tests/test_director_cast_vision.py` (34) holds the read-from-the-picture path: which
+`tests/test_director_cast_vision.py` (58) holds the read-from-the-picture path: which
 references are character sheets, one read per name, the picture being what is sent, the
 2K reference being sent at full detail, the prompt covering every visible detail, the
 answer being the appearance, labels and refusals discarded, a raise or a missing model
 leaving the brief untouched, the cap, the per-shot filter and its budget, and the apply
 pass — a presence row replaced, the writer's own description kept, a missing row added. It
-also pins the documentary case: the Anita prose yields no stages, reports
-`narration-driven` with audio and `abstract-beats` without it, and the prompt forbids
-inventing stages while a story brief still gets them.
+also pins the name matching (`Goliat`/`Goliath`, honorifics, different people never
+match), the roster (manifest order, the cue, the appearance, idempotency, the brief's own
+spelling winning), the cast consolidation, the `(S1)` binding end to end, and the
+documentary case: the Anita prose yields no stages, reports `narration-driven` with audio
+and `abstract-beats` without it, and the prompt forbids inventing stages while a story
+brief still gets them.
 
 `tests/test_director_brief_api.py` (10) drives the routes over ASGI: a prose brief is
 reported, the route works with no model, the mechanical pass still fixes the shape, a

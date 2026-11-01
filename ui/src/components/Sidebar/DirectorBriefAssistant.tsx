@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { AlertTriangle, Check, Info, Loader2, Sparkles, X } from 'lucide-react'
-import { reviewDirectorBrief, structureDirectorBrief, type BriefReport } from '../../api/client'
+import { reviewDirectorBrief, structureDirectorBrief, type BriefReferenceEntry, type BriefReport } from '../../api/client'
 
 /**
  * The brief is the one input a person writes freely, and it is also the input the
@@ -39,6 +39,7 @@ export function DirectorBriefAssistant({
   const [method, setMethod] = useState<'llm' | 'normalized' | null>(null)
   const [resolved, setResolved] = useState<string[]>([])
   const [looks, setLooks] = useState<{ name: string; look: string }[]>([])
+  const [roster, setRoster] = useState<BriefReferenceEntry[]>([])
   const [checking, setChecking] = useState(false)
   const [structuring, setStructuring] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -70,6 +71,7 @@ export function DirectorBriefAssistant({
       setMethod(result.method)
       setResolved(result.resolved)
       setLooks(result.looks || [])
+      setRoster(result.roster || [])
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Brief structuring failed')
     } finally {
@@ -107,7 +109,7 @@ export function DirectorBriefAssistant({
         {(report || proposal) && (
           <button
             type="button"
-            onClick={() => { setReport(null); setProposal(null); setError(null) }}
+            onClick={() => { setReport(null); setProposal(null); setError(null); setLooks([]); setRoster([]) }}
             className="rounded-md p-1 text-text-muted hover:bg-bg-hover hover:text-text-primary"
             title="Dismiss"
           >
@@ -179,6 +181,21 @@ export function DirectorBriefAssistant({
           <pre className="max-h-56 overflow-y-auto whitespace-pre-wrap rounded-lg border border-border bg-bg-secondary p-2 text-[10px] leading-snug text-text-primary scrollbar-visible">
             {proposal}
           </pre>
+          {roster.length > 0 && (
+            <div className="rounded-lg border border-border bg-bg-secondary px-2 py-1.5 text-[10px] leading-snug text-text-muted">
+              <div className="text-text-secondary">
+                Bound to the pictures you supplied (this is what stops the model inventing them):
+              </div>
+              {roster.map(item => (
+                <div key={item.number} className="mt-0.5">
+                  <span className="text-text-muted">{item.number}.</span>{' '}
+                  <span className="text-text-primary">{item.name}</span>
+                  {item.cue && <span className="text-accent-blue"> ({item.cue})</span>}
+                  {!item.look && <span className="text-amber-400"> — no appearance read</span>}
+                </div>
+              ))}
+            </div>
+          )}
           {looks.length > 0 && (
             <div className="rounded-lg border border-border bg-bg-secondary px-2 py-1.5 text-[10px] leading-snug text-text-muted">
               <div className="text-text-secondary">

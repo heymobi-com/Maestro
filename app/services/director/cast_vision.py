@@ -33,9 +33,13 @@ __all__ = [
     "LOOK_LIMIT",
     "appearance_from_reference",
     "apply_cast_descriptions",
+    "apply_reference_roster",
     "cast_descriptions",
     "looks_block",
+    "reference_roster",
     "references_for_look",
+    "roster_block",
+    "speaker_cue_for",
 ]
 
 #: Asked of the vision model, per identity picture. A reference is often a 2K render
@@ -178,6 +182,229 @@ def _clean(answer: Any) -> str:
     return text[:LOOK_LIMIT]
 
 
+def _name_key(name: str) -> str:
+    """A name reduced to what makes two spellings the same person."""
+
+    text = re.sub(r"\(\s*S\s*\d+\s*\)", " ", str(name or ""), flags=re.I)
+    return " ".join(re.findall(r"[a-záéíóúüñ0-9]+", text.casefold()))
+
+
+def same_name(left: str, right: str) -> bool:
+    """Whether two spellings name the same character.
+
+    A reference role is authored by the person and the brief is written by the model, and
+    they disagree on a letter often enough to matter: measured on a real project the
+    picture was filed ``Goliat`` and the brief said ``Goliath``, so the appearance was
+    applied to a row that did not exist and David's picture went on describing Goliath.
+    One spelling extra, one letter different, or one being a leading part of the other is
+    the same person. Two different names ("David" and "Saul") never match.
+    """
+
+    a, b = _name_key(left), _name_key(right)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if a.replace(" ", "") == b.replace(" ", ""):
+        return True
+    # "Goliath" / "Goliat": one extra character in the longer one.
+    if len(a) >= 5 and len(b) >= 5 and (
+        abs(len(a) - len(b)) <= 1
+        and _one_edit_apart(a, b)
+    ):
+        return True
+    # "Abuela Rosa" / "Rosa": a reference often drops the honorific.
+    a_words, b_words = a.split(), b.split()
+    if len(a_words) > len(b_words) and a_words[-len(b_words):] == b_words and len(b) >= 4:
+        return True
+    if len(b_words) > len(a_words) and b_words[-len(a_words):] == a_words and len(a) >= 4:
+        return True
+    return False
+
+
+def _one_edit_apart(left: str, right: str) -> bool:
+    """True when a single insertion, deletion or substitution separates the two."""
+
+    if left == right:
+        return True
+    if abs(len(left) - len(right)) > 1:
+        return False
+    if len(left) == len(right):
+        return sum(1 for a, b in zip(left, right) if a != b) <= 1
+    shorter, longer = (left, right) if len(left) < len(right) else (right, left)
+    for index in range(len(longer)):
+        if longer[:index] + longer[index + 1:] == shorter:
+            return True
+    return False
+
+
+def match_name(name: str, candidates: Iterable[str]) -> str:
+    """The candidate that names the same character as ``name``, or ``""``."""
+
+    for candidate in candidates:
+        if same_name(name, candidate):
+            return str(candidate)
+    return ""
+
+
+def speaker_cue_for(name: str, references: Optional[Iterable[Any]]) -> str:
+    """The ``(Sx)`` an identity reference states beside ``name``, or ``""``.
+
+    A reference role is authored as ``"Anita (S1)"``. That cue is the only thing that
+    ties a picture to the voice on the audio track, and it was never reaching the brief:
+    the plan described Anita with no ``(S1)``, so the compiler had to guess which
+    participant spoke and every shot re-derived the narrator.
+    """
+
+    wanted = str(name or "").strip()
+    if not wanted:
+        return ""
+    for reference in references or ():
+        if not isinstance(reference, dict):
+            continue
+        role = str(reference.get("role") or reference.get("character_name") or "")
+        label = _reference_name(reference)
+        if not same_name(label, wanted):
+            continue
+        match = re.search(r"\(\s*S\s*(\d+)\s*\)", role, re.I)
+        if match:
+            return f"S{int(match.group(1))}"
+    return ""
+
+
+def reference_roster(
+    references: Optional[Iterable[Any]],
+    looks: Optional[dict[str, str]] = None,
+) -> list[dict]:
+    """Every visual reference, in manifest order, with the person it belongs to.
+
+    The manifest is the one authoritative list of what the model is given, and the brief
+    never mentioned it: a project supplied three pictures, the text named Anita once with
+    no cue and David and Goliath not at all, so the picture numbers meant nothing to the
+    planner and it invented faces for people it already had.
+
+    ``number`` is manifest order, which is the order H3 receives them in. The compiler
+    renumbers per shot after filtering, so this is a roster for the writer, not a
+    promise about any one shot's numbering.
+    """
+
+    roster: list[dict] = []
+    seen: set[str] = set()
+    for position, reference in enumerate(references or (), start=1):
+        if not isinstance(reference, dict):
+            continue
+        if str(reference.get("type") or "image").lower() != "image":
+            continue
+        label = _reference_name(reference)
+        intent = str(reference.get("image_intent") or "identity").lower()
+        if not label or label.casefold() in seen:
+            continue
+        seen.add(label.casefold())
+        role = str(reference.get("role") or "")
+        cue_match = re.search(r"\(\s*S\s*(\d+)\s*\)", role, re.I)
+        roster.append({
+            "number": position,
+            "name": label,
+            "cue": f"S{int(cue_match.group(1))}" if cue_match else "",
+            "intent": intent,
+            "look": (looks or {}).get(label, ""),
+        })
+    return roster
+
+
+def roster_block(roster: Optional[list[dict]]) -> str:
+    """The ``REFERENCES:`` section: which picture is whom, and never to invent them."""
+
+    if not roster:
+        return ""
+    lines = [
+        "REFERENCES:",
+        "Every person below already has a supplied picture. Never invent their face, "
+        "hair, wardrobe or build: write them as the picture shows them, and name each "
+        "one exactly as written here (with its speaker cue when it has one).",
+    ]
+    for item in roster:
+        cue = f" ({item['cue']})" if item.get("cue") else ""
+        detail = f" — {item['look']}" if item.get("look") else ""
+        lines.append(
+            f"{item['number']}. {item['name']}{cue} — {item['intent']} reference{detail}"
+        )
+    return "\n".join(lines)
+
+
+def apply_reference_roster(
+    brief: str,
+    references: Optional[Iterable[Any]],
+    looks: Optional[dict[str, str]] = None,
+) -> str:
+    """Add the cue to every name a reference labels, and append the roster.
+
+    Two mechanical edits, both things the code needs and neither changing an idea:
+
+    * ``<Subject 1> is ALWAYS Anita.`` becomes ``<Subject 1> (S1) is ALWAYS Anita.``
+      when a picture labels her ``Anita (S1)``, and her CHARACTERS row becomes
+      ``Anita (S1): …`` — that cue is what binds the Subject to the voice.
+    * a ``REFERENCES:`` section listing the pictures in manifest order.
+
+    Idempotent: running it twice does not double a cue or a section.
+    """
+
+    roster = reference_roster(references, looks)
+    text = str(brief or "")
+    if not roster:
+        return text
+    # The brief may spell a person differently from the manifest ("Goliath" for a
+    # picture filed as "Goliat"). One character with two spellings reads as two people,
+    # so the roster adopts the spelling the text already uses.
+    from .brief_assistant import _cast_rows
+
+    brief_names = [
+        name for name in _cast_rows(text) if not re.search(r"\(\s*S\s*\d+\s*\)", name, re.I)
+    ]
+    for item in roster:
+        spelled = match_name(item["name"], brief_names)
+        if spelled:
+            item["name"] = spelled
+    cued = [item for item in roster if item.get("cue")]
+    if cued:
+        out: list[str] = []
+        lock_line = re.compile(
+            r"^([ \t]*(?:[-*][ \t]*)?<\s*Subject\s+(\d+)\s*>)(?!\s*\()"
+            r"([ \t]*(?:is\s+ALWAYS|es\s+SIEMPRE)[ \t]+)(.*)$",
+            re.I,
+        )
+        row_line = re.compile(r"^([ \t]*(?:[-*][ \t]*)?)([^:\n]{2,60}?)(?!\s*\()([ \t]*:\s*.*)$")
+        for line in text.splitlines():
+            match = lock_line.match(line)
+            if match:
+                named = match.group(4)
+                for item in cued:
+                    if re.search(rf"\b{re.escape(item['name'])}\b", named, re.I) or same_name(
+                        item["name"], named.split(".")[0]
+                    ):
+                        line = f"{match.group(1)} ({item['cue']}) {match.group(3).lstrip()}{named}"
+                        break
+                out.append(line)
+                continue
+            match = row_line.match(line)
+            if match:
+                name = " ".join(match.group(2).split())
+                if "(" in name:
+                    out.append(line)
+                    continue
+                for item in cued:
+                    if same_name(item["name"], name):
+                        line = f"{match.group(1)}{name} ({item['cue']}){match.group(3)}"
+                        break
+            out.append(line)
+        text = "\n".join(out)
+    # Drop an older roster so the section never stacks up.
+    text = re.sub(r"(?ims)^[ \t]*REFERENCES\s*:.*?(?=^[ \t]*[A-Z][A-Z0-9 /_\-()]{2,50}\s*:\s*|\Z)", "", text)
+    text = text.rstrip()
+    block = roster_block(roster)
+    return f"{text}\n\n{block}\n" if text else f"{block}\n"
+
+
 def cast_descriptions(
     references: Optional[Iterable[Any]],
     *,
@@ -249,7 +476,7 @@ def apply_cast_descriptions(brief: str, looks: Optional[dict[str, str]]) -> str:
 
     if not looks:
         return str(brief or "")
-    from .brief_assistant import _describes_appearance
+    from .brief_assistant import _describes_appearance, _sections
 
     lines = str(brief or "").splitlines()
     start = next(
@@ -268,6 +495,25 @@ def apply_cast_descriptions(brief: str, looks: Optional[dict[str, str]]) -> str:
             end = index
             break
 
+    # A name the model wrote twice ("David" in CHARACTERS and again in PRESENCES) is one
+    # character with two rows, one of which says nothing about how he looks. Collect the
+    # best existing description per name first, then write one row.
+    sections = _sections(str(brief or ""))
+    existing: dict[str, str] = {}
+    for _section, body in sections.items():
+        for line in body.splitlines():
+            match = re.match(r"^\s*(?:[-*]\s*)?([^:\n]{2,50}?)\s*:\s*(.+)$", line)
+            if not match:
+                continue
+            name = " ".join(match.group(1).split())
+            body_text = " ".join(match.group(2).split())
+            key = _name_key(name)
+            if _describes_appearance(body_text) or key not in existing:
+                if _describes_appearance(body_text) or not _describes_appearance(
+                    existing.get(key, "")
+                ):
+                    existing[key] = body_text
+
     kept: list[str] = []
     seen: set[str] = set()
     for line in lines[start + 1:end]:
@@ -279,15 +525,29 @@ def apply_cast_descriptions(brief: str, looks: Optional[dict[str, str]]) -> str:
             continue
         name = " ".join(match.group(1).split())
         current = " ".join(match.group(2).split())
-        key = next((key for key in looks if key.casefold() == name.casefold()), None)
-        seen.add(name.casefold())
-        if key is None or _describes_appearance(current):
-            kept.append(f"{name}: {current}")
-        else:
-            kept.append(f"{name}: {looks[key]}")
+        key = _name_key(name)
+        if key in seen:
+            continue
+        seen.add(key)
+        look_key = next(
+            (looks_name for looks_name in looks if same_name(looks_name, name)), None
+        )
+        best = existing.get(key, current)
+        if look_key is not None and not _describes_appearance(best):
+            best = looks[look_key]
+        kept.append(f"{name}: {best}")
     for name, look in looks.items():
-        if name.casefold() not in seen:
-            kept.append(f"{name}: {look}")
+        already = [
+            row.split(":", 1)[0].strip() for row in kept if ":" in row
+        ]
+        if _name_key(name) in seen or any(same_name(name, row) for row in already):
+            continue
+        # The brief may already spell this person differently ("Goliath" for a picture
+        # filed as "Goliat"); one character with two spellings reads as two people.
+        from .brief_assistant import _cast_rows
+
+        spelled = match_name(name, list(_cast_rows(str(brief or "")))) or name
+        kept.append(f"{spelled}: {look}")
 
     rebuilt = lines[: start + 1] + [""] + kept
     tail = lines[end:]

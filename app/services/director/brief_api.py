@@ -43,6 +43,7 @@ def _report_of(brief: str, body: dict) -> dict:
         clip_count=int(body.get("clip_count") or 0),
         transcript_speakers=body.get("transcript_speakers") or (),
         has_audio=bool(body.get("has_audio")),
+        references=body.get("references") or (),
     )
 
 
@@ -99,17 +100,31 @@ def create_router(*, generate=None) -> APIRouter:
         clip_count = int(body.get("clip_count") or 0)
         speakers = body.get("transcript_speakers") or ()
         characters = body.get("characters") or ()
+        references = body.get("references") or ()
+
+        from .cast_vision import (
+            apply_cast_descriptions,
+            apply_reference_roster,
+            reference_roster,
+        )
 
         looks = _cast_looks(body, generate=generate)
+        roster = reference_roster(references, looks)
+
+        def ground(text: str) -> str:
+            """Everything the manifest knows, written into the text, mechanically."""
+            grounded = apply_cast_descriptions(text, looks) if looks else text
+            if roster:
+                grounded = apply_reference_roster(grounded, references, looks)
+            from .brief_assistant import consolidate_cast_rows
+
+            return consolidate_cast_rows(grounded)
 
         before = _report_of(brief, body)
-        mechanical = normalized_brief(brief, kind=kind)
-        if looks:
-            # The appearance is in the picture, not in the prose: write it in before the
-            # model sees the text, so the row it works from already holds the face.
-            from .cast_vision import apply_cast_descriptions
-
-            mechanical = apply_cast_descriptions(mechanical, looks)
+        # The cue, the roster and the picture's own sentences go in before the model
+        # reads the text, so what it reorganises already names the speaker and holds the
+        # face instead of describing a person it has never seen.
+        mechanical = ground(normalized_brief(brief, kind=kind))
 
         proposal = mechanical
         method = "normalized"
@@ -118,6 +133,7 @@ def create_router(*, generate=None) -> APIRouter:
                 mechanical, kind=kind, diagnosis=before, clip_count=clip_count,
                 transcript_speakers=speakers, characters=characters,
                 has_audio=bool(body.get("has_audio") or speakers),
+                roster=roster,
             )
             try:
                 raw = generate(
@@ -133,20 +149,17 @@ def create_router(*, generate=None) -> APIRouter:
                 # A rewrite that loses the cast or the story is worse than none: keep
                 # the mechanical result unless the model actually produced a brief.
                 if len(candidate) >= 200 and ":" in candidate:
-                    proposal = candidate
+                    proposal = ground(candidate)
                     method = "llm"
             except Exception as exc:  # never block the person on the model
                 print(f"[Director] Brief structuring fell back to the mechanical pass: {exc}")
-            if looks:
-                from .cast_vision import apply_cast_descriptions
-
-                proposal = apply_cast_descriptions(proposal, looks)
 
         after = _report_of(proposal, body)
         return {
             "brief": proposal,
             "method": method,
             "looks": [{"name": name, "look": look} for name, look in looks.items()],
+            "roster": roster,
             "before": before,
             "after": after,
             "resolved": sorted(

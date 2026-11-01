@@ -9949,17 +9949,24 @@ def _h3_shot_project_context(
     # The lock's own S1/S2 lines are what number the participants, so they stay; the
     # "S3-S7 are presence-only" enumeration beside them names every other character
     # and is dropped with the rest of the cast list. They are re-emitted in the shape
-    # the compiler parses ("<Subject 2> is ALWAYS Figura").
+    # the compiler parses ("<Subject 2> (S2) is ALWAYS Figura").
+    #
+    # The speaker cue travels with them when the brief states one. Without it a shot
+    # whose rows carry no inline (Sx) had nothing to attribute a line with, and the
+    # compiler fell back to row order — which is the guess that hands one participant's
+    # voice to another.
     for match in re.finditer(
-        r"(?i)subject\s+(\d+)\s+is\s+always\s+([^\n.;]{0,80})", str(brief or "")
+        r"(?i)subject\s+(\d+)\s*>?\s*(?:\(\s*S\s*(\d+)\s*\)\s*)?is\s+always\s+([^\n.;]{0,80})",
+        str(brief or ""),
     ):
         words = [
-            word for word in re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ'\-]+", match.group(2))
+            word for word in re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ'\-]+", match.group(3))
             if word.casefold() not in {"la", "el", "los", "las", "the", "a", "an", "un", "una"}
         ]
         if not words:
             continue
-        parts.append(f"<Subject {int(match.group(1))}> is ALWAYS {words[0]}.")
+        cue = f" (S{int(match.group(2))})" if match.group(2) else ""
+        parts.append(f"<Subject {int(match.group(1))}>{cue} is ALWAYS {words[0]}.")
     world = _h3_world_context(brief)
     if world:
         parts.append(world)
