@@ -65,33 +65,61 @@ contract states the difference explicitly:
 Nothing is blocked or rewritten by it. A podcast that holds one studio is not warned
 about holding one studio; a short film that holds one church for ten clips is.
 
-## Identity drift: the character's own picture must survive every clip
+## Identity drift: why a face changes over a long film
 
-The reported symptom was a narrator who looked right for the first clips and then changed
-hair and face. Measured on a real 42-clip documentary (`David-y-Goliat`), every clip bound
-**one** picture — David's — and the narrator's own reference was in **none of the 42**.
+Two mechanisms, measured on the same real 42-clip documentary (`David-y-Goliat`), and
+both are now either fixed or reported.
 
-The cause was the per-shot filter. The story planner writes its cast rows with positional
-ids (`char_0`) and no inline `(S1)` cue, while the user's identity picture carries the cue.
-`on_screen` therefore came back empty, and a *labelled* picture was dropped as "not on
-screen" — the one picture the user was most explicit about.
+### 1. A missing identity picture (fixed)
 
-Three rules now:
+Every clip bound exactly one picture — David's — and the narrator's own reference was in
+**none of the 42**. She looked right for a few clips and then changed.
 
-- A picture the user labelled is dropped **only on evidence**: when the shot's own cast is
+The per-shot filter was the cause. The story planner writes its cast rows with positional
+ids (`char_0`) and no inline `(S1)` cue, while the user's picture carries the cue, so
+`on_screen` came back empty and a *labelled* picture was dropped as "not on screen" — the
+one picture the user was most explicit about. Three rules now:
+
+- a labelled picture is dropped **only on evidence**: when the shot's own cast is
   identified and does not include it. A shot whose cast cannot be identified keeps every
-  labelled identity, because losing the narrator's own face is worse than one extra face.
-- `char_N` rows map onto the manifest order, so the planner's positional ids name the
-  pictures the user supplied.
-- A character the brief names is attached whenever the shot puts **more people in frame
-  than identities already attached**. The planner worded the biblical cast as "a young man"
-  and "a massive giant" while the manifest held `David` and `Goliath`, so a name match
-  dropped both and H3 invented their faces. A character the brief never mentions
-  (`Veronica`, `Roman` from another project) is still a leftover.
+  labelled identity;
+- `char_N` rows map onto the manifest order, so positional ids name the user's pictures;
+- a character the brief names is attached whenever the shot puts **more people in frame
+  than identities already attached** (the planner called them "a young man" and "a massive
+  giant" while the manifest held `David` and `Goliath`); a character the brief never
+  mentions is still a leftover and is still dropped.
 
-Measured on that run's own 42 clips after the change: the narrator's picture is bound in
-all 42, 24 clips (her alone, no other person row) carry only her picture, and the 18 shots
-that stage the biblical cast carry David's and Goliath's as well.
+Result on that run's own clips: the narrator is bound in all 42 (was 0), 24 shots of her
+alone carry only her picture, and the 18 shots that stage the biblical cast carry David's
+and Goliath's too.
+
+### 2. Clip continuity re-renders the previous face (reported)
+
+`Clip continuity` chains every clip to a frame extracted from the one before it, so each
+shot re-renders the previous shot's face. That is generation loss by design, and it is
+right for one continuous scene; it is wrong for a narrated film with cutaways. On that run
+15 continuity frames were written and fed forward, and the likeness drifted a little in
+each — the user's *"la va transformando conforme avanza el video"*.
+
+The pipeline now reports it at planning time when the mode is on, the project has a
+labelled identity reference and the film has more than eight clips:
+
+> Clip continuity is on with 1 labelled identity reference(s) (Anita) over 42 clips: every
+> shot is chained to a frame of the clip before it, so the face is re-rendered from the
+> previous generation and drifts a little each time. For a narrated film with cutaways,
+> switch the workflow to the independent mode so each shot starts from the identity
+> picture alone.
+
+**What to do:** for a documentary-narrator format, choose the independent workflow
+(`Clip continuity` off). One face, many places: the identity picture carries the face and
+the plan carries the place.
+
+### 3. Wardrobe is text, and only the brief can hold it
+
+The run's brief described Anita and then treated everyone else as "Ancient Biblical
+Characters". The code no longer invents their faces, but their wardrobe is only as stable
+as the words: give each character a line in `CHARACTERS` (`David: young shepherd, curly
+dark hair, tan tunic, leather sling`) and the plan repeats it.
 
 ## The cast is per shot, not per project
 

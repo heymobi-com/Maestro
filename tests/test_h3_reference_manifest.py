@@ -24,6 +24,7 @@ if str(APP) not in sys.path:
 
 from services import director_pipeline  # noqa: E402
 from services.director_pipeline import (  # noqa: E402
+    _h3_continuity_identity_risk,
     _h3_manifest_issues,
     _h3_person_rows,
     _h3_place_keys,
@@ -322,6 +323,40 @@ class PersonRowTests(unittest.TestCase):
         ):
             clip = {"_director_subjects_on_screen": [{"visual_description": description}]}
             self.assertEqual(_h3_person_rows(clip), 0, description)
+
+
+class ContinuityRiskTests(unittest.TestCase):
+    """Clip continuity re-renders the previous face, so it drifts over a long film."""
+
+    PARAMS = {
+        "_director_sequence_continuity": True,
+        "minimax_h3_references": [
+            _image("Anita (S1)", "anita.png"),
+            _image("David", "david.png"),
+        ],
+    }
+
+    def test_a_chained_film_with_a_labelled_identity_is_reported(self):
+        issues = _h3_continuity_identity_risk(self.PARAMS, 42)
+
+        self.assertEqual(len(issues), 1)
+        self.assertIn("Clip continuity", issues[0])
+        self.assertIn("Anita", issues[0])
+        self.assertIn("42 clips", issues[0])
+
+    def test_the_independent_workflow_is_not_reported(self):
+        params = dict(self.PARAMS, _director_sequence_continuity=False)
+
+        self.assertEqual(_h3_continuity_identity_risk(params, 42), [])
+
+    def test_a_short_film_is_not_reported(self):
+        # A handful of chained clips does not visibly drift; the warning would be noise.
+        self.assertEqual(_h3_continuity_identity_risk(self.PARAMS, 6), [])
+
+    def test_a_manifest_without_a_labelled_identity_is_not_reported(self):
+        params = dict(self.PARAMS, minimax_h3_references=[_image("Anita", "anita.png")])
+
+        self.assertEqual(_h3_continuity_identity_risk(params, 42), [])
 
 
 class PublishTests(unittest.TestCase):

@@ -7875,7 +7875,7 @@ def _run_pipeline(pid: str, resume: bool = False):
         _director_prompt_diversity_report(
             clip_plans, pid=pid, kind=str(params.get("pipeline_type") or ""),
         )
-        _report_h3_manifest_issues(pid, params)
+        _report_h3_manifest_issues(pid, params, clip_count=len(clip_plans))
 
         _update_pipeline(pid, clip_plans=clip_plans, llm_streaming=False)
         _save_pipeline_state(pid)  # Save after planning
@@ -9774,10 +9774,58 @@ def _h3_manifest_issues(params: dict) -> list[str]:
     return issues
 
 
-def _report_h3_manifest_issues(pid: str, params: dict) -> list[str]:
+def _h3_continuity_identity_risk(
+    params: dict, clip_count: int, *, minimum_clips: int = 8,
+) -> list[str]:
+    """Name the one setting that transforms a face over a long film.
+
+    ``Clip continuity`` chains each clip to a frame extracted from the one before it,
+    so every shot re-renders the previous shot's face. Measured on a real 42-clip
+    documentary: 15 continuity frames were written and fed forward, and the narrator's
+    likeness drifted a little in each of them — the user's "la va transformando
+    conforme avanza el video". The chain is right for one continuous scene and wrong
+    for a narrated film with cutaways, where every shot should start from the identity
+    picture alone.
+    """
+
+    if not isinstance(params, dict):
+        return []
+    if not params.get("_director_sequence_continuity"):
+        return []
+    if int(clip_count or 0) <= minimum_clips:
+        return []
+    references = params.get("minimax_h3_references") or []
+    identity = [
+        reference for reference in references
+        if isinstance(reference, dict)
+        and str(reference.get("type") or "").lower() == "image"
+        and str(reference.get("image_intent") or "identity").lower() == "identity"
+        and _h3_reference_speaker_labels(reference)
+    ]
+    if not identity:
+        return []
+    names = ", ".join(
+        str(reference.get("role") or "").split("(")[0].strip() for reference in identity[:3]
+    )
+    return [
+        f"Clip continuity is on with {len(identity)} labelled identity reference(s) "
+        f"({names}) over {int(clip_count)} clips: every shot is chained to a frame of "
+        "the clip before it, so the face is re-rendered from the previous generation "
+        "and drifts a little each time. For a narrated film with cutaways, switch the "
+        "workflow to the independent mode so each shot starts from the identity picture "
+        "alone."
+    ]
+
+
+def _report_h3_manifest_issues(
+    pid: str, params: dict, *, clip_count: int = 0,
+) -> list[str]:
     """Print the reference problems and publish them with the plan warnings."""
 
-    issues = _h3_manifest_issues(params or {})
+    issues = [
+        *_h3_manifest_issues(params or {}),
+        *_h3_continuity_identity_risk(params or {}, clip_count),
+    ]
     if not issues:
         return []
     label = f"[Pipeline {pid}] " if pid else "[Pipeline] "
@@ -10238,7 +10286,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
     _director_prompt_diversity_report(
         clip_plans, pid=pid, kind=str(params.get("pipeline_type") or ""),
     )
-    _report_h3_manifest_issues(pid, params)
+    _report_h3_manifest_issues(pid, params, clip_count=len(clip_plans))
     video_params = params.get("video_params", {})
     video_loras = params.get("video_loras", {})
     # Mirror of the image-LoRA file-existence filter — see _run_image_generation
