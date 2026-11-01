@@ -35,6 +35,9 @@ a fix for each:
 | `camera-habit` | warning | `whenever` / `always` / `every time` / `throughout` in the camera section |
 | `cast-without-stage` | warning | cast entries no stage places, listed by name |
 | `undescribed-character` | warning | a name the story acts with that has no cast row |
+| `template-placeholder` | error | a line whose key is in angle brackets, or a heading carrying the instruction in parentheses — the assistant's own template reaching the planner as content |
+| `abstract-beats` | warning | a stage that names no place and no action, so the planner has to invent the film from it |
+| `cast-without-appearance` | warning | a character who acts in a stage but is only listed as a *presence*, so every clip invents a different face |
 | `speakers-unbound` | warning | audio speakers that the lock binds to no Subject |
 | `podcast-stages` | info | staged locations in a workflow that is one studio |
 | `music-no-sections` | info | a music video that never names verse / chorus / bridge |
@@ -48,13 +51,44 @@ Two passes, and the deterministic one is not optional:
 
 1. `normalized_brief` repairs what needs no model — section order and case, `Stage N`
    numbering restored from the description's own sentences (a fragment like "One night in
-   Valdecuna." joins the beat that follows), blank lines.
+   Valdecuna." joins the beat that follows), blank lines, and `strip_template_placeholders`
+   removing any line the assistant's own instructions leaked into the text.
 2. The LLM pass reorganises and fills the gaps the diagnosis named. It is told, in the
    prompt, that every name, image, action and idea is the person's, that a stage is one
-   place and one moment, and that it may never invent a character or an event.
+   place and one moment, and that it may never invent a character or an event. Its answer
+   goes through `strip_template_placeholders` too, so a template line cannot come back.
 
 The result is shown **in full** with Apply / Discard; nothing replaces your text until you
 press Apply. The response also says which faults were resolved and which remain.
+
+## The leak this was fixed for
+
+The first version of this assistant produced briefs that were worse than the prose they
+replaced. Measured on a real project, its own instruction text had become content:
+
+    SUBJECT LOCK:
+    <Subject 1> is ALWAYS Anita.
+    <every other character>: named as presences and objects that never become S1 or S2.
+
+    PRESENCES (only what this workflow needs):
+    Ancient biblical crowds/soldiers: presences in the battle and camp stages.
+
+Three separate faults, all now diagnosed and stripped:
+
+1. **A placeholder line became a cast row** — `<every other character>:` is a cast member
+   with no character in it. The planner read it and had to fill it in.
+2. **An instruction heading leaked** — `PRESENCES (only what this workflow needs):` is the
+   machine talking to itself.
+3. **The beats described the format, not the film** — "Epic biblical scenes visually
+   illustrate what is being narrated". Given four of those and 42 clips, the planner
+   invents 42 clips. This is the wandering the user reported, and no amount of prompt
+   hardening downstream can repair it: there is no story to be consistent with.
+
+A fourth fault is structural and cannot be fixed mechanically: the same brief listed
+`David: presence in the biblical action stages.` — a row that says *when* he appears and
+never *how he looks*. The reference image is supplied, but nothing in the text holds the
+face, so the plan drifts. `cast-without-appearance` names those rows; only the person (or
+the model, told to add nothing beyond what the text implies) can fill them in.
 
 ## Why the model cannot make it worse
 
@@ -94,13 +128,15 @@ a short film, the strictest case.
 
 ## Tests
 
-`tests/test_director_brief_assistant.py` (27) holds the diagnosis per code, the ordering
+`tests/test_director_brief_assistant.py` (36) holds the diagnosis per code, the ordering
 of errors before warnings, that every finding carries a fix, the workflow-specific
-expectations (a podcast is not asked for stages, a music video is asked for sections), and
-the mechanical normalization — sections reordered, beats numbered from prose, a podcast not
-given stages, the ideas never rewritten.
+expectations (a podcast is not asked for stages, a music video is asked for sections), the
+mechanical normalization — sections reordered, beats numbered from prose, a podcast not
+given stages, the ideas never rewritten — and `TemplateLeakTests`, the four faults above
+plus the two stripping passes and the prompt rules that forbid them.
 
-`tests/test_director_brief_api.py` (9) drives the routes over ASGI: a prose brief is
+`tests/test_director_brief_api.py` (10) drives the routes over ASGI: a prose brief is
 reported, the route works with no model, the mechanical pass still fixes the shape, a
-model answer resolves the fault, a model that answers prose does not replace the brief, a
-model that raises falls back, and `use_llm: false` never calls the model.
+model answer resolves the fault, a model answer that leaks the template is cleaned before
+it reaches the brief, a model that answers prose does not replace the brief, a model that
+raises falls back, and `use_llm: false` never calls the model.

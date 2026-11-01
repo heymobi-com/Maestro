@@ -14,6 +14,7 @@ from fastapi import APIRouter, Request
 from .brief_assistant import (
     diagnose_brief,
     normalized_brief,
+    strip_template_placeholders,
     structure_prompt,
 )
 
@@ -87,7 +88,11 @@ def create_router(*, generate=None) -> APIRouter:
                     system,
                     max(1024, min(4096, len(mechanical) // 3 + 900)),
                 )
-                candidate = strip_code_fences(str(raw or "")).strip()
+                # The model copies instruction lines out of the prompt sometimes: a real
+                # proposal opened with "<every other character>: named as presences…".
+                candidate = strip_template_placeholders(
+                    strip_code_fences(str(raw or "")).strip(),
+                ).strip()
                 # A rewrite that loses the cast or the story is worse than none: keep
                 # the mechanical result unless the model actually produced a brief.
                 if len(candidate) >= 200 and ":" in candidate:

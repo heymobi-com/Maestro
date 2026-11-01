@@ -78,6 +78,45 @@ _STAGE_RE = re.compile(
     r"(?i)\bstage\s+(\d+)\b|^\s*(?:scene|beat|section)\s+(\d+)\b", re.MULTILINE,
 )
 
+# A line whose key is in angle brackets is a template placeholder, not content.
+# Measured on a real brief the assistant produced: the writer copied
+# "<every other character>: named as presences and objects" straight out of the
+# instruction, and the planner then read a cast row with no character in it. The
+# heading "PRESENCES (only what this workflow needs):" leaked the same way.
+_PLACEHOLDER_LINE_RE = re.compile(r"^\s*<[^>\n]{1,60}>\s*:")
+_INSTRUCTION_HEADING_RE = re.compile(r"\s*\((?:only )?what (?:this workflow|the workflow)[^)]*\)")
+
+# A stage is concrete when somebody does something in it. A beat that only describes
+# the format -- "epic scenes illustrate what is being narrated" -- leaves the planner
+# to invent the whole film from it, which is the wandering the user reported.
+_CONCRETE_ACTION_RE = re.compile(
+    r"\b(walks?|walking|enters?|entering|kneels?|kneeling|stands?|standing|sits?|sitting|"
+    r"turns?|turning|raises?|raising|lifts?|holds?|holding|carries?|carrying|throws?|"
+    r"throwing|strikes?|striking|climbs?|climbing|runs?|running|opens?|closes?|"
+    r"falls?|falling|rises?|arrives?|leaves?|steps?|crosses?|reaches?|touches?|"
+    r"prays?|praying|fights?|fighting|draws?|aims?|shoots?|washes?|builds?|"
+    r"sleeps?|wakes?|weeps?|cries?|laughs?|shouts?)\b",
+    re.I,
+)
+
+
+def strip_template_placeholders(brief: str) -> str:
+    """Remove the assistant's own template lines from a brief.
+
+    Two shapes leaked from the structuring instructions: a line whose key is an
+    angle-bracket placeholder, and a heading carrying the instruction in parentheses.
+    Both are the machine talking to itself, and both reach the planner as content.
+    """
+
+    kept: list[str] = []
+    for line in str(brief or "").splitlines():
+        if _PLACEHOLDER_LINE_RE.match(line):
+            continue
+        cleaned = _INSTRUCTION_HEADING_RE.sub("", line)
+        if cleaned.strip() or not line.strip():
+            kept.append(cleaned)
+    return "\n".join(kept)
+
 
 def _sections(brief: str) -> dict[str, str]:
     """``{"SUBJECT LOCK": "...", ...}`` for the headed sections of a brief."""
@@ -299,6 +338,66 @@ def diagnose_brief(
             "a Subject.",
             "Number each speaker in the lock: '<Subject 1> is ALWAYS <name>.'")
 
+    # 6b. The assistant's own template reaching the planner as content. Measured on a
+    # real brief: "<every other character>: named as presences and objects" and the
+    # heading "PRESENCES (only what this workflow needs):" were both copied verbatim.
+    placeholders = [
+        line.strip() for line in text.splitlines() if _PLACEHOLDER_LINE_RE.match(line)
+    ]
+    if placeholders:
+        add("template-placeholder", "error",
+            f"{len(placeholders)} line(s) are template placeholders, not content "
+            f"({', '.join(placeholders[:2])[:80]})",
+            "Remove them, or press Structure again — the assistant strips them now.")
+
+    # 6c. A stage that only describes the format leaves the planner to invent the film.
+    if policy.max_consecutive_same_setting > 0 and stages:
+        abstract = [
+            number for number, body in stages
+            if not _CONCRETE_ACTION_RE.search(body)
+            and not {word for word in _PLACE_WORDS if re.search(rf"\b{word}\b", body, re.I)}
+        ]
+        if abstract:
+            add("abstract-beats", "warning",
+                f"{len(abstract)} stage(s) name no place and no action "
+                f"({', '.join(str(number) for number in abstract[:4])}), so the planner "
+                "has to invent what happens in them.",
+                "Write each stage as a place plus who is in it plus what visibly happens.")
+
+    # 6d. Someone the story acts with, listed only as a presence. Measured on the
+    # David-y-Goliat brief: "David: presence in the biblical action stages." — David and
+    # Goliat act in four of five stages and no appearance is ever given, so each clip
+    # drew its own David. That is the face that changes as the run goes on.
+    character_section = next(
+        (body for name, body in sections.items() if name.startswith("CHARACTER")), ""
+    )
+    described_here = {
+        " ".join(line.split(":", 1)[0].split()).casefold()
+        for line in character_section.splitlines()
+        if ":" in line and re.match(r"^\s*[-*]?\s*[A-ZÁÉÍÓÚÜÑ]", line)
+    }
+    stage_blob = " ".join(body for _number, body in stages)
+    acting_rows = [
+        " ".join(line.split(":", 1)[0].split())
+        for line in sections.get("PRESENCES", "").splitlines()
+        if re.match(r"^\s*[-*]?\s*[A-ZÁÉÍÓÚÜÑ][^:\n]{2,40}:\s*\S", line)
+    ]
+    acting_rows = [
+        name for name in acting_rows
+        if name.casefold() not in described_here
+        and any(
+            re.search(rf"\b{re.escape(word)}\b", stage_blob, re.I)
+            for word in (_name_words(name) or [name.casefold()])
+        )
+    ]
+    if acting_rows:
+        add("cast-without-appearance", "warning",
+            f"{len(acting_rows)} character(s) act in the story but are only listed as "
+            f"presences ({', '.join(acting_rows[:3])}"
+            + (", ..." if len(acting_rows) > 3 else "")
+            + "): they have no appearance, so every clip invents a different one.",
+            "Give each one a CHARACTERS row with age, build, hair, wardrobe.")
+
     if "NEGATIVE" not in sections:
         add("no-negative", "info",
             "No NEGATIVE section: what must not appear is left to the model.",
@@ -339,7 +438,7 @@ def normalized_brief(brief: str, *, kind: str = SHORT_FILM_AUDIO) -> str:
     """
 
     policy = scene_policy(kind)
-    sections = _sections(brief)
+    sections = _sections(strip_template_placeholders(brief))
     ordered: list[str] = []
     for wanted in CANONICAL_SECTIONS:
         for name, body in sections.items():
@@ -445,44 +544,44 @@ def structure_prompt(
 not writing a new film. Every name, image, action and idea in the user's text is theirs:
 keep them, in their order, and only reorganise and fill the gaps named below.
 
-Output ONLY the rewritten brief, in exactly these sections, in this order, with these
-headings:
+Output ONLY the rewritten brief. Use exactly these section headings, in this order:
+SUBJECT LOCK, CHARACTERS, PRESENCES, CAMERA, AMBIENCE, DESCRIPTION, NEGATIVE.
 
-SUBJECT LOCK:
-<Subject 1> is ALWAYS <name>.
-<Subject 2> is ALWAYS <name>.
-<every other character>: named as presences and objects that never become S1 or S2.
+What each section holds:
+- SUBJECT LOCK: one line per speaking participant, written exactly as
+  "<Subject 1> is ALWAYS <name>."  and  "<Subject 2> is ALWAYS <name>."
+  Then one sentence naming the characters that never become a Subject.
+- CHARACTERS: one line per character, "<name>: appearance, age, wardrobe."
+  Every character the story shows by name gets its own line. Never replace named
+  people with a group. If the text never describes someone's face or clothes, write
+  only what the text implies they are (era, role, age if stated) and stop there: no
+  invented hair colour, no invented costume, and never the word "presence". A line
+  that describes when someone appears instead of how they look is a fault, because
+  every shot then invents a different face.
+- PRESENCES: only the characters that appear without speaking, one line each.
+- CAMERA: the lens and palette, then one line per stage. Never "whenever", "always",
+  "every time" or "throughout".
+- AMBIENCE: place, palette, texture, light.
+- DESCRIPTION: one stage per story beat, written "Stage N (label): ..." and each stage
+  names ONE place, WHO is in it, and WHAT visibly happens there.
+- NEGATIVE: what must not appear.
 
-CHARACTERS:
-<name>: appearance, wardrobe, age, one line each.
-
-PRESENCES (only what this workflow needs):
-<name>: appearance, and the stage it appears in.
-
-CAMERA:
-<one line per stage or section; never "whenever", "always", "every time", "throughout">.
-
-AMBIENCE:
-<place, palette, texture, light — the world, not the plot.>
-
-DESCRIPTION:
-Stage 1 (<label>): <one place, one moment, who is in frame.>
-Stage 2 (<label>): …
-
-NEGATIVE:
-<what must not appear.>
-
-Rules:
+Hard rules:
 - This brief is for a {policy.label}. {policy.guidance}
-- One stage is ONE place and ONE moment. If a stage names several places, split it.
-- A character exists only in the stage where the story puts it. Do not move anyone into
+- A stage is ONE place and ONE moment. If a beat names several places, split it.
+- A character exists only in the stage where the story puts it. Never move anyone into
   a stage to make it busier.
-- Keep the person's language where it is a name or an image; you may translate structure,
-  not content.
-- Never invent a character, an event or a location that is not in the text. If something
-  needed is missing, state the gap in NEGATIVE as a prohibition instead of inventing it.
-- Total length must stay close to the original: this text is read by a planner, not by a
-  model with unlimited context."""
+- Every stage must name a place and a visible action. Never write a stage that only
+  describes the format ("epic scenes illustrate what is being narrated"), because the
+  planner then has to invent the film from it.
+- Never output a line whose key is in angle brackets, and never repeat an instruction
+  from this prompt as if it were content.
+- Keep the person's own words for names, places and images; you may translate
+  structure, not content.
+- Never invent a character, an event or a location that is not in the text. If
+  something needed is missing, state the gap in NEGATIVE as a prohibition.
+- Total length must stay close to the original: this text is read by a planner, not by
+  a model with unlimited context."""
 
     user = f"""The film is planned as {clip_count or 'an unknown number of'} clips.
 The audio's speakers are: {speakers}

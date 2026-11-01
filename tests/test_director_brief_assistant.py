@@ -22,6 +22,7 @@ from services.director.brief_assistant import (  # noqa: E402
     CANONICAL_SECTIONS,
     diagnose_brief,
     normalized_brief,
+    strip_template_placeholders,
     structure_prompt,
 )
 from services.director.planners.short_film import _brief_stage_list  # noqa: E402
@@ -230,6 +231,93 @@ class NormalizationTests(unittest.TestCase):
         self.assertTrue(_brief_stage_list(out))
         for section in ("SUBJECT LOCK", "CHARACTERS", "CAMERA", "AMBIENCE", "DESCRIPTION", "NEGATIVE"):
             self.assertIn(section, out)
+
+
+class TemplateLeakTests(unittest.TestCase):
+    """The assistant must not hand back its own instructions as if they were content."""
+
+    LEAKED = (
+        "SUBJECT LOCK:\n"
+        "<Subject 1> is ALWAYS Anita.\n"
+        "<every other character>: named as presences and objects that never become S1 or S2.\n"
+        "\n"
+        "CHARACTERS:\n"
+        "Anita: una mujer joven, narradora del documental.\n"
+        "\n"
+        "PRESENCES (only what this workflow needs):\n"
+        "David: presence in the biblical action stages.\n"
+        "\n"
+        "DESCRIPTION:\n"
+        "Stage 1 (beat 1): Anita narrates the story of David and Goliath in a documentary.\n"
+        "Stage 2 (beat 2): Epic biblical scenes visually illustrate what is being narrated.\n"
+        "Stage 3 (beat 3): David walks through the camp and lifts a stone from the stream.\n"
+    )
+
+    def _codes(self) -> set[str]:
+        return {
+            finding["code"]
+            for finding in diagnose_brief(self.LEAKED, kind="short_film_story", clip_count=42)["findings"]
+        }
+
+    def test_a_placeholder_line_is_an_error(self):
+        self.assertIn("template-placeholder", self._codes())
+
+    def test_a_beat_that_only_describes_the_format_is_reported(self):
+        self.assertIn("abstract-beats", self._codes())
+
+    def test_a_presence_that_acts_without_an_appearance_is_reported(self):
+        self.assertIn("cast-without-appearance", self._codes())
+
+    def test_a_presence_the_story_never_uses_is_not_reported(self):
+        brief = (
+            "CHARACTERS:\nAnita: narrator in a cream shirt.\n\n"
+            "PRESENCES:\nA Crowd: stands at the back, out of focus.\n\n"
+            "DESCRIPTION:\n"
+            "Stage 1 (kitchen): Anita walks to the wooden table and lifts the cup.\n"
+        )
+
+        codes = {
+            finding["code"]
+            for finding in diagnose_brief(brief, kind="short_film_story", clip_count=8)["findings"]
+        }
+        self.assertNotIn("cast-without-appearance", codes)
+
+    def test_the_placeholder_line_is_removed(self):
+        cleaned = strip_template_placeholders(self.LEAKED)
+
+        self.assertNotIn("<every other character>", cleaned)
+        self.assertIn("<Subject 1> is ALWAYS Anita", cleaned)
+
+    def test_the_instruction_heading_keeps_its_section_and_loses_the_note(self):
+        cleaned = strip_template_placeholders(self.LEAKED)
+
+        self.assertIn("PRESENCES:", cleaned)
+        self.assertNotIn("only what this workflow needs", cleaned)
+
+    def test_the_prompt_forbids_placeholders_in_the_answer(self):
+        system, _user = structure_prompt(self.LEAKED, kind="short_film_story", clip_count=42)
+
+        self.assertIn("Never output a line whose key is in angle brackets", system)
+        self.assertIn('only describes the format ("epic scenes illustrate', " ".join(system.split()))
+
+    def test_the_prompt_asks_for_one_named_row_per_character(self):
+        system, _ = structure_prompt(self.LEAKED, kind="short_film_story", clip_count=42)
+
+        self.assertIn("Every character the story shows by name gets its own line", system)
+
+    def test_a_concrete_stage_is_not_reported_as_abstract(self):
+        brief = (
+            "CHARACTERS:\nAnita: narrator in a cream shirt.\n\n"
+            "DESCRIPTION:\n"
+            "Stage 1 (kitchen): Anita walks to the wooden table and lifts the cup.\n"
+            "Stage 2 (street): Anita crosses the cobbled street and turns to the crowd.\n"
+            "Stage 3 (church): Anita kneels at the altar and prays.\n"
+        )
+
+        self.assertNotIn(
+            "abstract-beats",
+            {f["code"] for f in diagnose_brief(brief, kind="short_film_story", clip_count=12)["findings"]},
+        )
 
 
 class StructurePromptTests(unittest.TestCase):

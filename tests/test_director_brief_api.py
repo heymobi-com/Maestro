@@ -141,6 +141,30 @@ class StructureRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["method"], "normalized")
 
 
+    async def test_a_model_answer_that_leaks_the_template_is_cleaned(self):
+        def fake_generate(prompt, system_prompt, max_new_tokens):
+            return (
+                "SUBJECT LOCK:\n"
+                "<Subject 1> is ALWAYS Abuela Rosa.\n"
+                "<every other character>: named as presences and objects that never become S1 or S2.\n"
+                "\n"
+                "CHARACTERS:\nAbuela Rosa: woman, 78, black headscarf.\n\n"
+                "DESCRIPTION:\n"
+                "Stage 1 (kitchen): Abuela Rosa walks to the table and lifts the cup.\n"
+                "Stage 2 (corridor): Abuela Rosa crosses the corridor and turns.\n"
+            )
+
+        async with _client(generate=fake_generate) as client:
+            response = await client.post(
+                "/api/v1/director/brief/structure", json=REVIEW_BODY,
+            )
+
+        result = response.json()
+        self.assertEqual(result["method"], "llm")
+        self.assertNotIn("<every other character>", result["brief"])
+        self.assertNotIn("template-placeholder", result["remaining"])
+
+
 class CodeFenceTests(unittest.TestCase):
     def test_a_fenced_brief_is_unwrapped(self):
         text = "Here you go:\n```text\nSUBJECT LOCK:\n<Subject 1> is ALWAYS Rosa.\n```\n"
