@@ -282,6 +282,21 @@ class TemplateLeakTests(unittest.TestCase):
         }
         self.assertNotIn("cast-without-appearance", codes)
 
+    def test_a_presence_that_does_describe_how_it_looks_is_not_reported(self):
+        brief = (
+            "CHARACTERS:\nAnita: narrator in a cream shirt.\n\n"
+            "PRESENCES:\n"
+            "Israelite soldiers: men of all ages in dull bronze and leather, seen from behind.\n\n"
+            "DESCRIPTION:\n"
+            "Stage 1 (camp): Anita walks past the Israelite soldiers and stops by a tent.\n"
+        )
+
+        codes = {
+            finding["code"]
+            for finding in diagnose_brief(brief, kind="short_film_story", clip_count=8)["findings"]
+        }
+        self.assertNotIn("cast-without-appearance", codes)
+
     def test_the_placeholder_line_is_removed(self):
         cleaned = strip_template_placeholders(self.LEAKED)
 

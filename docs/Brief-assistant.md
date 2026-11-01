@@ -128,7 +128,7 @@ a short film, the strictest case.
 
 ## Tests
 
-`tests/test_director_brief_assistant.py` (36) holds the diagnosis per code, the ordering
+`tests/test_director_brief_assistant.py` (37) holds the diagnosis per code, the ordering
 of errors before warnings, that every finding carries a fix, the workflow-specific
 expectations (a podcast is not asked for stages, a music video is asked for sections), the
 mechanical normalization — sections reordered, beats numbered from prose, a podcast not

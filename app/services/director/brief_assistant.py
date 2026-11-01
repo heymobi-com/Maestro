@@ -100,6 +100,31 @@ _CONCRETE_ACTION_RE = re.compile(
 )
 
 
+# A presence row that names what someone looks like is an appearance; one that says when
+# they turn up ("presence in the biblical action stages") is not, and each clip then
+# invents a different face for them.
+_APPEARANCE_RE = re.compile(
+    r"\b(?:[a-z]+-)?(?:haired|bearded|eyed|skinned)\b|"
+    r"\b(?:black|white|grey|gray|brown|blonde|blond|red|auburn|dark|pale|olive|tan|"
+    r"bronze|gold|golden|silver|iron|steel|copper|blue|green|ochre|cream|red)\b|"
+    r"\b(?:hair|beard|moustache|mustache|eyes?|face|skin|wrinkles?|scars?|tall|short|"
+    r"thin|gaunt|stoop(?:ed)?|heavy|lean|muscular|young|old|elderly|teenage|youthful)\b|"
+    r"\b(?:tunic|robe|robes|cloak|coat|dress|gown|skirt|apron|trousers|pants|shirt|"
+    r"blazer|jacket|suit|almond|alb|chasuble|stole|armour|armor|helmet|greaves|shroud|"
+    r"veil|scarf|headscarf|hat|cap|slippers?|boots?|shoes?|sandals?|gloves?|belt|sash|"
+    r"rope|linen|wool|leather|silk|canvas|chainmail|scale|spear|shield|sling|necklace|"
+    r"rosary|earrings?|spectacles|glasses)\b|"
+    r"\b(?:about|around|aged?)\s+\d{1,3}\b|\b\d{1,3}\s*(?:years? old|-year-old)\b",
+    re.I,
+)
+
+
+def _describes_appearance(text: str) -> bool:
+    """True when a cast row says what someone looks like, not merely when they appear."""
+
+    return bool(_APPEARANCE_RE.search(text))
+
+
 def strip_template_placeholders(brief: str) -> str:
     """Remove the assistant's own template lines from a brief.
 
@@ -377,10 +402,14 @@ def diagnose_brief(
         if ":" in line and re.match(r"^\s*[-*]?\s*[A-ZÁÉÍÓÚÜÑ]", line)
     }
     stage_blob = " ".join(body for _number, body in stages)
+    presence_lines = [
+        line for line in sections.get("PRESENCES", "").splitlines()
+        if re.match(r"^\s*[-*]?\s*[A-ZÁÉÍÓÚÜÑ][^:\n]{2,40}:\s*\S", line)
+    ]
     acting_rows = [
         " ".join(line.split(":", 1)[0].split())
-        for line in sections.get("PRESENCES", "").splitlines()
-        if re.match(r"^\s*[-*]?\s*[A-ZÁÉÍÓÚÜÑ][^:\n]{2,40}:\s*\S", line)
+        for line in presence_lines
+        if not _describes_appearance(line.split(":", 1)[1])
     ]
     acting_rows = [
         name for name in acting_rows
