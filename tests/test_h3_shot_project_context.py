@@ -107,6 +107,57 @@ class ShotContextTests(unittest.TestCase):
     def test_a_brief_with_nothing_usable_is_empty(self):
         self.assertEqual(_h3_shot_project_context("A woman waits.", 0, 4), "")
 
+    def test_the_on_screen_narrator_reaches_the_shot(self):
+        brief = (
+            "SUBJECT LOCK:\n<Subject 1> (S1) is ALWAYS Anita.\n\n"
+            "DESCRIPTION:\nSTANDING RULE: Anita is at the center of the cinematic "
+            "action in every shot, moving immersively through the settings.\n"
+        )
+
+        context = _h3_shot_project_context(brief, 0, 8)
+
+        self.assertIn("NARRATION PRESENCE", context)
+        self.assertIn("visible participant of EVERY shot", context)
+        self.assertIn("off-screen voiceover", context)
+
+    def test_a_film_without_a_presenter_gets_no_presence_rule(self):
+        brief = (
+            "SUBJECT LOCK:\n<Subject 1> is ALWAYS Rosa.\n\n"
+            "DESCRIPTION:\nStage 1: Rosa lifts the cup in the kitchen.\n"
+        )
+
+        self.assertNotIn("NARRATION PRESENCE", _h3_shot_project_context(brief, 0, 8))
+
+
+class ProtectedContextTests(unittest.TestCase):
+    """The compaction pass may trim boilerplate, never the rules a shot needs."""
+
+    def test_the_context_survives_compaction(self):
+        from services.h3_prompt_budget import fit_h3_base_prompt, h3_prompt_token_count
+        from services.director.scene_policy import narration_presence
+
+        presence = narration_presence(
+            "STANDING RULE: Anita moves through the settings at the center of the "
+            "cinematic action."
+        )
+        boilerplate = (
+            "Keep every requested subject's identity, appearance, wardrobe, and carried "
+            "objects unchanged. "
+        )
+        filler = "The environment contains pale limestone, dry grass and a low wall. " * 120
+        body = (
+            "integrated_multimodal_description: [Shot 1] Anita stands. "
+            + boilerplate + presence + " " + filler
+            + "\n\noverall_soundscape: wind.\n\nnon_diegetic_music: N/A"
+        )
+
+        result = fit_h3_base_prompt(body, target_tokens=1024, protect=presence)
+
+        self.assertGreater(h3_prompt_token_count(body), 1024)
+        self.assertTrue(result.compacted)
+        self.assertIn(presence.strip(), result.prompt)
+        self.assertNotIn(boilerplate.strip(), result.prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -164,5 +164,49 @@ class PlannerWiringTests(unittest.TestCase):
         self.assertIn("{scene_guidance_block}", source)
 
 
+class NarrationPresenceTests(unittest.TestCase):
+    """A brief that puts the narrator inside the film must reach the planner as such."""
+
+    BRIEF = (
+        "SUBJECT LOCK:\n<Subject 1> (S1) is ALWAYS Anita.\n\n"
+        "DESCRIPTION:\nSTANDING RULE: Anita moves immersively through the settings and "
+        "is at the center of the cinematic action in every shot.\n"
+    )
+
+    def test_a_presenter_brief_is_recognised(self):
+        from services.director.scene_policy import narration_is_present
+
+        self.assertTrue(narration_is_present(self.BRIEF))
+
+    def test_a_story_brief_is_not(self):
+        from services.director.scene_policy import narration_is_present
+
+        self.assertFalse(narration_is_present(
+            "SUBJECT LOCK:\n<Subject 1> is ALWAYS Rosa.\n\nDESCRIPTION:\nStage 1: kitchen."
+        ))
+
+    def test_the_name_comes_from_the_lock(self):
+        from services.director.scene_policy import narrator_name
+
+        self.assertEqual(narrator_name(self.BRIEF), "Anita")
+
+    def test_the_block_forbids_voiceover_for_the_presenter(self):
+        from services.director.scene_policy import narration_presence
+
+        block = narration_presence(self.BRIEF)
+
+        self.assertIn("NARRATION PRESENCE", block)
+        self.assertIn("ON CAMERA", block)
+        self.assertIn("off-screen voiceover", block)
+        self.assertIn("subjects_on_screen", block)
+
+    def test_no_block_for_a_film_without_a_presenter(self):
+        from services.director.scene_policy import narration_presence
+
+        self.assertEqual(
+            narration_presence("Stage 1: Rosa lifts the cup in the kitchen."), ""
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

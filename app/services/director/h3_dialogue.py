@@ -6455,6 +6455,11 @@ def compile_h3_official_prompt(
             fitted = fit_h3_base_prompt(
                 compiled,
                 target_tokens=_H3_DIRECTOR_TEXT_TOKEN_BUDGET,
+                # The project context carries the rules this shot cannot work without:
+                # the subject lock, the cast's appearance, the picture binding, the
+                # on-screen-narrator contract. Cleanup may trim application boilerplate,
+                # never these.
+                protect=_h3_injected_project_context(project_context) if project_context else None,
             )
             compiled = fitted.prompt
             final_tokens = fitted.token_count

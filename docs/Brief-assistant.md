@@ -194,6 +194,53 @@ unambiguous: exactly one voice, and one name the text itself calls the speaker (
 "narrates the story of David" does not crown David). A wrong lock is worse than none, so
 two voices or two candidates leave the text alone.
 
+### The narrator is in the film, not over it
+
+A brief that says the narrator "moves immersively through the settings" and stands "at the
+centre of the cinematic action" is asking for a presenter who is *in* the film. The planner
+read it as narration over the image and planned every shot as an off-screen voiceover, so
+the one person the film is built around appeared in none of them.
+
+`narration_presence(brief)` recognises that language (a standing rule, "inside every
+scene", "moves through the settings", "at the centre of the action", "never beside"…) and
+emits a contract that reaches the planner **and** every compiled shot:
+
+- the narrator is a visible participant of every shot, never a disembodied voice;
+- every shot lists her in `subjects_on_screen` with her own cue, and the line is delivered
+  ON CAMERA with the mouth visible and moving;
+- never `off-screen voiceover`, `voiceover`, `narrates over the image`, or `lips remain
+  completely closed` for her;
+- when the line describes something else, she is still in frame — watching it, standing in
+  it, gesturing at it.
+
+The H3 guide's voiceover rule was amended to match: voiceover is only for a speaker the
+project places off camera. A story brief with no presenter gets no presence rule.
+
+## H3's prompt budget: where instructions could go missing
+
+**H3 does not truncate the prompt.** `MiniMaxH3Qwen3VL._plain_inputs` tokenizes the whole
+string (`add_special_tokens=False`, no `max_length`, no `truncation`), and the
+ref2va/vision presentations are assembled from every reference; the transformer's token
+constants (`MINIMAX_H3_LARGE_SEQUENCE_TOKENS = 50000`) are compute-chunking thresholds, not
+text limits.
+
+What *can* shorten a shot is Maestro's own **1024-token quality target**
+(`H3_PROMPT_QUALITY_TARGET`). Above it, `fit_h3_base_prompt` runs a cleanup that removes
+recognised boilerplate and repeated static-environment clauses. Measured cost of the new
+context on a real shot:
+
+| block | tokens |
+| --- | --- |
+| narration presence | 225 |
+| cast appearance | 92 |
+| picture binding | 51 |
+| planner prompt (~150 words) | 280 |
+| **before** subject definitions, retention and sound | **649** |
+
+So the cleanup path is routinely exercised — which is why the injected context is now passed
+as `protect=`: it is swapped for a sentinel, the cleanup runs, and the context is restored
+byte-identical. A rule deleted there would reach the renderer as a missing rule.
+
 ### A number is a promise of a shot
 
 `_number_stages` only numbers a sentence that can actually be shot: it names a place, or

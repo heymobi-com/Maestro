@@ -9979,6 +9979,16 @@ def _h3_shot_project_context(
     """
 
     parts: list[str] = []
+    # Who is in every shot, when the brief asks for a presenter inside the film. The
+    # planner can forget it; H3 must not, or the narrator is drawn as a voice with no body.
+    try:
+        from services.director.scene_policy import narration_presence
+
+        presence = narration_presence(brief)
+        if presence:
+            parts.append(presence)
+    except Exception:  # noqa: BLE001 - guidance only
+        pass
     if pictures:
         parts.append(pictures)
     if cast_looks:

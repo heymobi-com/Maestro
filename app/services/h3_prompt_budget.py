@@ -183,11 +183,19 @@ def fit_h3_base_prompt(
     prompt: Any,
     *,
     target_tokens: int = H3_ENHANCED_TEXT_TOKEN_TARGET,
+    protect: str | Iterable[str] | None = None,
 ) -> H3PromptBudgetResult:
     """Remove redundant boilerplate without shortening unique story content.
 
     ``target_tokens`` controls when cleanup is useful, not what may survive.
     Complete action, sound and speech remain, regardless of the final count.
+
+    ``protect`` is text that must pass through byte-identical: the project context the
+    compiler injects — the subject lock, the cast's appearance, the picture binding, the
+    on-screen-narrator contract. This pass only removes recognised application boilerplate,
+    but "only" is not "never": a line that happens to match a boilerplate pattern would be
+    deleted, and an instruction deleted here reaches the renderer as a missing rule. The
+    protected text is swapped for a sentinel, the cleanup runs, and the text is restored.
     """
 
     text = _normalize(prompt)
@@ -195,9 +203,26 @@ def fit_h3_base_prompt(
     if original_count <= target_tokens:
         return H3PromptBudgetResult(text, original_count, original_count, False)
 
+    protected_blocks: list[str] = []
+    if protect:
+        candidates = [protect] if isinstance(protect, str) else list(protect)
+        staging = text
+        for index, block in enumerate(candidates):
+            body = _normalize(block) if block else ""
+            # The compiler packs the context, so match the compact form too.
+            for candidate in (body, re.sub(r"\s+", " ", body)):
+                if candidate and candidate in staging:
+                    sentinel = f"ZZMAESTROPROTECTED{index}ZZ"
+                    staging = staging.replace(candidate, sentinel)
+                    protected_blocks.append(candidate)
+                    break
+        text = staging
+
     parsed = _parse_base_fields(text)
     if parsed is None:
-        return H3PromptBudgetResult(text, original_count, original_count, False)
+        return H3PromptBudgetResult(
+            _restore_protected(text, protected_blocks), original_count, original_count, False,
+        )
     prefix, visual_body, sound_body, music_body = parsed
     dialogue_blocks = _DIALOGUE_RE.findall(visual_body)
 
@@ -206,8 +231,8 @@ def fit_h3_base_prompt(
     # beneath them. Semantic condensation belongs to the LLM, before this
     # compiler. Here we remove only known application boilerplate and exact
     # repetitions of static environment description, never action or speech.
-    protected, blocks = _protect_dialogue(visual_body)
-    cleaned = _clean_boilerplate(protected)
+    protected_dialogue, blocks = _protect_dialogue(visual_body)
+    cleaned = _clean_boilerplate(protected_dialogue)
     seen: set[str] = set()
     clauses = []
     for clause in re.split(r"(?<=[.!?])\s+", cleaned):
@@ -228,5 +253,22 @@ def fit_h3_base_prompt(
     ])
     candidate = "\n\n".join(parts)
     if _DIALOGUE_RE.findall(candidate) != dialogue_blocks:
-        return H3PromptBudgetResult(text, original_count, original_count, False)
-    return H3PromptBudgetResult(candidate, h3_prompt_token_count(candidate), original_count, candidate != text)
+        return H3PromptBudgetResult(
+            _restore_protected(text, protected_blocks), original_count, original_count, False,
+        )
+    restored = _restore_protected(candidate, protected_blocks)
+    return H3PromptBudgetResult(
+        restored,
+        h3_prompt_token_count(restored),
+        original_count,
+        restored != _restore_protected(text, protected_blocks),
+    )
+
+
+def _restore_protected(text: str, protected: list[str]) -> str:
+    """Put the protected blocks back exactly where their sentinels are."""
+
+    restored = text
+    for index, block in enumerate(protected):
+        restored = restored.replace(f"ZZMAESTROPROTECTED{index}ZZ", block)
+    return restored

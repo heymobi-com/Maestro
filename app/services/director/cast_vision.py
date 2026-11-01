@@ -30,6 +30,7 @@ from typing import Any, Callable, Iterable, Optional
 
 __all__ = [
     "CAST_LOOK_PROMPT",
+    "CAST_WARDROBE_FOLLOWUP",
     "LOOK_IMAGE_MAX_SIZE",
     "LOOK_LIMIT",
     "appearance_from_reference",
@@ -55,25 +56,33 @@ __all__ = [
 #: like one. Nothing about background, pose, lighting, mood or camera, because those
 #: belong to the shot and would otherwise be frozen into every clip.
 CAST_LOOK_PROMPT = (
-    "Describe only the person in this picture, as a full costume and continuity sheet "
-    "for a film crew. Be exhaustive about what is visible and nothing else.\n"
-    "Cover, in this order, one dense paragraph:\n"
+    "Describe only the person in this picture, as a compact costume and continuity note for "
+    "a film crew. Answer in ONE paragraph of at most 120 words, in this exact order, "
+    "separated by semicolons:\n"
     "1. apparent age range and build;\n"
-    "2. skin tone and texture;\n"
-    "3. hair: exact colour, length, how it is worn (loose, tied back, bun, braid, "
-    "updo, under a headscarf), parting, fringe, and any flyaway detail;\n"
-    "4. face: eyebrow shape and colour, eye colour and shape, nose, mouth, jaw, any "
-    "freckles, moles, scars, stubble or facial hair;\n"
-    "5. every garment from top to bottom, in order, with its exact colour, fabric, "
-    "fit, length, neckline, sleeves, buttons, seams and accessories on it;\n"
+    "2. skin tone;\n"
+    "3. hair: exact colour, length, how it is worn (loose, tied back, bun, braid, updo, "
+    "under a headscarf), parting;\n"
+    "4. face: eyebrow colour and shape, eye colour, nose, mouth, any marks or facial hair;\n"
+    "5. WARDROBE — every garment from top to bottom: exact colour, fabric, fit, sleeves, "
+    "length, neckline, and anything on it;\n"
     "6. footwear: type, colour, heel height;\n"
-    "7. jewellery, watch, glasses, bags and any other worn item, with material and "
-    "colour;\n"
-    "8. anything distinctive that must not change between shots.\n"
-    "Name colours precisely (bottle green, not green). Do not describe the background, "
-    "the pose, the lighting, the mood or the camera. Do not guess a name. Do not use "
-    "the word 'presence'. If something is not visible, leave it out rather than "
-    "inventing it."
+    "7. jewellery or accessories, with material and colour.\n"
+    "WARDROBE IS MANDATORY: if you are running short of space, cut detail from the face, "
+    "never the clothing, and never finish before naming what the person wears. Name colours "
+    "precisely (bottle green, not green). Do not describe the background, pose, lighting, "
+    "mood or camera. Do not guess a name. Do not use the word 'presence'. If something is "
+    "not visible, leave it out rather than inventing it."
+)
+
+#: Asked when an answer arrived without any clothing in it, which is the half a shot cannot
+#: invent: measured on a real reference, the read spent everything on hair and face and the
+#: plan then invented a different outfit in every clip.
+CAST_WARDROBE_FOLLOWUP = (
+    "You left out the clothing. Answer again in one short paragraph, and this time start "
+    "with the WARDROBE: every garment from top to bottom with its exact colour, fabric and "
+    "fit, then footwear, then jewellery. Only after that, at most one short clause each, the "
+    "age range, skin, hair and face."
 )
 
 #: Longest appearance kept. A 2K reference warrants detail, but this sentence travels
@@ -86,7 +95,7 @@ LOOK_IMAGE_MAX_SIZE = 1536
 
 #: Answer tokens. The reasoning is paid for out of ``CAST_LOOK_THINKING_BUDGET``, which is
 #: added on top, so this is the whole appearance rather than the appearance minus thinking.
-CAST_LOOK_MAX_TOKENS = 380
+CAST_LOOK_MAX_TOKENS = 320
 
 #: Reasoning budget offered before the answer. A thinking model given only 560 total spent
 #: all of it on reasoning and returned nothing, so the two budgets are separate.
@@ -211,7 +220,7 @@ def appearance_from_reference(
                     prompt=CAST_LOOK_PROMPT + " Do not reason. Answer with the description only.",
                     system_prompt=(
                         "You describe people in photographs for a film continuity sheet. You "
-                        "answer with observed detail only: one dense paragraph, no headers, no "
+                        "answer with observed detail only: one paragraph, no headers, no "
                         "lists, no commentary."
                     ),
                     max_new_tokens=CAST_LOOK_MAX_TOKENS,
@@ -231,10 +240,52 @@ def appearance_from_reference(
                     f"{os.path.basename(image_path)} (all tokens went to reasoning); "
                     f"retrying with a larger budget."
                 )
+        # Wardrobe is the half a shot cannot invent: without it the plan dresses the person
+        # differently in every clip. Measured on a real reference, the read spent its whole
+        # answer on hair and face and stopped before naming a single garment.
+        if str(answer or "").strip() and not _names_wardrobe(answer):
+            print(
+                f"[CastVision] {os.path.basename(image_path)}: no clothing in the read "
+                "(hair and face only); asking again for the wardrobe."
+            )
+            try:
+                retry = generate(
+                    prompt=CAST_WARDROBE_FOLLOWUP,
+                    system_prompt=(
+                        "You describe people in photographs for a film continuity sheet. "
+                        "Observed detail only, one paragraph."
+                    ),
+                    max_new_tokens=CAST_LOOK_MAX_TOKENS,
+                    thinking_budget=budgets[0],
+                    temperature=0.15,
+                    image_paths=[image_path],
+                    image_max_size=LOOK_IMAGE_MAX_SIZE,
+                )
+            except Exception:  # noqa: BLE001
+                retry = ""
+            if str(retry or "").strip() and _names_wardrobe(retry):
+                answer = f"{_clean(answer)} {_clean(retry)}".strip()
     except Exception as exc:  # noqa: BLE001
         print(f"[CastVision] Could not read {os.path.basename(image_path)}: {exc}")
         return ""
     return _clean(answer)
+
+
+def _names_wardrobe(text: str) -> bool:
+    """Whether a read actually says what the person wears."""
+
+    return bool(_GARMENT_RE.search(str(text or "")))
+
+
+_GARMENT_RE = re.compile(
+    r"\b(shirt|blouse|top|tee|t-shirt|tunic|dress|gown|skirt|trousers|pants|jeans|shorts|"
+    r"suit|jacket|coat|blazer|cardigan|sweater|jumper|hoodie|vest|waistcoat|robe|robes|"
+    r"cloak|cape|shawl|scarf|headscarf|veil|apron|uniform|armour|armor|chainmail|tunic|"
+    r"belt|sash|bra|underwear|lingerie|stockings|tights|socks|boots?|shoes?|heels?|"
+    r"sandals?|slippers?|trainers|sneakers|gloves|hat|cap|helmet|crown|tiara|necklace|"
+    r"earrings?|bracelet|watch|glasses|sunglasses|ring)\b",
+    re.IGNORECASE,
+)
 
 
 def _clean(answer: Any) -> str:

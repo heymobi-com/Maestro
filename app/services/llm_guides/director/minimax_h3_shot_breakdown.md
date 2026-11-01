@@ -89,7 +89,11 @@ CONTEXT-IR FORMAT:
   actual generated spoken words only in the JSON field.
 - For voiceover, use the exact phrase "says in an off-screen voiceover" and
   immediately state that the corresponding on-screen character's lips remain
-  completely closed.
+  completely closed. Voiceover is only for a speaker the project places off
+  camera or behind the image: when the project puts the speaker inside the shot
+  (a presenter moving through the scene, a narrator standing in the action), that
+  line is spoken ON camera with the mouth visible, and neither "voiceover" nor
+  "lips remain closed" may be written for it.
 - Use <scenetrans> at both connecting points only when the same line genuinely
   crosses a cut, and <cutoff> only when speech is intentionally truncated by
   the video ending.

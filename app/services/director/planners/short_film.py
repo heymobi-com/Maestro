@@ -7357,6 +7357,12 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
         # writes: a short film must keep moving through places and actions, while a
         # podcast is meant to stay in one studio. See services/director/scene_policy.py.
         scene_guidance_block = scene_guidance("short_film_audio")
+        # A brief that puts the narrator inside the scene must survive as an on-screen
+        # presence. Without this block every shot was planned as an off-screen voiceover
+        # and the narrator appeared in none of them.
+        from ..scene_policy import narration_presence
+
+        narration_presence_block = narration_presence(story_description)
 
         system_prompt = f"""You are a cinematic scene planner for a short film with dialogue audio. Output ONLY the JSON array.
 
@@ -7365,6 +7371,8 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
 {visual_strategy_rules}
 
 {scene_guidance_block}
+
+{narration_presence_block}
 
 NARRATION AUTHORITY — THE AUDIO DECIDES WHAT EACH SHOT SHOWS (non-negotiable):
 - Each shot covers its OWN lines, listed under "Shots to plan". Those lines are the authority on what appears: who is in frame, what they are doing, and where they are.
@@ -7427,6 +7435,8 @@ VIDEO PROMPT (video_prompt) — follow the LTX-2 style guide below closely:
 
 REFERENCE — LTX-2 video style guide:
 {video_guide if video_guide else "(no guide loaded)"}
+
+{narration_presence_block}
 
 OUTPUT FORMAT — respond with ONLY a JSON array:
 [
@@ -8727,6 +8737,9 @@ SCREENPLAY TO REPAIR:
         )
 
         story_scene_guidance_block = scene_guidance("short_film_story")
+        from ..scene_policy import narration_presence as _narration_presence
+
+        story_narration_presence_block = _narration_presence(story_description)
         pass2_system = f"""You are a film director breaking a screenplay into shots. Output ONLY the JSON array.
 
 {char_rules}
@@ -8734,6 +8747,8 @@ SCREENPLAY TO REPAIR:
 {shot_structure}
 
 {story_scene_guidance_block}
+
+{story_narration_presence_block}
 
 {keyframe_note}
 

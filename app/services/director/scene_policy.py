@@ -150,6 +150,69 @@ def scene_guidance(kind: str | None) -> str:
     return scene_policy(kind).guidance
 
 
+#: Language that puts a narrator inside the film instead of over it. A brief written as a
+#: narrated documentary says some of these; measured on a real run every shot was planned
+#: as if the narrator spoke from off camera, so the one person the film is built around
+#: never appeared.
+_PRESENCE_PHRASES = (
+    "standing rule",
+    "inside every scene",
+    "inside the scene",
+    "inside the action",
+    "moves through the settings",
+    "moves immersively",
+    "at the center of the action",
+    "at the centre of the action",
+    "at the center of the cinematic action",
+    "at the centre of the cinematic action",
+    "never beside",
+    "appear around her",
+    "appear around him",
+    "appear around the narrator",
+    "in sync with the spoken account",
+)
+
+_LOCK_NAME_RE = re.compile(
+    r"<Subject\s*1>\s*(?:\([^)\n]{1,24}\)\s*)?(?:is\s+ALWAYS|es\s+SIEMPRE)\s+"
+    r"(?:(?:the|la|el|los|las)\s+)?([A-Za-zÁÉÍÓÚÜÑáéíóúüñ'\-]+)",
+    re.IGNORECASE,
+)
+
+
+def narrator_name(brief: str) -> str:
+    """The first Subject's name, or ``""`` when the brief names none."""
+
+    match = _LOCK_NAME_RE.search(str(brief or ""))
+    return match.group(1) if match else ""
+
+
+def narration_is_present(brief: str) -> bool:
+    """Whether the brief puts the narrator inside the film rather than over it."""
+
+    text = str(brief or "").casefold()
+    return any(phrase in text for phrase in _PRESENCE_PHRASES)
+
+
+def narration_presence(brief: str) -> str:
+    """The on-screen-narrator contract for a brief that asks for one, or ``""``.
+
+    A brief that says the narrator "moves through the settings" and "stands at the centre
+    of the cinematic action" is asking for a presenter who is *in* the film. The planner
+    read that as narration over the image and planned every shot as an off-screen
+    voiceover, so the one person the film is built around appeared in none of them.
+    """
+
+    if not narration_is_present(brief):
+        return ""
+    name = narrator_name(brief) or "the narrator"
+    return f"""NARRATION PRESENCE — {name} IS IN THE FILM, NOT OVER IT (non-negotiable):
+- {name} is a visible participant of EVERY shot: on screen, in frame, inside the scene being described. Never off camera, never a disembodied voice.
+- Every shot lists {name} in subjects_on_screen with her own speaker cue, and her line is delivered ON CAMERA with the mouth visible and moving.
+- Never write "off-screen voiceover", "voiceover", "narrates over the image", "the voice of", or "lips remain completely closed" for {name} while the brief puts her inside the scene.
+- When the line describes something else in the place, {name} is still in frame: watching it, standing in it, walking through it, gesturing at it. The described action happens without her being cropped out or replaced by a cutaway of only the described subject.
+- The film is not a stock-footage montage with a voice on top. If a shot cannot hold both {name} and the thing she describes, choose the framing that holds her and keeps the described thing visible."""
+
+
 #: Words that name a place, used to tell a beat that happens somewhere from a beat
 #: that only describes the film.
 PLACE_WORDS = (
