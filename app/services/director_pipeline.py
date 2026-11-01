@@ -8842,6 +8842,11 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
                         cast_looks,
                         (clip_plans[index].get("video_prompt", "") if index < len(clip_plans) else ""),
                     ),
+                    pictures=_h3_picture_map_for_shot(
+                        params,
+                        clip_plans[index] if index < len(clip_plans) else {},
+                        brief=scene_description,
+                    ),
                 ),
                 "_director_environment": getattr(shot, "environment", ""),
                 "_director_audio_policy": metadata.get("_director_audio_policy") or director_audio_policy(scene_description),
@@ -9926,8 +9931,38 @@ def _h3_looks_for_shot(looks: dict, shot_text: str) -> str:
         return ""
 
 
+def _h3_picture_map_for_shot(params: dict, clip_plan: dict, brief: str = "") -> str:
+    """The ``<Picture N>`` binding for this shot, numbered the way the renderer will.
+
+    The brief can only state the manifest's order, and the renderer filters the manifest
+    per shot before numbering it, so a manifest number is not a shot number. This repeats
+    the renderer's own filter and numbers the survivors, which is the mapping the compiler
+    will write — measured on a real project the planner had no idea a picture existed for
+    David or Goliath, so it invented both faces in every shot.
+    """
+
+    if not isinstance(params, dict):
+        return ""
+    try:
+        from services.director.cast_vision import picture_map
+
+        manifest = [
+            reference
+            for reference in (params.get("minimax_h3_references") or [])
+            if isinstance(reference, dict)
+        ]
+        kept = _h3_references_for_shot(
+            manifest,
+            clip_plan if isinstance(clip_plan, dict) else {},
+            brief=brief,
+        )
+        return picture_map(kept)
+    except Exception:  # noqa: BLE001 - guidance only; the compiler still binds for real
+        return ""
+
+
 def _h3_shot_project_context(
-    brief: str, index: int, total: int, cast_looks: str = "",
+    brief: str, index: int, total: int, cast_looks: str = "", pictures: str = "",
 ) -> str:
     """What one shot may read from the brief: the world, and its own stage.
 
@@ -9944,6 +9979,8 @@ def _h3_shot_project_context(
     """
 
     parts: list[str] = []
+    if pictures:
+        parts.append(pictures)
     if cast_looks:
         parts.append(cast_looks)
     # The lock's own S1/S2 lines are what number the participants, so they stay; the

@@ -38,6 +38,7 @@ __all__ = [
     "canonical_speaker_labels",
     "cast_descriptions",
     "looks_block",
+    "picture_map",
     "reference_roster",
     "references_for_look",
     "roster_block",
@@ -389,15 +390,53 @@ def roster_block(roster: Optional[list[dict]]) -> str:
         "REFERENCES:",
         "Every person below already has a supplied picture. Never invent their face, "
         "hair, wardrobe or build: write them as the picture shows them, and name each "
-        "one exactly as written here (with its speaker cue when it has one).",
+        "one exactly as written here (with its speaker cue when it has one). The "
+        "<Picture N> number is what the renderer binds that person to; it is assigned by "
+        "the pipeline, so never renumber it and never write one yourself.",
     ]
     for item in roster:
         cue = f" ({item['cue']})" if item.get("cue") else ""
+        number = item.get("number")
+        label = f"<Picture {number}> " if number else ""
         detail = f" — {item['look']}" if item.get("look") else ""
         lines.append(
-            f"{item['number']}. {item['name']}{cue} — {item['intent']} reference{detail}"
+            f"{label}{item['name']}{cue} — {item['intent']} reference{detail}"
         )
     return "\n".join(lines)
+
+
+def picture_map(pictures: Optional[list[dict]]) -> str:
+    """``<Picture 1> is Anita (S1).`` — the binding the renderer will actually use.
+
+    H3 maps every supplied picture to a Subject and states that the Subject appears in
+    the shot, so the picture a person is bound to is part of what the shot means. Written
+    per shot, after the references are filtered for that shot, so the numbers are the ones
+    the compiler will assign rather than the manifest's.
+    """
+
+    if not pictures:
+        return ""
+    lines: list[str] = []
+    for index, item in enumerate(pictures, start=1):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("type") or "image").lower() != "image":
+            continue
+        name = _reference_name(item)
+        if not name:
+            continue
+        cue_match = re.search(
+            r"\(\s*S\s*(\d+)\s*\)", str(item.get("role") or ""), re.I
+        )
+        cue = f" (S{int(cue_match.group(1))})" if cue_match else ""
+        lines.append(f"<Picture {index}> is {name}{cue}.")
+    if not lines:
+        return ""
+    return (
+        "PICTURES IN THIS SHOT (the renderer binds these exact numbers; never "
+        "renumber them and never write a <Picture N> tag yourself):\n"
+        + "\n".join(f"- {line}" for line in lines)
+    )
 
 
 def apply_reference_roster(

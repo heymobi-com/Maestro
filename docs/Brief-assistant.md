@@ -186,9 +186,24 @@ that:
 | `role: "David"` | a `REFERENCES:` entry, no cue — David never speaks |
 | a path per identity picture | `REFERENCES:` naming every picture in manifest order |
 
-The `REFERENCES:` section is a roster for the writer, not a promise about numbering: the
-compiler renumbers pictures per shot after filtering, so a literal `<Picture 2>` in every
-prompt would be wrong in any shot that drops a reference.
+The `REFERENCES:` roster names each picture with `<Picture N>` in manifest order, and the
+planner is told never to write a picture tag itself: the number belongs to the renderer.
+
+### The picture number the shot will really use
+
+The renderer filters the manifest per shot before it numbers it, so a manifest number is
+not a shot number. `_h3_picture_map_for_shot` repeats the renderer's own filter for that
+shot, numbers the survivors, and injects the result into the shot's project context:
+
+    PICTURES IN THIS SHOT (the renderer binds these exact numbers; never renumber them
+    and never write a <Picture N> tag yourself):
+    - <Picture 1> is Anita (S1).
+    - <Picture 2> is David.
+    - <Picture 3> is Goliat.
+
+That is the same numbering the compiler writes into `subject_definitions`, so the plan and
+the render agree about which picture is whom. Without it the planner did not know a picture
+existed for David or Goliath and invented both faces in every shot.
 
 `_SUBJECT_LOCK_RE` accepts the cue (`<Subject 1> (S1) is ALWAYS Anita.`) and
 `project_subject_lock_cues` reads it back, so the compiler no longer infers the speaker
@@ -290,7 +305,7 @@ mechanical normalization — sections reordered, beats numbered from prose, a po
 given stages, the ideas never rewritten — and `TemplateLeakTests`, the four faults above
 plus the two stripping passes and the prompt rules that forbid them.
 
-`tests/test_director_cast_vision.py` (70) holds the read-from-the-picture path: which
+`tests/test_director_cast_vision.py` (74) holds the read-from-the-picture path: which
 references are character sheets, one read per name, the picture being what is sent, the
 2K reference being sent at full detail, the prompt covering every visible detail, the
 answer being the appearance, labels and refusals discarded, a raise or a missing model
@@ -300,9 +315,10 @@ also pins the name matching (`Goliat`/`Goliath`, honorifics, different people ne
 match), the roster (manifest order, the cue, the appearance, idempotency, the brief's own
 spelling winning), the cast consolidation, the `(S1)` binding end to end — including the
 raw `SPEAKER_00` cue being repaired and the mechanical pass deriving a lock it can prove —
-and the documentary case: the Anita prose yields no stages, reports `narration-driven` with
-audio and `abstract-beats` without it, and the prompt forbids inventing stages while a
-story brief still gets them.
+plus the per-shot `<Picture N>` map (every picture numbered with its person, the planner
+told not to write the tag), and the documentary case: the Anita prose yields no stages,
+reports `narration-driven` with audio and `abstract-beats` without it, and the prompt
+forbids inventing stages while a story brief still gets them.
 
 `tests/test_director_brief_api.py` (10) drives the routes over ASGI: a prose brief is
 reported, the route works with no model, the mechanical pass still fixes the shape, a

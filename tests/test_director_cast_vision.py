@@ -451,9 +451,17 @@ class RosterTests(unittest.TestCase):
         block = roster_block(reference_roster(self._refs()))
 
         self.assertIn("REFERENCES:", block)
-        self.assertIn("Anita (S1)", block)
-        self.assertIn("2. David", block)
+        self.assertIn("<Picture 1> Anita (S1)", block)
+        self.assertIn("<Picture 2> David", block)
         self.assertIn("Never invent their face", block)
+
+    def test_every_picture_number_is_named(self):
+        block = roster_block(
+            reference_roster(self._refs(), {"Anita": "white shirt, blue skirt"})
+        )
+
+        self.assertIn("<Picture 3> Goliat", block)
+        self.assertIn("white shirt, blue skirt", block)
 
 
 class RosterApplyTests(unittest.TestCase):
@@ -499,8 +507,9 @@ class RosterApplyTests(unittest.TestCase):
 
         out = apply_reference_roster(brief, self.refs)
 
-        self.assertIn("3. Goliath —", out)
-        self.assertNotIn("3. Goliat —", out)
+        self.assertIn("<Picture 3> Goliath", out)
+        self.assertNotIn("<Picture 3> Goliat ", out)
+        self.assertNotIn("<Picture 3> Goliat\n", out)
 
     def test_a_picture_with_no_cue_does_not_touch_the_lock(self):
         refs = [self.refs[1]]
@@ -728,6 +737,49 @@ class DeriveLockTests(unittest.TestCase):
         )
 
         self.assertIn("ALWAYS Ricardo", out)
+
+
+class PictureMapTests(unittest.TestCase):
+    """A shot must know which picture number belongs to whom."""
+
+    def setUp(self):
+        self.params = {
+            "minimax_h3_references": [
+                {"type": "image", "path": "a.png", "role": "Anita (S1)",
+                 "image_intent": "identity"},
+                {"type": "image", "path": "d.png", "role": "David",
+                 "image_intent": "identity"},
+                {"type": "image", "path": "g.png", "role": "Goliat",
+                 "image_intent": "identity"},
+            ]
+        }
+
+    def test_every_picture_is_numbered_with_its_person(self):
+        from services.director_pipeline import _h3_picture_map_for_shot
+
+        block = _h3_picture_map_for_shot(
+            self.params,
+            {"video_prompt": "Anita stands in the valley as David steps forward."},
+            brief="Anita, David and Goliath.",
+        )
+
+        self.assertIn("<Picture 1> is Anita (S1).", block)
+        self.assertIn("<Picture 2> is David.", block)
+
+    def test_the_planner_is_told_not_to_write_the_tag_itself(self):
+        from services.director_pipeline import _h3_picture_map_for_shot
+
+        block = _h3_picture_map_for_shot(
+            self.params, {"video_prompt": "Anita looks into the lens."},
+            brief="Anita.",
+        )
+
+        self.assertIn("never write a <Picture N> tag yourself", block)
+
+    def test_no_references_is_no_block(self):
+        from services.director_pipeline import _h3_picture_map_for_shot
+
+        self.assertEqual(_h3_picture_map_for_shot({}, {"video_prompt": "x"}, brief=""), "")
 
 
 if __name__ == "__main__":

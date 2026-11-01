@@ -1073,13 +1073,15 @@ What each section holds:
 - NEGATIVE: what must not appear.
 - REFERENCES: copy the roster you are given, unchanged. Every name in it already has a
   supplied picture, so write that name exactly as the roster writes it (with its cue when
-  it has one) and never add, remove or renumber an entry.
+  it has one), keep its <Picture N> number exactly as given, and never add, remove or
+  renumber an entry.
 
 Hard rules:
 - This brief is for a {policy.label}. {policy.guidance}
 - Every character with a picture already looks like something. Copy the appearance you
   are given for it and never invent a different one: a mismatch between the text and the
-  picture is re-drawn in every shot.
+  picture is re-drawn in every shot. Never write a <Picture N> tag inside CHARACTERS or
+  DESCRIPTION: the number belongs to the renderer, and the roster is where it is stated.
 - A stage is ONE place and ONE moment. If a beat names several places, split it.
 - A character exists only in the stage where the story puts it. Never move anyone into
   a stage to make it busier.
