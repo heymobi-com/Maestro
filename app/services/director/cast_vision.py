@@ -84,6 +84,14 @@ LOOK_LIMIT = 900
 #: not enough to see a fabric or an eyebrow. 1536 keeps a 2K render's own detail.
 LOOK_IMAGE_MAX_SIZE = 1536
 
+#: Answer tokens. The reasoning is paid for out of ``CAST_LOOK_THINKING_BUDGET``, which is
+#: added on top, so this is the whole appearance rather than the appearance minus thinking.
+CAST_LOOK_MAX_TOKENS = 380
+
+#: Reasoning budget offered before the answer. A thinking model given only 560 total spent
+#: all of it on reasoning and returned nothing, so the two budgets are separate.
+CAST_LOOK_THINKING_BUDGET = 1400
+
 _LOOK_KEYS = ("character_name", "role", "filename", "path")
 
 
@@ -190,19 +198,40 @@ def appearance_from_reference(
                 "text model to describe a picture."
             )
             return ""
-        answer = generate(
-            prompt=CAST_LOOK_PROMPT,
-            system_prompt=(
-                "You describe people in photographs for a film continuity sheet. You "
-                "answer with observed detail only: one dense paragraph, no headers, no "
-                "lists, no commentary."
-            ),
-            max_new_tokens=560,
-            temperature=0.15,
-            image_paths=[image_path],
-            image_max_size=LOOK_IMAGE_MAX_SIZE,
-        )
-    except Exception as exc:  # noqa: BLE001 - a look is an enhancement, never a blocker
+        # A thinking model spends its budget on the reasoning before it writes anything.
+        # Measured on Strata (a Qwen3.8 thinking model): 560 tokens produced 2,279 chars of
+        # reasoning, empty content and finish=length, so every reference read came back
+        # blank and the appearance was discarded. The budget has to hold both, and a model
+        # that still answers nothing gets one more attempt with twice the room.
+        budgets = (CAST_LOOK_THINKING_BUDGET, CAST_LOOK_THINKING_BUDGET * 2)
+        answer = ""
+        for attempt, thinking_budget in enumerate(budgets):
+            try:
+                answer = generate(
+                    prompt=CAST_LOOK_PROMPT + " Do not reason. Answer with the description only.",
+                    system_prompt=(
+                        "You describe people in photographs for a film continuity sheet. You "
+                        "answer with observed detail only: one dense paragraph, no headers, no "
+                        "lists, no commentary."
+                    ),
+                    max_new_tokens=CAST_LOOK_MAX_TOKENS,
+                    thinking_budget=thinking_budget,
+                    temperature=0.15,
+                    image_paths=[image_path],
+                    image_max_size=LOOK_IMAGE_MAX_SIZE,
+                )
+            except Exception as exc:  # noqa: BLE001 - a look is an enhancement, never a blocker
+                print(f"[CastVision] Could not read {os.path.basename(image_path)}: {exc}")
+                return ""
+            if str(answer or "").strip():
+                break
+            if attempt == 0:
+                print(
+                    "[CastVision] The model answered nothing for "
+                    f"{os.path.basename(image_path)} (all tokens went to reasoning); "
+                    f"retrying with a larger budget."
+                )
+    except Exception as exc:  # noqa: BLE001
         print(f"[CastVision] Could not read {os.path.basename(image_path)}: {exc}")
         return ""
     return _clean(answer)
@@ -228,7 +257,16 @@ def _clean(answer: Any) -> str:
         return ""
     if "presence" in lowered or "appears in" in lowered:
         return ""
-    return text[:LOOK_LIMIT]
+    if len(text) > LOOK_LIMIT:
+        # A thinking model can be cut off by the token budget mid-sentence. Ending the
+        # continuity line at the last complete clause is better than a dangling "and a".
+        clipped = text[:LOOK_LIMIT]
+        for separator in (". ", "; ", ", "):
+            cut = clipped.rfind(separator)
+            if cut >= LOOK_LIMIT * 0.6:
+                return clipped[:cut + 1].strip()
+        return clipped.strip()
+    return text
 
 
 _RAW_SPEAKER_RE = re.compile(r"(?i)^\W*(?:speaker[_\s-]?)?(\d+)\W*$")

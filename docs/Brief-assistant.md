@@ -96,10 +96,20 @@ reason the face stays coherent, so the read is not a caption:
 | setting | value | why |
 | --- | --- | --- |
 | `image_max_size` | 1536 px | 768 is enough to caption a picture; it is not enough to see a fabric or an eyebrow |
-| `max_new_tokens` | 560 | a full sheet, not a sentence |
+| `max_new_tokens` | 380 | the answer alone, not the answer minus the reasoning |
+| `thinking_budget` | 1400, then 2800 on retry | a thinking model pays for its reasoning out of the same budget |
 | `temperature` | 0.15 | observation, not invention |
 | `LOOK_LIMIT` | 900 chars | the sentence travels into every shot that shows the character, so it is bounded |
 | `looks_block(limit=)` | 1400 chars | three detailed reads must not spend the shot's prompt budget on wardrobe |
+
+**A thinking model must be given room to think _and_ answer.** Strata serves a Qwen3.8
+thinking model, and the remote provider drops `enable_thinking`, so thinking cannot be
+switched off. Measured: 560 total tokens became 2,279 characters of reasoning, empty
+content and `finish=length`, so every reference read came back blank and the appearance was
+discarded — the same silence as having no picture at all. The two budgets are separate now
+(`max_new_tokens` for the answer, `thinking_budget` on top), and an answer that is still
+empty gets one attempt with twice the room. `_brief_generate` applies the same rule to the
+structuring call, which was equally exposed.
 
 **The picture has to actually reach the model.** `launch.py`'s `_brief_generate` — the entry
 point the routes are given — was declared with exactly three positional parameters
@@ -114,6 +124,13 @@ already supplied produced nothing. Three guards now:
 - `_brief_generate` raises a readable error when the loaded model has no `mmproj`, and
   `/cast` and `/structure` return `vision: {loaded, available, model}` so the panel can say
   "load a vision-capable model" instead of showing silence.
+
+`vision_available()` asks a remote endpoint **live** rather than trusting the value cached
+at connect time. Strata reports `images` on `/health` and swaps the loaded model between
+runs, so a session connected while a text-only model was loaded stayed "text only" for good
+and dropped every reference while the server was serving a vision model. The probe now reads
+`architecture.input_modalities` for the model **actually in use**, falls back to the
+server-wide flag, and refreshes the cached value when the answer changes.
 
 `generate(..., image_max_size=…)` threads through `_user_message` to `_image_to_data_url`,
 so any caller can choose the resolution the picture is sent at. `describe_image` had been
@@ -319,7 +336,7 @@ mechanical normalization — sections reordered, beats numbered from prose, a po
 given stages, the ideas never rewritten — and `TemplateLeakTests`, the four faults above
 plus the two stripping passes and the prompt rules that forbid them.
 
-`tests/test_director_cast_vision.py` (84) holds the read-from-the-picture path: which
+`tests/test_director_cast_vision.py` (85) holds the read-from-the-picture path: which
 references are character sheets, one read per name, the picture being what is sent, the
 2K reference being sent at full detail, the prompt covering every visible detail, the
 answer being the appearance, labels and refusals discarded, a raise or a missing model
@@ -331,10 +348,11 @@ spelling winning), the cast consolidation, the `(S1)` binding end to end — inc
 raw `SPEAKER_00` cue being repaired and the mechanical pass deriving a lock it can prove —
 plus the per-shot `<Picture N>` map (every picture numbered with its person, the planner
 told not to write the tag), the vision routing (the shipped entry point must forward the
-picture, a callable that cannot carry one is refused rather than asked to invent), the
-saved-project manifest fallback, and the documentary case: the Anita prose yields no
-stages, reports `narration-driven` with audio and `abstract-beats` without it, and the
-prompt forbids inventing stages while a story brief still gets them.
+picture, a callable that cannot carry one is refused rather than asked to invent, a model
+that only thinks is retried with more room), the saved-project manifest fallback, and the
+documentary case: the Anita prose yields no stages, reports `narration-driven` with audio
+and `abstract-beats` without it, and the prompt forbids inventing stages while a story
+brief still gets them.
 
 `tests/test_director_brief_api.py` (10) drives the routes over ASGI: a prose brief is
 reported, the route works with no model, the mechanical pass still fixes the shape, a

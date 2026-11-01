@@ -103,7 +103,7 @@ class ReferenceSelectionTests(unittest.TestCase):
         appearance_from_reference(self.image, generate=capture)
 
         self.assertEqual(sent["paths"], [self.image])
-        self.assertEqual(sent["prompt"], CAST_LOOK_PROMPT)
+        self.assertTrue(sent["prompt"].startswith(CAST_LOOK_PROMPT))
 
     def test_a_2k_reference_is_sent_at_full_detail(self):
         sent = {}
@@ -116,7 +116,22 @@ class ReferenceSelectionTests(unittest.TestCase):
 
         self.assertEqual(sent["image_max_size"], LOOK_IMAGE_MAX_SIZE)
         self.assertGreaterEqual(LOOK_IMAGE_MAX_SIZE, 1280)
-        self.assertGreaterEqual(sent["max_new_tokens"], 512)
+        # A thinking model's reasoning is paid for out of a separate budget.
+        self.assertGreaterEqual(sent["thinking_budget"], 1000)
+        self.assertGreaterEqual(sent["max_new_tokens"], 300)
+
+    def test_a_model_that_only_thinks_is_retried_with_more_room(self):
+        budgets = []
+
+        def thinks_first(prompt, image_paths=None, thinking_budget=0, **kwargs):
+            budgets.append(thinking_budget)
+            return "" if len(budgets) == 1 else ANITA_LOOK
+
+        look = appearance_from_reference(self.image, generate=thinks_first)
+
+        self.assertEqual(look, ANITA_LOOK)
+        self.assertEqual(len(budgets), 2)
+        self.assertGreater(budgets[1], budgets[0])
 
     def test_the_prompt_asks_for_every_visible_detail(self):
         for expected in ("bottle green", "eyebrow", "parting", "neckline", "heel height"):

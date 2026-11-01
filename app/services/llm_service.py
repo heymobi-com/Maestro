@@ -1268,9 +1268,34 @@ def vision_available() -> bool:
     A text-only GGUF has no mmproj, so ``_user_message`` drops the images and the model
     answers about a picture it never received. Any caller that intends to read a reference
     has to ask first, or it will silently produce a description of nothing.
+
+    For a remote endpoint this asks the server, not a value cached at connect time: Strata
+    swaps the loaded model between runs, so a project connected while a text-only model was
+    loaded stayed "text only" for the rest of the session and every reference image was
+    dropped while the server reported ``images: true``.
     """
 
-    return bool(is_loaded() and _vision_available)
+    return bool(is_loaded() and _images_supported())
+
+
+def _images_supported() -> bool:
+    """The live answer for the current model, refreshing the cached one."""
+
+    global _vision_available
+    if _provider == "remote" and _remote_url:
+        try:
+            live = llm_remote_dialect.takes_images(_remote_url, model=_model_id or "")
+        except Exception:  # noqa: BLE001 - a probe must never break a request
+            return bool(_vision_available)
+        if live != _vision_available:
+            print(
+                "[LLM] The endpoint now reports "
+                + ("image input" if live else "text only")
+                + f": reference images will be {'sent' if live else 'dropped'}."
+            )
+            _vision_available = live
+        return live
+    return bool(_vision_available)
 
 
 def _download_gguf(repo_id: str, filename: str, cache_dir: str) -> str:
@@ -1979,7 +2004,7 @@ def load_model(
             _api_key = api_key
             _model_id = model_id
             _device = provider
-            _vision_available = llm_remote_dialect.takes_images(remote_url)
+            _vision_available = llm_remote_dialect.takes_images(remote_url, model=model_id)
             print(f"[LLM] Connected to {provider} provider: model={model_id}, url={remote_url or 'API'}")
             _reset_idle_timer()
         return
@@ -2483,7 +2508,7 @@ def _user_message(
 ) -> dict:
     """Build a user message, failing visibly if a remote image cannot be read."""
 
-    if not image_paths or not _vision_available:
+    if not image_paths or not _images_supported():
         return {"role": "user", "content": prompt}
 
     content_parts = []

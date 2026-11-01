@@ -11000,16 +11000,33 @@ def _brief_generate(
         )
     temperature = kwargs.pop("temperature", 0.3)
     enable_thinking = kwargs.pop("enable_thinking", False if not image_paths else None)
-    return llm_service.generate(
-        prompt=prompt,
-        system_prompt=system_prompt,
-        max_new_tokens=max_new_tokens,
-        image_paths=image_paths,
-        image_max_size=image_max_size,
-        temperature=temperature,
-        enable_thinking=enable_thinking,
-        **kwargs,
-    )
+    # A thinking model pays for its reasoning out of the same budget as its answer, and
+    # Strata cannot be told to stop thinking (the remote provider drops enable_thinking).
+    # Measured: 560 tokens became 2,279 chars of reasoning and an empty answer. Reserve
+    # room for the reasoning, and give a model that still answers nothing one more try.
+    thinking_budget = kwargs.pop("thinking_budget", 1024 if not image_paths else 0)
+
+    def call(budget: int) -> str:
+        return llm_service.generate(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            max_new_tokens=max_new_tokens,
+            image_paths=image_paths,
+            image_max_size=image_max_size,
+            temperature=temperature,
+            enable_thinking=enable_thinking,
+            thinking_budget=budget,
+            **kwargs,
+        )
+
+    answer = call(thinking_budget)
+    if not str(answer or "").strip() and thinking_budget:
+        print(
+            "[Director] The writer returned no text (its tokens went to reasoning); "
+            f"retrying with {thinking_budget * 2} tokens of reasoning budget."
+        )
+        answer = call(thinking_budget * 2)
+    return answer
 
 
 from services.director.brief_api import create_router as _create_brief_router

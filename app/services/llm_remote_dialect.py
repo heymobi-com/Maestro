@@ -143,51 +143,74 @@ def forget(url: str = "") -> None:
         _root_notice.clear()
 
 
-def _probe_images(url: str) -> Optional[bool]:
-    """What the server says about image input: True, False, or None when it does not say."""
+def _probe_images(url: str, model: str = "") -> Optional[bool]:
+    """What the server says about image input for the model in use: True, False, or None.
+
+    The per-model answer wins over the server-wide flag when both exist: ``/health``
+    describes the endpoint, and an endpoint that reports ``images: false`` while serving a
+    vision model (measured on Strata) would otherwise have every reference image dropped.
+    ``model`` is the id actually being called, so a listing that contains one multimodal
+    and one text model is read for the right one.
+    """
 
     import requests
 
     from services.llm_endpoint import remote_base
 
     base = remote_base(url)
+    health_images: Optional[bool] = None
     try:
         health = requests.get(f"{base}{_HEALTH_PATH}", timeout=_PROBE_TIMEOUT)
         if health.ok:
             body = health.json() or {}
             if "images" in body:
-                return bool(body.get("images"))
+                health_images = bool(body.get("images"))
+    except Exception:
+        health_images = None
+    try:
         listed = requests.get(f"{base}{_MODELS_PATH}", timeout=_PROBE_TIMEOUT)
         if listed.ok:
-            for entry in (listed.json() or {}).get("data") or []:
-                modalities = ((entry or {}).get("architecture") or {}).get("input_modalities")
+            entries = [
+                entry for entry in ((listed.json() or {}).get("data") or [])
+                if isinstance(entry, dict)
+            ]
+            wanted = str(model or "").strip()
+            chosen = next(
+                (entry for entry in entries if str(entry.get("id") or "") == wanted),
+                entries[0] if entries else None,
+            )
+            if chosen is not None:
+                modalities = ((chosen.get("architecture") or {}).get("input_modalities"))
                 if isinstance(modalities, list):
-                    return any(str(mode).strip().lower() == "image" for mode in modalities)
+                    return any(
+                        str(mode).strip().lower() == "image" for mode in modalities
+                    )
     except Exception:
-        return None
-    return None
+        pass
+    return health_images
 
 
-def takes_images(url: str, *, now: float | None = None) -> bool:
+def takes_images(url: str, *, now: float | None = None, model: str = "") -> bool:
     """Whether images can be sent here. Unknown means yes, which is what it always was.
 
-    Two fields are read, in the order a server is likely to answer: ``images`` on ``/health``
-    (Strata reports ``false``), then ``input_modalities`` of the first model on ``/v1/models`` (a
-    llama.cpp or LM Studio style listing). Nothing else is inferred: a server that says nothing is
-    treated as capable, so a hosted API -- which cannot be asked -- keeps sending the images it
-    accepts today.
+    The answer is read for the model actually in use: ``architecture.input_modalities`` of
+    that model on ``/v1/models`` when the server lists it, otherwise the server-wide
+    ``images`` flag on ``/health``. Nothing else is inferred: a server that says nothing is
+    treated as capable, so a hosted API -- which cannot be asked -- keeps sending the images
+    it accepts today.
     """
 
     key = str(url or "").strip()
     if not key or not is_local_endpoint(key):
         return True
     moment = time.monotonic() if now is None else now
-    cached = _images_cache.get(key)
+    cache_key = f"{key}|{model}"
+    cached = _images_cache.get(cache_key)
     if cached is not None and moment - cached[0] < _PROBE_TTL:
         return cached[1]
-    answer = _probe_images(key)
+    answer = _probe_images(key, model)
     capable = True if answer is None else answer
-    _images_cache[key] = (moment, capable)
+    _images_cache[cache_key] = (moment, capable)
     if not capable:
         # Said once, where the writer is connected, because a silent drop is how a reference image
         # goes missing without anyone noticing: the plan runs, the prompts describe a picture the
