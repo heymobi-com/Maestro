@@ -65,6 +65,34 @@ contract states the difference explicitly:
 Nothing is blocked or rewritten by it. A podcast that holds one studio is not warned
 about holding one studio; a short film that holds one church for ten clips is.
 
+## Identity drift: the character's own picture must survive every clip
+
+The reported symptom was a narrator who looked right for the first clips and then changed
+hair and face. Measured on a real 42-clip documentary (`David-y-Goliat`), every clip bound
+**one** picture — David's — and the narrator's own reference was in **none of the 42**.
+
+The cause was the per-shot filter. The story planner writes its cast rows with positional
+ids (`char_0`) and no inline `(S1)` cue, while the user's identity picture carries the cue.
+`on_screen` therefore came back empty, and a *labelled* picture was dropped as "not on
+screen" — the one picture the user was most explicit about.
+
+Three rules now:
+
+- A picture the user labelled is dropped **only on evidence**: when the shot's own cast is
+  identified and does not include it. A shot whose cast cannot be identified keeps every
+  labelled identity, because losing the narrator's own face is worse than one extra face.
+- `char_N` rows map onto the manifest order, so the planner's positional ids name the
+  pictures the user supplied.
+- A character the brief names is attached whenever the shot puts **more people in frame
+  than identities already attached**. The planner worded the biblical cast as "a young man"
+  and "a massive giant" while the manifest held `David` and `Goliath`, so a name match
+  dropped both and H3 invented their faces. A character the brief never mentions
+  (`Veronica`, `Roman` from another project) is still a leftover.
+
+Measured on that run's own 42 clips after the change: the narrator's picture is bound in
+all 42, 24 clips (her alone, no other person row) carry only her picture, and the 18 shots
+that stage the biblical cast carry David's and Goliath's as well.
+
 ## The cast is per shot, not per project
 
 ### The stage is decided by position, not by the model

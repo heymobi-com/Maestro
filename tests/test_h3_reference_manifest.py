@@ -25,7 +25,9 @@ if str(APP) not in sys.path:
 from services import director_pipeline  # noqa: E402
 from services.director_pipeline import (  # noqa: E402
     _h3_manifest_issues,
+    _h3_person_rows,
     _h3_place_keys,
+    _h3_positional_labels,
     _h3_references_for_shot,
 )
 
@@ -212,6 +214,114 @@ class LocationTests(unittest.TestCase):
 
         self.assertNotIn("Veronica", [r.get("role") for r in kept])
         self.assertEqual(self._role_of(kept), ["Bosque de noche"])
+
+
+class IdentityStabilityTests(unittest.TestCase):
+    """A character's own picture must survive every clip, or the face drifts.
+
+    Measured on a real 42-clip documentary: every clip bound exactly one picture —
+    David's — and the narrator had none in all 42. Her rows carried `char_0` and no
+    inline `(S1)` cue, so `on_screen` was empty, and the labelled picture was dropped
+    as "not on screen". The model then invented her hair and face after a few clips.
+    """
+
+    MANIFEST = [
+        _image("Anita (S1)", "anita.png"),
+        _image("David", "david.png"),
+        _image("Goliath", "goliath.png"),
+    ]
+    BRIEF = (
+        "SUBJECT LOCK:\n<Subject 1> is ALWAYS Anita.\n\n"
+        "CHARACTERS:\nAnita: documentary narrator, cream shirt.\n\n"
+        "DESCRIPTION:\nStage 1: Anita narrates the story of David and Goliath.\n"
+    )
+
+    def _narrator_only(self) -> dict:
+        return {
+            "video_prompt": "Anita walks through a study.",
+            "_director_subjects_on_screen": [
+                {"visual_description": "A young woman with brown hair in a bun.",
+                 "character_id": "char_0"},
+            ],
+        }
+
+    def _biblical_scene(self) -> dict:
+        return {
+            "video_prompt": "A young man faces a giant.",
+            "_director_subjects_on_screen": [
+                {"visual_description": "A young man holding a leather sling.",
+                 "character_id": "char_1"},
+                {"visual_description": "A massive giant in bronze armor."},
+                {"visual_description": "The narrator."},
+            ],
+        }
+
+    def test_the_labelled_narrator_picture_survives_a_shot_that_cannot_name_her(self):
+        kept = _h3_references_for_shot(
+            self.MANIFEST, self._narrator_only(), brief=self.BRIEF,
+        )
+
+        self.assertEqual([r["role"] for r in kept], ["Anita (S1)"])
+
+    def test_a_biblical_scene_keeps_the_faces_it_needs(self):
+        kept = _h3_references_for_shot(
+            self.MANIFEST, self._biblical_scene(), brief=self.BRIEF,
+        )
+
+        roles = [r["role"] for r in kept]
+        self.assertIn("David", roles)
+        self.assertIn("Goliath", roles)
+        self.assertIn("Anita (S1)", roles)
+
+    def test_the_narrator_alone_does_not_drag_the_whole_cast_into_her_shot(self):
+        kept = _h3_references_for_shot(
+            self.MANIFEST, self._narrator_only(), brief=self.BRIEF,
+        )
+
+        self.assertNotIn("David", [r["role"] for r in kept])
+        self.assertNotIn("Goliath", [r["role"] for r in kept])
+
+    def test_a_character_the_brief_never_mentions_is_still_a_leftover(self):
+        manifest = self.MANIFEST + [_image("Veronica", "veronica.png")]
+
+        kept = _h3_references_for_shot(
+            manifest, self._biblical_scene(), brief=self.BRIEF,
+        )
+
+        self.assertNotIn("Veronica", [r["role"] for r in kept])
+
+    def test_the_picture_is_stable_across_every_clip_of_a_brief(self):
+        # The measured failure: 0 of 42 clips had the narrator's own face.
+        for clip in (self._narrator_only(), self._biblical_scene()):
+            roles = [r["role"] for r in _h3_references_for_shot(
+                self.MANIFEST, clip, brief=self.BRIEF,
+            )]
+            self.assertIn("Anita (S1)", roles)
+
+    def test_a_positional_id_maps_onto_the_manifest_order(self):
+        # `char_0` with no inline cue is the first identity the user supplied.
+        self.assertEqual(_h3_positional_labels(self._narrator_only(), self.MANIFEST), {"S1"})
+
+
+class PersonRowTests(unittest.TestCase):
+    def test_a_dressed_or_holding_row_is_a_person(self):
+        for description in (
+            "An ancient scholar holding a rolled scroll, wearing rough linen garments.",
+            "A young man with curly dark hair, wearing a tan tunic.",
+            "A massive giant with long dark hair and beard.",
+            "The narrator.",
+        ):
+            clip = {"_director_subjects_on_screen": [{"visual_description": description}]}
+            self.assertEqual(_h3_person_rows(clip), 1, description)
+
+    def test_a_place_or_an_object_is_not_a_person(self):
+        for description in (
+            "A narrow black wooden door with no handle.",
+            "A broken bronze bell hanging from a rope.",
+            "An empty cobblestone street at dawn.",
+        ):
+            clip = {"_director_subjects_on_screen": [{"visual_description": description}]}
+            self.assertEqual(_h3_person_rows(clip), 0, description)
 
 
 class PublishTests(unittest.TestCase):

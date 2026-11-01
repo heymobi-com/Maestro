@@ -2791,7 +2791,104 @@ def _h3_reference_name_words(reference: dict) -> set[str]:
     }
 
 
-def _h3_references_for_shot(references: list[dict], clip_plan: dict) -> list[dict]:
+def _h3_positional_labels(
+    clip_plan: dict, references: list[dict],
+) -> set[str]:
+    """``char_0``/``character_1`` ids mapped onto the manifest's labelled identities.
+
+    The story planner writes its rows with positional ids (``char_0``) and no inline
+    ``(S1)`` cue, while the user's identity pictures carry the cue. Measured on a real
+    42-clip film, that mismatch made ``on_screen`` empty for every clip, and a labelled
+    picture was then dropped as "not on screen" — the narrator had no reference in any
+    shot and the model invented her hair and face. Position is the only thing left to
+    go on there, so the Nth identity reference answers the Nth ``char_N`` row.
+    """
+
+    labelled = [
+        reference for reference in references or []
+        if str(reference.get("type") or "").lower() == "image"
+        and str(reference.get("image_intent") or "identity").lower() == "identity"
+        and _h3_reference_speaker_labels(reference)
+    ]
+    if not labelled:
+        return set()
+    found: set[str] = set()
+    for subject in clip_plan.get("_director_subjects_on_screen") or []:
+        if not isinstance(subject, dict):
+            continue
+        match = _H3_POSITIONAL_ID_RE.match(str(subject.get("character_id") or ""))
+        if not match:
+            continue
+        position = int(match.group(1))
+        if position < len(labelled):
+            found.update(_h3_reference_speaker_labels(labelled[position]))
+    return found
+
+
+_H3_POSITIONAL_ID_RE = re.compile(r"(?i)^(?:char|character|person|subject)_(\d+)$")
+
+
+def _h3_on_screen_labels(clip_plan: dict, references: list[dict]) -> set[str]:
+    """Who this shot shows, from its own labels or, failing that, from its row order."""
+
+    on_screen, _speaking = _h3_shot_labels(clip_plan)
+    if on_screen:
+        return on_screen
+    return _h3_positional_labels(clip_plan, references)
+
+
+_H3_PERSON_CUES = re.compile(
+    r"\b(man|woman|boy|girl|child|children|figure|narrator|soldier|warrior|king|queen|"
+    r"giant|priest|prophet|scholar|scribe|shepherd|pharaoh|merchant|guard|courtier|"
+    r"courtesan|villager|peasant|elder|crone|youth|teen|adult|disciple|apostle|angel|"
+    r"demon|ghost|spirit|creature|person|people|crowd|audience|army|troops|followers|"
+    r"host|guest|speaker|singer|dancer|monk|nun|knight|servant|herald|envoy|bard|"
+    r"baby|mother|father|grandmother|grandfather|skeleton|corpse|he|she|his|her)\b"
+    # Someone who wears, holds or gestures is a person in frame: a set does not dress.
+    r"|\b(holding|wearing|dressed|clad|standing|walking|kneeling|carrying|gripping|"
+    r"clutching|leaning|reaching|gesturing|pointing|raising|lifting|staring|gazing)\b",
+    re.I,
+)
+
+
+def _h3_shot_stages_people(clip_plan: dict) -> bool:
+    """Whether this shot puts a person in frame, however the planner worded it."""
+
+    return _h3_person_rows(clip_plan) > 0
+
+
+def _h3_person_rows(clip_plan: dict) -> int:
+    """How many people the shot's own rows describe (a group row counts once)."""
+
+    count = 0
+    for subject in clip_plan.get("_director_subjects_on_screen") or []:
+        if not isinstance(subject, dict):
+            if subject:
+                count += 1
+            continue
+        description = str(subject.get("visual_description") or "")
+        if (
+            _h3_speaker_labels(description)
+            or _h3_speaker_labels(subject.get("speaker_name"))
+            or _H3_PERSON_CUES.search(description)
+        ):
+            count += 1
+    return count
+
+
+def _h3_brief_words(brief: str) -> set[str]:
+    return {
+        word for word in re.findall(r"[a-záéíóúüñ0-9'-]+", str(brief or "").casefold())
+        if len(word) > 2
+    }
+
+
+def _h3_references_for_shot(
+    references: list[dict],
+    clip_plan: dict,
+    *,
+    brief: str = "",
+) -> list[dict]:
     """Keep only the references this shot can actually use.
 
     H3 maps every supplied reference to a Subject and states that the Subject
@@ -2807,14 +2904,27 @@ def _h3_references_for_shot(references: list[dict], clip_plan: dict) -> list[dic
     río`, `Veronica` and `Roman (S2)`. Only one carried a speaker cue, so only that
     one was ever filtered, and every clip bound all five pictures as Subjects --
     which is why the priest, the shrouded figure and the children came out mixed
-    into scenes whose lines named none of them. An identity picture now also has to
-    be *named* by the shot to be attached, and a picture with no role at all cannot
-    be described, so it is only kept when no other visual reference remains.
+    into scenes whose lines named none of them.
+
+    A labelled picture is dropped only on evidence: a shot whose cast cannot be
+    identified keeps every labelled identity, because losing the narrator's own face
+    is worse than showing one extra character. A measured 42-clip film lost its
+    narrator in all 42 clips exactly that way.
+
+    ``brief`` is what makes the unlabelled ones safe. The same film's cast was
+    ``Anita (S1)``, ``David`` and ``Goliath``, and the planner described the last two
+    as "a young man" and "a massive giant", so a name match dropped both pictures and
+    H3 invented their faces -- the drift the user reported. A character the brief
+    names belongs to this project; a character it never mentions (``Veronica``,
+    ``Roman``) is a leftover. So an unlabelled identity whose name the brief knows is
+    kept whenever the shot stages a person, and one the brief never mentions is
+    dropped.
     """
 
     if not references or not isinstance(clip_plan, dict):
         return references
-    on_screen, speaking = _h3_shot_labels(clip_plan)
+    _on_screen, speaking = _h3_shot_labels(clip_plan)
+    on_screen = _h3_on_screen_labels(clip_plan, references)
     # Match against what this shot says it stages, never against the whole prompt:
     # the prompt embeds the project's cast and world, so every name in the project
     # matched every shot and nothing was ever filtered.
@@ -2823,10 +2933,14 @@ def _h3_references_for_shot(references: list[dict], clip_plan: dict) -> list[dic
     if not on_screen and not speaking and not shot_words:
         return references
     visible = on_screen | speaking
+    brief_words = _h3_brief_words(brief)
+    person_rows = _h3_person_rows(clip_plan)
     kept: list[dict] = []
     locations: list[dict] = []
     unnamed: list[dict] = []
     unidentified: list[dict] = []
+    labelled_identity: list[dict] = []
+    brief_cast: list[dict] = []
     for reference in references:
         kind = str(reference.get("type") or "").strip().lower()
         labels = _h3_reference_speaker_labels(reference)
@@ -2837,15 +2951,24 @@ def _h3_references_for_shot(references: list[dict], clip_plan: dict) -> list[dic
                 continue
             if intent == "identity":
                 if labels:
-                    if not (labels & on_screen):
+                    labelled_identity.append(reference)
+                    # Only a disagreement we actually know about is a reason to drop
+                    # the user's own identity picture.
+                    if on_screen and not (labels & on_screen):
                         continue
                 else:
                     words = _h3_reference_name_words(reference)
                     if not words:
                         unnamed.append(reference)
                         continue
-                    if not (words & shot_words):
-                        unidentified.append(reference)
+                    if words & shot_words:
+                        # The planner named this character; the picture is theirs.
+                        pass
+                    elif brief_words and not (words & brief_words):
+                        # Never mentioned by the brief: a leftover from another project.
+                        continue
+                    else:
+                        brief_cast.append(reference)
                         continue
         elif kind == "audio":
             intent = str(reference.get("audio_intent") or "voice").strip().lower()
@@ -2853,15 +2976,33 @@ def _h3_references_for_shot(references: list[dict], clip_plan: dict) -> list[dic
             if labels and intent == "voice" and visible and not (labels & visible):
                 continue
         kept.append(reference)
+
+    # An identity picture is what keeps a face stable from clip to clip, so it is
+    # dropped only when the shot demonstrably has no room for that person. The
+    # planner words the cast freely ("a young man", "a massive giant") while the
+    # manifest holds `David` and `Goliath`, so a missing name is not evidence: the
+    # row count is. Measured on a 42-clip film, a name-only rule stripped David and
+    # Goliath from every biblical scene and H3 invented both faces.
+    kept_identity = sum(
+        1 for reference in kept
+        if str(reference.get("type") or "").lower() == "image"
+        and str(reference.get("image_intent") or "identity").lower() == "identity"
+    )
+    if brief_cast and person_rows > kept_identity:
+        # The shot puts someone in frame beyond the cast already attached, and these
+        # are the project's own characters: attach them rather than invent a face.
+        kept.extend(brief_cast)
+
     kept.extend(_h3_locations_for_shot(locations, clip_plan))
     if not any(
         str(reference.get("type") or "").strip().lower() in {"image", "video"}
         for reference in kept
     ):
-        # Nothing named survived. Showing one likely protagonist beats binding the
-        # whole pile as Subjects; the manifest order puts the principal character
-        # first in every project measured so far.
-        if unidentified:
+        # Nothing survived. The identities the user labelled are the safest set: they
+        # are the cast, and one of them is whoever the shot is about.
+        if labelled_identity:
+            kept = list(labelled_identity)
+        elif unidentified:
             kept.insert(0, unidentified[0])
         elif unnamed:
             kept.insert(0, unnamed[0])
@@ -4891,6 +5032,13 @@ def _rerun_clip_video_impl(out_dir: str, pid: str, clip_index: int, prompt_overr
                     drive_audio_path=None,
                 ),
                 prompt_plan,
+                # The brief is the authority on who belongs to this project: an
+                # unlabelled identity the brief names is cast, one it never mentions
+                # is a leftover from another project.
+                brief=str(
+                    snapshot.get("scene_description")
+                    or state.get("scene_description") or ""
+                ),
             ),
             prompt_plan,
         )
@@ -10726,6 +10874,7 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
                 _h3_references_for_shot(
                     manifest,
                     clip_plans[clip_index] if clip_index < len(clip_plans) else {},
+                    brief=str(params.get("scene_description") or ""),
                 ),
                 clip_plans[clip_index] if clip_index < len(clip_plans) else {},
             )
