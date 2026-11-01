@@ -79,10 +79,28 @@ So the appearance is not asked of the writer at all:
 | **Structure for this workflow** | the identity reference paths are sent with the brief; each one is described once by the vision model and written into `CHARACTERS` before the model sees the text, and again after, so the row holds the picture's own sentence |
 | **planning** | `_h3_cast_looks` reads each identity reference once per pipeline and caches it; `_h3_looks_for_shot` writes it into a shot's project context **only if that shot's own text names the character** |
 
-The read is deliberately narrow (`CAST_LOOK_PROMPT`): age range, build, skin, hair colour
-and how it is worn, eyes, clothing top to bottom, footwear, accessories. No background, no
-pose, no mood, no camera. A model that answers with a scene, a refusal, or a row that says
-"presence" is discarded — a wrong sentence is worse than none.
+The read is deliberately narrow (`CAST_LOOK_PROMPT`): apparent age and build, skin, hair
+colour **length and how it is worn** (parting, fringe, tied back, bun, under a headscarf),
+brows, eyes, nose, mouth, jaw, marks, every garment top to bottom with colour, fabric and
+fit, heel height, jewellery. No background, no pose, no mood, no camera. A model that
+answers with a scene, a refusal, or a row that says "presence" is discarded — a wrong
+sentence is worse than none.
+
+A reference is often a 2K render that took a long generation, and the detail in it is the
+reason the face stays coherent, so the read is not a caption:
+
+| setting | value | why |
+| --- | --- | --- |
+| `image_max_size` | 1536 px | 768 is enough to caption a picture; it is not enough to see a fabric or an eyebrow |
+| `max_new_tokens` | 560 | a full sheet, not a sentence |
+| `temperature` | 0.15 | observation, not invention |
+| `LOOK_LIMIT` | 900 chars | the sentence travels into every shot that shows the character, so it is bounded |
+| `looks_block(limit=)` | 1400 chars | three detailed reads must not spend the shot's prompt budget on wardrobe |
+
+`generate(..., image_max_size=…)` is the switch: it threads through `_user_message` to
+`_image_to_data_url`, so any caller can choose the resolution the picture is sent at.
+`describe_image` had been passing the *filename* and nothing else — it answered from the
+name alone; it now attaches the image and accepts the same size argument.
 
 A row the writer already described is kept: the picture is evidence for a gap, not a
 replacement for a choice. Everything fails soft, so no vision model, no image or a model
@@ -195,14 +213,15 @@ mechanical normalization — sections reordered, beats numbered from prose, a po
 given stages, the ideas never rewritten — and `TemplateLeakTests`, the four faults above
 plus the two stripping passes and the prompt rules that forbid them.
 
-`tests/test_director_cast_vision.py` (30) holds the read-from-the-picture path: which
+`tests/test_director_cast_vision.py` (34) holds the read-from-the-picture path: which
 references are character sheets, one read per name, the picture being what is sent, the
+2K reference being sent at full detail, the prompt covering every visible detail, the
 answer being the appearance, labels and refusals discarded, a raise or a missing model
-leaving the brief untouched, the cap, the per-shot filter, and the apply pass — a presence
-row replaced, the writer's own description kept, a missing row added. It also pins the
-documentary case: the Anita prose yields no stages, reports `narration-driven` with audio
-and `abstract-beats` without it, and the prompt forbids inventing stages while a story
-brief still gets them.
+leaving the brief untouched, the cap, the per-shot filter and its budget, and the apply
+pass — a presence row replaced, the writer's own description kept, a missing row added. It
+also pins the documentary case: the Anita prose yields no stages, reports
+`narration-driven` with audio and `abstract-beats` without it, and the prompt forbids
+inventing stages while a story brief still gets them.
 
 `tests/test_director_brief_api.py` (10) drives the routes over ASGI: a prose brief is
 reported, the route works with no model, the mechanical pass still fixes the shape, a

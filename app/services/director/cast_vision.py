@@ -29,6 +29,8 @@ from typing import Any, Callable, Iterable, Optional
 
 __all__ = [
     "CAST_LOOK_PROMPT",
+    "LOOK_IMAGE_MAX_SIZE",
+    "LOOK_LIMIT",
     "appearance_from_reference",
     "apply_cast_descriptions",
     "cast_descriptions",
@@ -36,20 +38,43 @@ __all__ = [
     "references_for_look",
 ]
 
-#: Asked of the vision model, per identity picture. It is deliberately narrow: hair,
-#: face, skin, eyes, what is worn top to bottom. Anything wider invites the model to
-#: describe the pose, the background or the mood, and those are the shot's business, not
-#: the character's. The picture is a character sheet; the answer must read like one.
+#: Asked of the vision model, per identity picture. A reference is often a 2K render
+#: that took a long generation, and the detail in it is the reason the face stays
+#: coherent, so this asks for a full character sheet rather than a caption. It stays
+#: narrow about *what* to look at — the observable person — and wide about *how much*:
+#: hair, brows, eyes, nose, mouth, skin, build, every garment with colour and material,
+#: footwear, jewellery, marks. The picture is a character sheet; the answer must read
+#: like one. Nothing about background, pose, lighting, mood or camera, because those
+#: belong to the shot and would otherwise be frozen into every clip.
 CAST_LOOK_PROMPT = (
-    "Describe only the person in this picture, as a character sheet for a film crew.\n"
-    "Give, in one dense line and in this order: age range; build; skin tone; hair colour, "
-    "hair length and how it is worn (loose, tied back, braided, under a headscarf); eye "
-    "colour; facial hair if any; then clothing from top to bottom with colours and "
-    "materials; then footwear; then jewellery or accessories.\n"
-    "Do not describe the background, the pose, the lighting, the mood or the camera. "
-    "Do not guess a name. Do not use the word 'presence'. If something is not visible, "
-    "leave it out rather than inventing it."
+    "Describe only the person in this picture, as a full costume and continuity sheet "
+    "for a film crew. Be exhaustive about what is visible and nothing else.\n"
+    "Cover, in this order, one dense paragraph:\n"
+    "1. apparent age range and build;\n"
+    "2. skin tone and texture;\n"
+    "3. hair: exact colour, length, how it is worn (loose, tied back, bun, braid, "
+    "updo, under a headscarf), parting, fringe, and any flyaway detail;\n"
+    "4. face: eyebrow shape and colour, eye colour and shape, nose, mouth, jaw, any "
+    "freckles, moles, scars, stubble or facial hair;\n"
+    "5. every garment from top to bottom, in order, with its exact colour, fabric, "
+    "fit, length, neckline, sleeves, buttons, seams and accessories on it;\n"
+    "6. footwear: type, colour, heel height;\n"
+    "7. jewellery, watch, glasses, bags and any other worn item, with material and "
+    "colour;\n"
+    "8. anything distinctive that must not change between shots.\n"
+    "Name colours precisely (bottle green, not green). Do not describe the background, "
+    "the pose, the lighting, the mood or the camera. Do not guess a name. Do not use "
+    "the word 'presence'. If something is not visible, leave it out rather than "
+    "inventing it."
 )
+
+#: Longest appearance kept. A 2K reference warrants detail, but this sentence travels
+#: into every shot that shows the character, so it is bounded rather than unbounded.
+LOOK_LIMIT = 900
+
+#: The pixel size the reference is sent at. 768 is enough to caption a picture; it is
+#: not enough to see a fabric or an eyebrow. 1536 keeps a 2K render's own detail.
+LOOK_IMAGE_MAX_SIZE = 1536
 
 _LOOK_KEYS = ("character_name", "role", "filename", "path")
 
@@ -116,11 +141,13 @@ def appearance_from_reference(
             prompt=CAST_LOOK_PROMPT,
             system_prompt=(
                 "You describe people in photographs for a film continuity sheet. You "
-                "answer with one line of observed detail and nothing else."
+                "answer with observed detail only: one dense paragraph, no headers, no "
+                "lists, no commentary."
             ),
-            max_new_tokens=200,
-            temperature=0.2,
+            max_new_tokens=560,
+            temperature=0.15,
             image_paths=[image_path],
+            image_max_size=LOOK_IMAGE_MAX_SIZE,
         )
     except Exception as exc:  # noqa: BLE001 - a look is an enhancement, never a blocker
         print(f"[CastVision] Could not read {os.path.basename(image_path)}: {exc}")
@@ -148,7 +175,7 @@ def _clean(answer: Any) -> str:
         return ""
     if "presence" in lowered or "appears in" in lowered:
         return ""
-    return text[:400]
+    return text[:LOOK_LIMIT]
 
 
 def cast_descriptions(
@@ -172,12 +199,15 @@ def cast_descriptions(
     return looks
 
 
-def looks_block(looks: Optional[dict[str, str]], names: Optional[Iterable[str]] = None) -> str:
+def looks_block(
+    looks: Optional[dict[str, str]], names: Optional[Iterable[str]] = None, limit: int = 1400,
+) -> str:
     """The continuity lines to carry into a shot, for the named characters only.
 
     Naming more than the shot contains is how one character's wardrobe used to reach
     every clip, so ``names`` filters: an appearance belongs to the shot that shows the
-    person.
+    person. ``limit`` bounds the whole block, because a detailed read of three characters
+    would otherwise spend the shot's prompt budget on wardrobe.
     """
 
     if not looks:
@@ -195,9 +225,17 @@ def looks_block(looks: Optional[dict[str, str]], names: Optional[Iterable[str]] 
     lines = [f"{name}: {looks[name]}" for name in wanted if looks.get(name)]
     if not lines:
         return ""
-    return "HOW THEY LOOK (taken from their reference picture, keep it exactly):\n" + "\n".join(
-        f"- {line}" for line in lines
-    )
+    header = "HOW THEY LOOK (taken from their reference picture, keep it exactly):\n"
+    budget = max(200, int(limit)) - len(header)
+    kept: list[str] = []
+    for line in lines:
+        room = budget - sum(len(item) + 3 for item in kept)
+        if room < 60:
+            break
+        kept.append(f"- {line[:room]}")
+    if not kept:
+        return ""
+    return header + "\n".join(kept)
 
 
 def apply_cast_descriptions(brief: str, looks: Optional[dict[str, str]]) -> str:

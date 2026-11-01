@@ -2466,7 +2466,9 @@ def _image_to_data_url(image_path: str, max_size: int = 768) -> Optional[str]:
         return f"data:{mime};base64,{data}"
 
 
-def _user_message(prompt: str, image_paths: Optional[list]) -> dict:
+def _user_message(
+    prompt: str, image_paths: Optional[list], image_max_size: Optional[int] = None,
+) -> dict:
     """Build a user message, failing visibly if a remote image cannot be read."""
 
     if not image_paths or not _vision_available:
@@ -2475,7 +2477,11 @@ def _user_message(prompt: str, image_paths: Optional[list]) -> dict:
     content_parts = []
     for image_path in image_paths:
         try:
-            data_url = _image_to_data_url(image_path)
+            data_url = (
+                _image_to_data_url(image_path)
+                if image_max_size is None
+                else _image_to_data_url(image_path, max_size=int(image_max_size))
+            )
         except Exception as exc:
             if _provider in ("remote", "openai", "anthropic"):
                 raise RuntimeError(
@@ -2590,6 +2596,7 @@ def generate(
     top_p: float = 0.9,
     seed: Optional[int] = None,
     image_paths: Optional[list] = None,
+    image_max_size: Optional[int] = None,
     thinking_budget: int = 0,
     enable_thinking: Optional[bool] = None,
     reasoning_effort: Optional[str] = None,
@@ -2667,7 +2674,7 @@ def generate(
 
     # Remote provider support is unknown until a request is made; remote
     # load_model() enables this path so image inputs are never discarded.
-    messages.append(_user_message(prompt, image_paths))
+    messages.append(_user_message(prompt, image_paths, image_max_size))
 
     payload = {
         "messages": messages,
@@ -2826,6 +2833,7 @@ def generate_streaming(
     top_p: float = 0.9,
     seed: int = -1,
     image_paths: list = None,
+    image_max_size: Optional[int] = None,
     thinking_budget: int = 0,
     enable_thinking: bool = None,
     reasoning_effort: Optional[str] = None,
@@ -2892,7 +2900,7 @@ def generate_streaming(
 
     # Match generate() so remote image paths reach both request modes.
     try:
-        messages.append(_user_message(prompt, image_paths))
+        messages.append(_user_message(prompt, image_paths, image_max_size))
     except Exception as exc:
         with _stream_lock:
             _stream_buffer = f"Error: {exc}"
@@ -8420,17 +8428,24 @@ def describe_image(
     image_path: str,
     prompt: str = "Describe this image in detail for use as a video generation prompt.",
     max_new_tokens: int = 256,
+    image_max_size: Optional[int] = None,
 ) -> str:
-    """Describe an image. Vision support requires multimodal GGUF (future)."""
+    """Describe an image with the loaded vision model.
+
+    This used to pass the *filename* and nothing else, so it answered from the name
+    alone — a description of a picture it had never seen. The image is attached now,
+    and a caller that wants the picture's own detail can ask for it at full size.
+    """
     if not os.path.isfile(image_path):
         raise FileNotFoundError(f"Image not found: {image_path}")
 
-    basename = os.path.basename(image_path)
     return generate(
-        prompt=f"The user has an image file named '{basename}'. {prompt}",
+        prompt=prompt,
         system_prompt="You are a helpful assistant that generates creative, detailed video prompts.",
         max_new_tokens=max_new_tokens,
         temperature=0.4,
+        image_paths=[image_path],
+        image_max_size=image_max_size,
     )
 
 

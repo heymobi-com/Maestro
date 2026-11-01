@@ -19,6 +19,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 
 from services.director.cast_vision import (  # noqa: E402
     CAST_LOOK_PROMPT,
+    LOOK_IMAGE_MAX_SIZE,
+    LOOK_LIMIT,
     appearance_from_reference,
     apply_cast_descriptions,
     cast_descriptions,
@@ -80,12 +82,32 @@ class ReferenceSelectionTests(unittest.TestCase):
         def capture(prompt, image_paths=None, **kwargs):
             sent["paths"] = list(image_paths or [])
             sent["prompt"] = prompt
+            sent.update(kwargs)
             return ANITA_LOOK
 
         appearance_from_reference(self.image, generate=capture)
 
         self.assertEqual(sent["paths"], [self.image])
         self.assertEqual(sent["prompt"], CAST_LOOK_PROMPT)
+
+    def test_a_2k_reference_is_sent_at_full_detail(self):
+        sent = {}
+
+        def capture(prompt, image_paths=None, **kwargs):
+            sent.update(kwargs)
+            return ANITA_LOOK
+
+        appearance_from_reference(self.image, generate=capture)
+
+        self.assertEqual(sent["image_max_size"], LOOK_IMAGE_MAX_SIZE)
+        self.assertGreaterEqual(LOOK_IMAGE_MAX_SIZE, 1280)
+        self.assertGreaterEqual(sent["max_new_tokens"], 512)
+
+    def test_the_prompt_asks_for_every_visible_detail(self):
+        for expected in ("bottle green", "eyebrow", "parting", "neckline", "heel height"):
+            self.assertIn(expected, CAST_LOOK_PROMPT, msg=expected)
+        for refused in ("background", "pose", "lighting", "camera"):
+            self.assertIn(refused, CAST_LOOK_PROMPT, msg=refused)
 
 
 class ReadTests(unittest.TestCase):
@@ -168,6 +190,18 @@ class LooksBlockTests(unittest.TestCase):
         self.assertEqual(looks_block({"Anita": "white shirt"}, ["Goliat"]), "")
         self.assertEqual(looks_block({}, ["Anita"]), "")
 
+    def test_a_detailed_read_of_several_characters_is_bounded(self):
+        looks = {
+            "Anita": "white shirt, blue skirt, " * 30,
+            "David": "undyed tunic, " * 30,
+            "Goliat": "bronze armour, " * 30,
+        }
+
+        block = looks_block(looks, ["Anita", "David", "Goliat"], limit=600)
+
+        self.assertLessEqual(len(block), 620)
+        self.assertIn("Anita", block)
+
 
 class ApplyTests(unittest.TestCase):
     def test_a_presence_row_is_replaced_by_the_picture(self):
@@ -218,6 +252,17 @@ class ApplyTests(unittest.TestCase):
         self.assertIn("CAMERA:", out)
         self.assertIn("35mm anamorphic.", out)
         self.assertIn("Stage 1: Anita walks into the valley.", out)
+
+    def test_a_long_read_is_kept_up_to_the_limit(self):
+        long_look = "detail " * 400
+        tmp = tempfile.mkdtemp()
+        image = os.path.join(tmp, "anita.png")
+        with open(image, "wb") as handle:
+            handle.write(b"\x89PNG\r\n\x1a\n")
+
+        look = appearance_from_reference(image, generate=lambda *a, **k: long_look)
+
+        self.assertEqual(len(look), LOOK_LIMIT)
 
     def test_no_look_is_no_change(self):
         brief = "CHARACTERS:\nAnita: narrator.\n"
