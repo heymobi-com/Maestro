@@ -105,7 +105,9 @@ _APPEARANCE_RE = re.compile(
     r"blazer|jacket|suit|almond|alb|chasuble|stole|armour|armor|helmet|greaves|shroud|"
     r"veil|scarf|headscarf|hat|cap|slippers?|boots?|shoes?|sandals?|gloves?|belt|sash|"
     r"rope|linen|wool|leather|silk|canvas|chainmail|scale|spear|shield|sling|necklace|"
-    r"rosary|earrings?|spectacles|glasses)\b|"
+    r"rosary|earrings?|spectacles|glasses|giants?|dwarfs?|soldiers?|shepherds?|kings?|"
+    r"queens?|priests?|monks?|child(?:ren)?|elders?|crowds?|women|woman|men|man|"
+    r"boys?|girls?|figures?)\b|"
     r"\b(?:about|around|aged?)\s+\d{1,3}\b|\b\d{1,3}\s*(?:years? old|-year-old)\b",
     re.I,
 )
@@ -217,16 +219,38 @@ def _name_words(name: str) -> list[str]:
     ]
 
 
+_DESCRIPTION_HEADING_RE = re.compile(
+    r"(?im)^[ \t]*(description|story|synopsis|plot)\b[^\n:]{0,80}:\s*"
+)
+_DESCRIPTION_STOP_RE = re.compile(
+    r"(?im)^[ \t]*(negative|ambience|camera|characters?[^\n:]*|subject lock|"
+    r"presences?|voices?|audio[^\n:]*|style|dialogue[^\n:]*)\s*:"
+)
+
+
+def _description_prose(brief: str) -> str:
+    """The DESCRIPTION prose, sliced from the raw text.
+
+    Read from the raw text rather than from `_sections` on purpose: a brief may open its
+    description with its own heading ("STANDING RULE: the narrator is inside every scene
+    she describes"), and a section splitter that honours that heading leaves DESCRIPTION
+    empty and sends this reader to the whole document instead.
+    """
+
+    text = str(brief or "")
+    heading = _DESCRIPTION_HEADING_RE.search(text)
+    if not heading:
+        return ""
+    rest = text[heading.end():]
+    stop = _DESCRIPTION_STOP_RE.search(rest)
+    return rest[: stop.start()] if stop else rest
+
+
 def _stage_texts(brief: str) -> list[tuple[int, str]]:
     """``[(1, "kitchen, dawn: ..."), ...]`` — each stage and its own prose."""
 
-    sections = _sections(brief)
-    prose = ""
-    for name, text in sections.items():
-        if name.startswith(("DESCRIPTION", "STORY", "NARRATIVE", "PLOT", "SYNOPSIS")):
-            prose = text
-            break
-    if not prose:
+    prose = _description_prose(brief)
+    if not prose.strip():
         prose = str(brief or "")
     matches = list(re.finditer(r"(?i)stage\s+(\d+)\s*(?:\(([^)]{0,60})\))?\s*:", prose))
     if matches:
@@ -293,6 +317,10 @@ def diagnose_brief(
 
     # 2. Stages. Short film only: a podcast is one studio by design.
     stages = _stage_texts(text)
+    # A brief that describes how the film is made, in a workflow whose narration supplies
+    # each clip's moment, is *meant* to have no shot list: the cast is a standing roster
+    # and no stage has to name everybody. Checks that assume stages must stand down.
+    narration_carries_it = bool(has_audio) and not description_states_events(text)
     if policy.max_consecutive_same_setting > 0:
         if not stages:
             add("no-stages", "error",
@@ -330,7 +358,7 @@ def diagnose_brief(
                 "Write the camera per stage, and keep the general look to lens and palette.")
 
     # 4. Cast and stages disagree.
-    if policy.max_consecutive_same_setting > 0 and stages:
+    if policy.max_consecutive_same_setting > 0 and stages and not narration_carries_it:
         stage_text = " ".join(body for _, body in stages).casefold()
         unplaced = [
             name for name in cast_rows
@@ -363,6 +391,8 @@ def diagnose_brief(
                 continue
             if lowered.split()[0] in {
                 "stage", "no", "the", "and", "only", "small", "narrow", "one", "then",
+                "subject", "standing", "she", "he", "they", "it", "his", "her", "we",
+                "you", "i", "that", "this", "there", "when", "while", "after", "before",
             }:
                 continue
             # A name used once is usually the town or the night; a person the story
@@ -454,7 +484,7 @@ def diagnose_brief(
             for word in (_name_words(name) or [name.casefold()])
         )
     ]
-    if acting_rows:
+    if acting_rows and not narration_carries_it:
         add("cast-without-appearance", "warning",
             f"{len(acting_rows)} character(s) act in the story but are only listed as "
             f"presences ({', '.join(acting_rows[:3])}"
