@@ -26,11 +26,172 @@ from services.director.scene_policy import (  # noqa: E402
     SHORT_FILM_AUDIO,
     SHORT_FILM_STORY,
     VIRAL_VIDEO,
+    narration_presence,
+    narrator_from_context,
     scene_guidance,
     scene_policy,
+    spread_staging,
+    staging_report,
+    staging_rules,
 )
 
 PLANNERS = APP / "services/director/planners"
+
+
+class StagingTests(unittest.TestCase):
+    """Presence is not enough: the narrator must share the action's depth and scale.
+
+    Measured on a real 36-clip run, 30 of the openings put the narrator in the foreground
+    and 8 pushed the described figures into the "distant background". Every clip had its
+    own place and its own line, and the film still read as one presenter shot repeated ?
+    which is what the person reported as "una copia de la misma escena".
+    """
+
+    BRIEF = (
+        "SUBJECT LOCK:\n<Subject 1> (S1) is ALWAYS Anita.\n\n"
+        "DESCRIPTION:\nAnita walks the audience through the ancient landscape, showing "
+        "the characters what is happening.\n"
+    )
+
+    def test_the_narrator_is_at_the_scale_of_what_she_describes(self):
+        text = narration_presence(self.BRIEF)
+
+        self.assertIn("SAME DEPTH AND SCALE", text)
+        self.assertIn("never small in the distant background", text)
+
+    def test_the_default_presenter_framing_is_named_as_wrong(self):
+        text = narration_presence(self.BRIEF)
+
+        self.assertIn('Do not write "in the foreground center" as a default composition', text)
+        self.assertIn("No more than one shot in three", text)
+
+    def test_the_shot_rule_is_compact(self):
+        text = narration_presence(self.BRIEF, compact=True)
+
+        self.assertIn("SAME DEPTH AND SCALE", text)
+        self.assertLess(len(text), 620)
+
+    def test_the_staging_rule_works_without_a_name(self):
+        text = staging_rules("")
+
+        self.assertIn("SAME DEPTH AND SCALE", text)
+        self.assertNotIn("None", text)
+
+    def test_a_plan_of_one_repeated_framing_is_reported(self):
+        openings = ["Anita stands in the foreground center, facing the camera."] * 6
+
+        findings = staging_report(openings, name="Anita")
+
+        self.assertTrue(any("in the foreground" in item for item in findings))
+        self.assertTrue(any("facing the camera" in item for item in findings))
+
+    def test_figures_pushed_into_the_distance_are_reported(self):
+        openings = [
+            "Anita in the foreground center. Goliath stands small in the distant background right.",
+            "Anita in the foreground center. David in the distant background left.",
+            "Anita walks among the soldiers, spears at her scale.",
+            "Low angle past Anita up to Goliath filling the frame.",
+            "Close on David's hands, Anita kneeling beside him.",
+        ]
+
+        findings = staging_report(openings, name="Anita")
+
+        self.assertTrue(any("distant" in item for item in findings))
+
+    def test_a_varied_plan_raises_nothing(self):
+        openings = [
+            "Anita walks among the soldiers, the spears at her scale on both sides.",
+            "Low angle past Anita up to Goliath, who fills the frame above her.",
+            "Close on David's hands on the sling, Anita kneeling beside him.",
+            "Wide of the camp with Anita small between the tents, pointing at the fires.",
+            "Over Anita's shoulder at King Saul slumping on his throne.",
+            "Anita strides through the crowd, the people at her scale around her.",
+        ]
+
+        self.assertEqual(staging_report(openings, name="Anita"), [])
+
+    def test_too_few_shots_to_judge(self):
+        self.assertEqual(staging_report(["Anita in the foreground center."] * 3), [])
+
+
+class StagingRepairTests(unittest.TestCase):
+    """The plan is repaired, not merely reported: reporting alone costs a render first."""
+
+    def test_a_figure_in_the_distance_is_brought_to_her_scale(self):
+        fixed = spread_staging(
+            ["Anita in foreground center. Goliath stands towering in the distant background right."],
+            name="Anita",
+        )
+
+        self.assertIn("right behind her on the right, at her scale", fixed[0])
+        self.assertNotIn("distant", fixed[0])
+
+    def test_the_repair_reads_as_english(self):
+        fixed = spread_staging(
+            ["Anita stands in the foreground. King Saul stands in the distant background "
+             "inside his royal tent, holding his spear."],
+            name="Anita",
+        )
+
+        self.assertIn("King Saul stands right behind her, at her scale inside his royal tent", fixed[0])
+        self.assertNotIn("scaleinside", fixed[0])
+
+    def test_a_figure_beside_her_in_the_background_moves_to_her_plane(self):
+        fixed = spread_staging(
+            ["Anita stands in the foreground, David in the background left, Goliath in the "
+             "background right."],
+            name="Anita",
+        )
+
+        self.assertIn("David beside her on the left", fixed[0])
+        self.assertIn("Goliath beside her on the right", fixed[0])
+
+    def test_a_run_of_presenter_framings_is_spread(self):
+        same = ["Anita stands in the foreground center, facing the camera."] * 12
+        fixed = spread_staging(same, name="Anita", environments=["the valley"] * 12)
+
+        self.assertGreaterEqual(len(set(fixed)), 5)
+        self.assertNotIn(same[0], fixed[1:])
+
+    def test_the_presenter_framing_survives_a_share_of_the_shots(self):
+        same = ["Anita stands in the foreground center, facing the camera."] * 12
+        fixed = spread_staging(same, name="Anita")
+
+        self.assertIn(same[0], fixed)
+
+    def test_the_figures_a_re_framed_shot_names_are_kept(self):
+        opening = "Anita in foreground center. King Saul stands beside her on the left."
+        fixed = spread_staging([opening] * 12, name="Anita")
+
+        self.assertNotIn("foreground", fixed[-1])
+        self.assertIn("King Saul stands beside her on the left", fixed[-1])
+
+    def test_a_clean_plan_is_untouched_byte_for_byte(self):
+        clean = [
+            "Anita walks among the soldiers, the spears at her scale on both sides.",
+            "Low angle past Anita up to Goliath, who fills the frame above her.",
+            "Close on David's hands on the sling, Anita kneeling beside him.",
+            "Wide of the camp with Anita small between the tents, pointing at the fires.",
+        ]
+
+        self.assertEqual(spread_staging(clean, name="Anita"), clean)
+
+    def test_the_repair_is_idempotent(self):
+        plan = ["Anita in foreground center. Goliath stands towering in the distant background right."]
+
+        once = spread_staging(plan, name="Anita")
+
+        self.assertEqual(spread_staging(once, name="Anita"), once)
+
+    def test_the_narrator_is_read_from_a_shot_contract(self):
+        context = "Anita (a woman) is ON SCREEN in this shot, inside the scene."
+
+        self.assertEqual(narrator_from_context(context), "Anita")
+
+    def test_the_narrator_is_read_from_a_lock(self):
+        self.assertEqual(
+            narrator_from_context("SUBJECT LOCK:\n<Subject 1> (S1) is ALWAYS Anita.\n"), "Anita",
+        )
 
 
 class GuidanceTextTests(unittest.TestCase):

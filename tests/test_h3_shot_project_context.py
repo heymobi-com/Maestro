@@ -26,6 +26,8 @@ from services.director.h3_dialogue import project_subject_lock  # noqa: E402
 from services.director_pipeline import (  # noqa: E402
     _h3_shot_project_context,
     _h3_world_context,
+    _repair_h3_staging,
+    _h3_staging_report,
 )
 
 BRIEF = (
@@ -232,6 +234,58 @@ class ProtectedContextTests(unittest.TestCase):
         self.assertTrue(result.compacted)
         self.assertIn(presence.strip(), result.prompt)
         self.assertNotIn(boilerplate.strip(), result.prompt)
+
+
+class StagingRepairInThePlanTests(unittest.TestCase):
+    """The whole plan is repaired before a prompt is compiled, not just reported."""
+
+    def _plans(self, openings):
+        context = "Anita (a woman) is ON SCREEN in this shot, inside the scene."
+        return [
+            {
+                "_director_project_context": context,
+                "_director_environment": "the valley of Elah",
+                "_director_opening_blocking": opening,
+            }
+            for opening in openings
+        ]
+
+    def test_the_plan_the_figures_were_pushed_away_from_is_repaired(self):
+        plans = self._plans([
+            "Anita in foreground center. Goliath stands towering in the distant background right.",
+            "Anita in foreground center. David stands small in the distant background left.",
+            "Anita in foreground center. King Saul stands in the distant background.",
+            "Anita in foreground center. The soldiers stand in the distant background right.",
+        ])
+
+        changed = _repair_h3_staging(plans)
+
+        self.assertEqual(changed, 4)
+        self.assertFalse(any(
+            "distant" in str(plan["_director_opening_blocking"]) for plan in plans
+        ))
+        self.assertEqual(_h3_staging_report(plans), [])
+
+    def test_the_repair_is_idempotent(self):
+        plans = self._plans([
+            "Anita in foreground center. Goliath stands towering in the distant background right."
+        ])
+
+        _repair_h3_staging(plans)
+
+        self.assertEqual(_repair_h3_staging(plans), 0)
+
+    def test_a_varied_plan_is_left_alone(self):
+        openings = [
+            "Anita walks among the soldiers, the spears at her scale on both sides.",
+            "Low angle past Anita up to Goliath, who fills the frame above her.",
+            "Close on David's hands, Anita kneeling beside him.",
+            "Wide of the camp, Anita small between the tents, pointing at the fires.",
+        ]
+        plans = self._plans(openings)
+
+        self.assertEqual(_repair_h3_staging(plans), 0)
+        self.assertEqual([plan["_director_opening_blocking"] for plan in plans], openings)
 
 
 if __name__ == "__main__":

@@ -187,6 +187,24 @@ def narrator_name(brief: str) -> str:
     return parse(brief).get(1, "")
 
 
+def narrator_from_context(text: str) -> str:
+    """The narrator's name from whatever text is at hand: a brief's lock, or a shot contract.
+
+    The plan-level repairs run after the brief is gone -- the only text left is the per-shot
+    context, which states the presenter as "Anita (a woman) is ON SCREEN ...".
+    """
+
+    name = narrator_name(text)
+    if name:
+        return name
+    match = re.search(
+        r"(?m)^\s*(?:-\s*)?([A-Z][\w'\u00c0-\u024f-]{1,30})\s*(?:\(a (?:woman|man)\))?"
+        r"\s+is ON SCREEN\b",
+        str(text or ""),
+    )
+    return match.group(1) if match else ""
+
+
 def narration_is_present(brief: str) -> bool:
     """Whether the brief puts the narrator inside the film rather than over it.
 
@@ -284,17 +302,208 @@ def narration_presence(brief: str, *, compact: bool = False, gender: str = "") -
     if compact:
         return (
             f"{who} is ON SCREEN in this shot, inside the scene, speaking on camera with "
-            f"the mouth visible. Never off-screen voiceover for {name}. If the line "
-            f"describes something else, {name} is still in frame watching or gesturing at "
-            f"it."
+            f"the mouth visible. Never off-screen voiceover for {name}. {staging_rules(name, compact=True)}"
         )
     return f"""NARRATION PRESENCE — {who.upper()} IS IN THE FILM, NOT OVER IT (non-negotiable):
 - {who} is a visible participant of EVERY shot: on screen, in frame, inside the scene being described. Never off camera, never a disembodied voice.
 - Never change the presenter's gender, age or build between shots: {who}.
 - Every shot lists {name} in subjects_on_screen with her own speaker cue, and her line is delivered ON CAMERA with the mouth visible and moving.
 - Never write "off-screen voiceover", "voiceover", "narrates over the image", "the voice of", or "lips remain completely closed" for {name} while the brief puts her inside the scene.
-- When the line describes something else in the place, {name} is still in frame: watching it, standing in it, walking through it, gesturing at it. The described action happens without her being cropped out or replaced by a cutaway of only the described subject.
-- The film is not a stock-footage montage with a voice on top. If a shot cannot hold both {name} and the thing she describes, choose the framing that holds her and keeps the described thing visible."""
+{staging_rules(name)}"""
+
+
+#: Verbs and nouns that put a described figure far away from the narrator. A film built out
+#: of these is one shot repeated: the presenter in the foreground, the story small behind
+#: her. Measured on a real 36-clip run, 30 openings said "Anita in the foreground center"
+#: and seven put David, Saul or Goliath in the "distant background".
+_DISTANT_RE = re.compile(
+    r"(?i)\b(?:distant|far|tiny|small in the)\s+background\b|\bdistant (?:left|right)\b|"
+    r"\bin the distance\b|\bfar behind\b"
+)
+
+_FOREGROUND_RE = re.compile(r"(?i)\bforeground\b")
+
+_FACING_CAMERA_RE = re.compile(
+    r"(?i)\b(?:facing|address(?:ing|es)?|speak(?:s|ing)? to|look(?:s|ing)? (?:at|into)|"
+    r"talk(?:s|ing)? to)\s+(?:the\s+)?(?:camera|lens|viewer|audience)\b"
+)
+
+
+def staging_rules(name: str, *, compact: bool = False) -> str:
+    """How the narrator stands in the action, and how the shots must differ.
+
+    The planner read "in frame" as "in front of the action": a presenter in the foreground
+    centre with the described figures small in the distance, thirty-six times. Every clip
+    was a different background behind the same shot, which is what the person reported as
+    "una copia de la misma escena con distinto diálogo".
+
+    Presence alone is not enough; depth and scale are what make the narrator a participant
+    instead of a host.
+    """
+
+    if compact:
+        return (
+            f"{name} is at the SAME DEPTH AND SCALE as what she describes, not a presenter "
+            f"in front of it: the figures and the action fill the frame with her, never "
+            f"small in the distant background. This shot's framing differs from the shots "
+            f"before and after it."
+        )
+    return f"""- {name} stands at the SAME DEPTH AND SCALE as the action she describes. When she talks about Goliath, Goliath fills the frame with her; when she talks about soldiers, she is among them. The described figures are never small in the distant background while she fills the foreground, and they are never behind glass, over a hill or across the valley from her.
+- The frame is not a host in front of a backdrop. Do not write "in the foreground center" as a default composition, and do not repeat the same framing in consecutive shots. Vary it: she walks among the soldiers, she stands at David's shoulder, a low angle past her up to Goliath, an over-shoulder view of what she points at, a close shot on her face with the action at her back, a wide shot with her small inside the crowd she describes.
+- No more than one shot in three may open with {name} centred and facing the camera. If the previous shots did that, this one does not.
+- The described action happens at her scale and in the same plane of depth. If the shot cannot hold both her and the thing she describes at that scale, move the camera closer to the action rather than pushing the action into the distance."""
+
+
+#: Distance phrasing applied to the figures the narrator describes. Each of these puts the
+#: action behind her, which turns a documentary she walks through into a presenter in front
+#: of a backdrop: 8 of 36 openings on a real run said David, Saul or Goliath stood in the
+#: "distant background".
+_DISTANCE_REWRITES = (
+    (r"(?i)\bsmall in the distant (left|right) background\b", r"at her scale just behind her on the \1"),
+    (r"(?i)\bsmall in the distant background\b", "at her scale just behind her"),
+    (r"(?i)\bin the distant (left|right) background\b", r"right behind her on the \1, at her scale"),
+    (r"(?i)\bin the distant background,? on the (left|right)\b", r"right behind her on the \1, at her scale"),
+    (r"(?i)\bin the distant background,? (left|right)\b", r"right behind her on the \1, at her scale"),
+    (r"(?i)\bin the distant background\b", "right behind her, at her scale"),
+    (r"(?i)\bat her scale (left|right)\b", r"at her scale on the \1"),
+    (r"(?i)\bbehind her (left|right)\b", r"behind her on the \1"),
+    (r"(?i)\bin the background on the (left|right)\b", r"beside her on the \1"),
+    (r"(?i)\bin the background,? (left|right)\b", r"beside her on the \1"),
+    (r"(?i)\bin the distance\b", "just beyond her, at her scale"),
+    (r"(?i)\bfar behind (her|him)\b", r"right behind \1"),
+    (r"(?i)\bdistant (left|right)\b", r"beside her on the \1"),
+    (r"(?i)\bsmall in the (rear|background)\b", "at her scale behind her"),
+    (r"(?i)\bon (?:a |the )?distant (hill|hillside|ridge|slope|rise)\s*(left|right)\b", r"on the \1 beside her on the \2, at her scale"),
+    (r"(?i)\bon (?:a |the )?distant (hill|hillside|ridge|slope|rise)\b", r"on the \1 beside her, at her scale"),
+    (r"(?i)\bdistant (hill|hillside|ridge|slope|rise)s?\s*(left|right)\b", r"\1 beside her on the \2, at her scale"),
+    (r"(?i)\bdistant (hill|hillside|ridge|slope|rise)s?\b", r"\1 beside her, at her scale"),
+)
+
+#: The narration of "she is a host": the narrator centred in the foreground, often facing
+#: the lens, with nothing else placed in the frame. 30 of 36 openings on a real run put her
+#: in the foreground, and the ones that named nobody were the same shot with a new backdrop.
+_PRESENTER_TEMPLATE_RE = re.compile(
+    r"(?i)^(?:the\s+|a\s+)?[^.]{0,60}?\b(?:in|at)\s+(?:the\s+)?foreground"
+    r"(?:\s+cent(?:er|re))?\b[^.]{0,90}?\.?$"
+)
+
+#: Framings that replace a pure presenter template. Deterministic rotation, not invention:
+#: the shot keeps its own environment and its own line, and only the camera's relationship
+#: to the narrator changes.
+_FRAMING_ROTATION = (
+    "Medium shot: {who} moves through {where}, the figures she describes at her scale around her.",
+    "Over {who}'s shoulder: what she describes fills the frame just beyond her.",
+    "Low angle beside {who}: the action rises above her at the same scale.",
+    "Wide shot: {who} small inside {where}, pointing out what she describes.",
+    "Close on {who}'s face, the action sharp immediately behind her.",
+)
+
+
+#: Words that open a sentence or describe a shot rather than name a person. Used to tell
+#: "Anita stands in the foreground" from "Anita stands in the foreground, David behind her".
+_NOT_A_PERSON = {
+    "the", "a", "an", "medium", "wide", "close", "low", "high", "over", "shot", "camera",
+    "ancient", "valley", "this", "that", "she", "he", "they", "and", "but", "with", "in",
+}
+
+
+def _names_another_person(text: str, who: str) -> bool:
+    for word in re.findall(r"\b([A-Z][a-z\u00c0-\u024f]{2,})\b", str(text or "")):
+        key = word.casefold()
+        if key == str(who or "").casefold() or key in _NOT_A_PERSON:
+            continue
+        return True
+    return False
+
+
+def _sentences(text: str) -> list:
+    return [part for part in re.split(r"(?<=[.!?])\s+", " ".join(str(text or "").split())) if part]
+
+
+def spread_staging(
+    openings: list, *, name: str = "", environments=None,
+    allow_share: float = 0.15,
+) -> list:
+    """Repair a plan whose every shot is the same framing, without asking a model.
+
+    Two deterministic repairs, applied to the shot's own opening text:
+
+    1. **Scale.** A figure the narrator describes is brought to her plane: "in the distant
+       background" becomes "right behind her, at her scale". Her line does not change and no
+       subject is invented -- only the distance qualifier moves.
+    2. **Variety.** At most ``allow_share`` of the shots may keep the pure "narrator in the
+       foreground, nothing else in frame" template. The excess are replaced by a rotating
+       framing that keeps the shot's own place and its own line.
+
+    A shot with neither fault is returned byte for byte.
+    """
+
+    items = [str(item or "") for item in (openings or [])]
+    where = [str(item or "").strip() for item in (environments or [])]
+    who = name or "the narrator"
+
+    def _place(index: int) -> str:
+        place = where[index] if index < len(where) else ""
+        place = re.sub(r"\s+", " ", place).strip(" .")
+        return place or "the scene"
+
+    repaired: list = []
+    for item in items:
+        out = item
+        for pattern, replacement in _DISTANCE_REWRITES:
+            out = re.sub(pattern, replacement, out)
+        repaired.append(out)
+
+    # The template is judged on the OPENING SENTENCE, because that is the camera: "Anita in
+    # foreground center. Goliath stands towering behind her." is the same shot as the one
+    # with David in it -- same framing, different content -- which is exactly the complaint.
+    templated = [
+        index for index, item in enumerate(repaired)
+        if item.strip() and _PRESENTER_TEMPLATE_RE.match(_sentences(item)[0].strip())
+    ]
+    allowed = max(1, int(len([item for item in items if item.strip()]) * allow_share))
+    for position, index in enumerate(templated[allowed:]):
+        framing = _FRAMING_ROTATION[position % len(_FRAMING_ROTATION)]
+        sentences = _sentences(repaired[index])
+        rest = " ".join(sentences[1:]).strip()
+        head = framing.format(who=who, where=_place(index))
+        repaired[index] = f"{head} {rest}".strip() if rest else head
+    return repaired
+
+
+def staging_report(openings: list, *, name: str = "") -> list:
+    """Name a plan that is one shot repeated, after `spread_staging` had its chance."""
+
+    text = [" ".join(str(item or "").split()) for item in (openings or [])]
+    text = [item for item in text if item]
+    if len(text) < 4:
+        return []
+    findings: list = []
+    foreground = sum(1 for item in text if _FOREGROUND_RE.search(item))
+    distant = sum(1 for item in text if _DISTANT_RE.search(item))
+    facing = sum(1 for item in text if _FACING_CAMERA_RE.search(item))
+    total = len(text)
+    who = name or "the narrator"
+    if foreground >= max(4, int(total * 0.6)):
+        findings.append(
+            f"{foreground} of {total} shots put {who} in the foreground, so the film is one "
+            f"framing repeated with different audio; give the shots different distances and "
+            f"angles, and put the described action at her scale"
+        )
+    if distant >= max(2, int(total * 0.15)):
+        findings.append(
+            f"{distant} of {total} shots push the described figures into the distant "
+            f"background while {who} fills the frame; she is meant to be inside the action, "
+            f"at the same depth and scale as what she describes"
+        )
+    if facing >= max(3, int(total * 0.34)):
+        findings.append(
+            f"{facing} of {total} shots have {who} facing the camera; a presenter who "
+            f"addresses the lens in a third of the film reads as a studio segment, not a "
+            f"documentary she is walking through"
+        )
+    return findings
+
 
 
 #: Words that name a place, used to tell a beat that happens somewhere from a beat

@@ -336,6 +336,45 @@ already implies, using only the section names this module knows.
 
 That is the symptom, in the composer, before a single frame is rendered.
 
+### The plan is repaired, not reported
+
+Flagging a bad plan before the render is worth something; fixing it is worth more. Two
+deterministic repairs now run on the plan itself, in `_preflight_h3_director_prompts` ?
+the one place where the whole plan is visible at once, because the per-shot loop cannot
+know that this is the twenty-third presenter shot in a row.
+
+Measured on the person's own 36-clip run: 30 of the openings put the narrator in the
+foreground and 8 pushed David, Saul or Goliath into the "distant background". Every clip
+had its own place and its own line, and the film still read as one shot repeated ? her in
+front of a backdrop, thirty-six times.
+
+| repair | what it does |
+| --- | --- |
+| scale | `in the distant background` ? `right behind her, at her scale`; `distant hill left` ? `on the hill beside her on the left, at her scale`. Only the distance qualifier moves: no line, subject or action changes |
+| variety | at most 15% of shots may keep the pure "narrator in the foreground, facing the camera" opening. The excess lose that first sentence and are re-opened with one of five deterministic framings built from the shot's own environment; the rest of the opening is kept verbatim |
+
+On that run the pass repaired **16 of 36 shots** and the residual check went from two
+findings to none. It is idempotent by a flag on the plan, not by inspection ? a repaired
+opening can still begin with "Anita stands in the foreground", and judging it twice would
+move a shot that was already moved.
+
+`staging_report` stays as the after-the-fact check, for a plan that arrives from
+somewhere else (a resume, an imported project, a user-edited plan).
+
+### The repair that was never called
+
+`prompt_normalize.normalize_clip_prompts` renumbers a compiled prompt to the project's own
+SUBJECT LOCK. It was written, documented and tested ? and nothing in the pipeline called
+it. It appeared only in its own definition, in its tests, and in a manual script, so a
+saved prompt that already carried `<Subject N>` tags kept a swapped number and the
+renderer drew the wrong face on the wrong voice.
+
+It now runs at the persistence boundary (`_write_pipeline_json_unlocked`), which is
+exactly where it belongs: a saved prompt is rendered verbatim, so no later pass can fix
+it. Only a renumbering that leaves the prompt's skeleton identical is accepted, so nothing
+but the number can move. On the person's run it changes nothing ? there were no swaps ?
+which is itself the answer: the module was never the cause, it was just dead.
+
 ## H3's prompt budget: where instructions could go missing
 
 **H3 does not truncate the prompt.** `MiniMaxH3Qwen3VL._plain_inputs` tokenizes the whole

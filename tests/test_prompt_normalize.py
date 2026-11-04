@@ -135,5 +135,55 @@ class ClipFieldsTests(unittest.TestCase):
         self.assertEqual(normalize_clip_prompts(clip), {})
 
 
+class TheRepairIsConnectedTests(unittest.TestCase):
+    """`normalize_clip_prompts` existed, was tested, and nothing called it.
+
+    A saved prompt that already carries <Subject N> tags is rendered verbatim, so the
+    renderer, not a later compile, is what put a swapped number on screen. The repair only
+    counts if the pipeline actually runs it, so this pins the call site.
+    """
+
+    CONTEXT = (
+        "SUBJECT LOCK:\n<Subject 1> (S1) is ALWAYS Anita.\n"
+        "<Subject 2> (S2) is ALWAYS David.\n"
+    )
+
+    def test_the_pipeline_repairs_a_saved_clip_before_it_renders(self):
+        from services.director_pipeline import _normalize_saved_prompts
+
+        state = {"clips": [{
+            "_director_project_context": self.CONTEXT,
+            "video_prompt": (
+                "subject_definitions:\n"
+                "<Subject 1> (S1): David , kneeling in the dust\n"
+                "<Subject 2> (S2): Anita , standing beside him\n\n"
+                "summary: the valley\n"
+            ),
+        }]}
+        _normalize_saved_prompts(state)
+
+        fixed = state["clips"][0]["video_prompt"]
+        self.assertIn("<Subject 2> (S2): David", fixed)
+        self.assertIn("<Subject 1> (S1): Anita", fixed)
+
+    def test_a_prompt_with_no_lock_is_left_alone(self):
+        from services.director_pipeline import _normalize_saved_prompts
+
+        prompt = "subject_definitions:\n<Subject 1> (S1): David\n\nsummary: x\n"
+        state = {"clips": [{"_director_project_context": "", "video_prompt": prompt}]}
+        _normalize_saved_prompts(state)
+
+        self.assertEqual(state["clips"][0]["video_prompt"], prompt)
+
+    def test_a_clean_clip_is_untouched(self):
+        from services.director_pipeline import _normalize_saved_prompts
+
+        prompt = "subject_definitions:\n<Subject 1> (S1): Anita\n\nsummary: x\n"
+        state = {"clips": [{"_director_project_context": self.CONTEXT, "video_prompt": prompt}]}
+        _normalize_saved_prompts(state)
+
+        self.assertEqual(state["clips"][0]["video_prompt"], prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

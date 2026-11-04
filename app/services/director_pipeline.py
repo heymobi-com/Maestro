@@ -1308,13 +1308,52 @@ PIPELINE_STATE_VERSION = 3
 _PIPELINE_FILE_PREFIX = "_director_pipeline_"
 
 
+def _normalize_saved_prompts(state: dict) -> dict:
+    """Renumber each saved clip prompt to the project's own SUBJECT LOCK.
+
+    ``prompt_normalize`` was written for exactly this — a compiled prompt that already
+    carries ``<Subject N>`` tags can be saved with the participants swapped, and the
+    renderer draws it verbatim, so no later pass can fix it. The module was tested and
+    never called: it appeared only in its own definition, in its tests and in a manual
+    script, so the repair it describes never ran once.
+
+    Only a renumbering that leaves the prompt's skeleton identical is accepted: the number
+    a participant carries is what the lock decides, and nothing else about the text may
+    move.
+    """
+
+    clips = state.get("clips")
+    if not isinstance(clips, list):
+        return state
+    try:
+        from services.director.prompt_normalize import (
+            normalize_clip_prompts,
+            subject_label_skeleton,
+        )
+    except Exception:  # noqa: BLE001 - a repair must never block a save
+        return state
+    for clip in clips:
+        if not isinstance(clip, dict):
+            continue
+        try:
+            fixes = normalize_clip_prompts(clip)
+        except Exception:  # noqa: BLE001
+            continue
+        for field, fixed in fixes.items():
+            current = str(clip.get(field) or "")
+            if subject_label_skeleton(fixed) != subject_label_skeleton(current):
+                continue
+            clip[field] = fixed
+    return state
+
+
 def _write_pipeline_json_unlocked(filepath: str, state: dict) -> None:
     """Atomically replace one pipeline JSON file while its file lock is held."""
     temp_filepath = (
         f"{filepath}.{os.getpid()}.{threading.get_ident()}.tmp"
     )
     try:
-        persisted_state = repair_payload(state)
+        persisted_state = _normalize_saved_prompts(repair_payload(state))
         with open(temp_filepath, "w", encoding="utf-8") as handle:
             json.dump(
                 persisted_state,
@@ -9861,6 +9900,7 @@ def _report_h3_manifest_issues(
         *_h3_manifest_issues(params or {}),
         *_h3_continuity_identity_risk(params or {}, clip_count),
         *_h3_prompt_dilution_report(clip_plans or [], pid=pid),
+        *_h3_staging_report(clip_plans or [], pid=pid),
     ]
     if not issues:
         return []
@@ -10079,6 +10119,34 @@ def _h3_shot_project_context(
     # instructions fought and the repeated one won by volume. The shot's own description is
     # the authority on what it shows.
     return "\n\n".join(parts)
+
+
+def _h3_staging_report(clip_plans: list[dict], *, pid: str = "") -> list[str]:
+    """A plan whose every shot is the narrator in the foreground of the same frame.
+
+    Presence was fixed before this: the narrator was in every shot. What the plan did with
+    her was put her in front of the action, 30 of 36 times, with the described figures
+    small in the distance — so thirty-six different backgrounds behind one repeated shot,
+    which is what the person reported as "una copia de la misma escena con distinto
+    diálogo". Reported here, before the render, because it cannot be seen in the plan.
+    """
+
+    from services.director.scene_policy import staging_report
+
+    openings: list[str] = []
+    for plan in clip_plans or []:
+        if not isinstance(plan, dict):
+            continue
+        opening = str(plan.get("_director_opening_blocking") or "").strip()
+        if not opening:
+            match = re.search(
+                r"(?i)opening composition:\s*(.+?)(?=\s\S{0,0}[A-Z][a-z]+ ?[a-z]*:|\.\s|$)",
+                str(plan.get("_director_h3_compiled_prompt") or plan.get("video_prompt") or ""),
+            )
+            opening = match.group(1) if match else ""
+        if opening:
+            openings.append(opening)
+    return list(staging_report(openings))
 
 
 def _h3_prompt_dilution_report(clip_plans: list[dict], *, pid: str = "") -> list[str]:
@@ -10307,6 +10375,62 @@ def _director_prompt_diversity_report(
     return findings
 
 
+def _repair_h3_staging(clip_plans: list[dict], *, pid: str = "") -> int:
+    """Spread the framing across the whole plan, before a single prompt is compiled.
+
+    The plan decides where the camera stands, and it made that decision 36 times the same
+    way: measured on a real run, 30 of 36 openings put the narrator in the foreground and 8
+    pushed the figures she describes into the "distant background". Her presence was fine —
+    she was in every shot — but the shot was always her in front of a backdrop, so the film
+    read as one framing repeated with different audio.
+
+    The repair is deterministic and lives here because this is the only place the whole
+    plan is visible at once: the per-shot loop cannot know that this is the twenty-third
+    presenter shot in a row.
+    """
+
+    from services.director.scene_policy import (
+        narrator_from_context,
+        spread_staging,
+    )
+
+    plans = [plan for plan in (clip_plans or []) if isinstance(plan, dict)]
+    if plans and all(plan.get("_director_staging_repaired") for plan in plans):
+        # Idempotent by flag, not by inspection: a repaired opening can still begin with
+        # "Anita stands in the foreground", and judging that again would rotate a shot that
+        # has already been moved once.
+        return 0
+    openings = [str(plan.get("_director_opening_blocking") or "") for plan in plans]
+    if not any(openings):
+        return 0
+    context = next(
+        (str(plan.get("_director_project_context") or "") for plan in plans
+         if str(plan.get("_director_project_context") or "").strip()),
+        "",
+    )
+    repaired = spread_staging(
+        openings,
+        name=narrator_from_context(context),
+        environments=[str(plan.get("_director_environment") or "") for plan in plans],
+    )
+    changed = 0
+    for plan, before, after in zip(plans, openings, repaired):
+        if before == after:
+            continue
+        plan["_director_opening_blocking"] = after
+        changed += 1
+    for plan in plans:
+        plan["_director_staging_repaired"] = True
+    if changed:
+        label = f"[Pipeline {pid}] " if pid else "[Pipeline] "
+        print(
+            f"{label}Staging repaired on {changed} of {len(plans)} shots: the figures the "
+            "narrator describes were brought to her scale, and the shots that were the same "
+            "presenter framing were given a different one."
+        )
+    return changed
+
+
 def _preflight_h3_director_prompts(
     video_model: str,
     clip_plans: list[dict],
@@ -10321,6 +10445,7 @@ def _preflight_h3_director_prompts(
 
     if not str(video_model or "").lower().startswith("minimax_h3"):
         return clip_plans
+    _repair_h3_staging(clip_plans, pid=pid)
     from services.director.h3_dialogue import compile_h3_clip_plans
     from services.director.h3_speaker_rendering import unrenderable_speaker_lines
 
