@@ -10431,6 +10431,55 @@ def _repair_h3_staging(clip_plans: list[dict], *, pid: str = "") -> int:
     return changed
 
 
+def _h3_plan_contract_issues(clip_plans: list[dict]) -> list[str]:
+    """What a plan must carry before it is worth rendering, checked per shot.
+
+    Measured on a real attempt (the person's own storyboard): every shot showed a
+    ``dialogue`` section with one speaker and **no spoken line**, and the prompts described
+    people the project had already cast — "the teen boy in earthy brown", "the narrator man
+    in dark grey", "the Philistine warrior in blue bronze" — instead of ``<Subject 1>`` /
+    ``<Picture 1>``. Thirty-six clips would have rendered from a plan that ignored both the
+    audio and the cast, and nothing said so.
+
+    Three faults, each of which makes the render worthless:
+
+    * a shot whose audio window has spoken lines and whose prompt carries none;
+    * a shot listing subjects on screen but naming no ``<Subject N>``;
+    * a speaker label that is a bare ``(S)``, which names nobody.
+    """
+
+    from services.director.h3_dialogue import _extract_h3_fields
+
+    issues: list[str] = []
+    for index, plan in enumerate(clip_plans or []):
+        if not isinstance(plan, dict):
+            continue
+        shot = index + 1
+        spoken = (plan.get("planned_clip") or {}).get("dialogue_lines") or []
+        fields = _extract_h3_fields(str(plan.get("video_prompt") or ""))
+        body = " ".join(str(value) for value in fields.values())
+        if spoken and "<d>" not in body:
+            issues.append(
+                f"Shot {shot} has {len(spoken)} spoken line(s) in its audio window and none "
+                "in its prompt, so it would render silent while the voice plays"
+            )
+        subjects = plan.get("_director_subjects_on_screen") or []
+        if subjects and not re.search(r"<\s*Subject\s+\d+\s*>", body):
+            issues.append(
+                f"Shot {shot} lists {len(subjects)} subject(s) on screen but names no "
+                "<Subject N>, so the cast is described from scratch instead of from the "
+                "pictures"
+            )
+        for label in (plan.get("_director_speaker_registry") or {}):
+            if re.fullmatch(r"\(?\s*S\s*\)?", str(label).strip(), re.IGNORECASE):
+                issues.append(
+                    f"Shot {shot} speaks with the label {label!r}, which names no "
+                    "participant; the plan cannot say whose voice it is"
+                )
+                break
+    return issues
+
+
 def _preflight_h3_director_prompts(
     video_model: str,
     clip_plans: list[dict],
@@ -10470,6 +10519,17 @@ def _preflight_h3_director_prompts(
             "beside each line (for example '<Subject 2> says: <d>...</d>') or place that "
             "character's explicit tag beside it.\n  - "
             + "\n  - ".join(unrenderable)
+        )
+    contract = _h3_plan_contract_issues(clip_plans)
+    if contract:
+        shown = contract[:6]
+        more = "" if len(contract) <= 6 else f"\n  … and {len(contract) - 6} more"
+        raise ValueError(
+            "This plan would render without the film it was written from, so it was "
+            "stopped before any GPU work. Plan these shots again; if it keeps happening, "
+            "the planner is not receiving the audio's lines or the cast.\n  - "
+            + "\n  - ".join(shown)
+            + more
         )
     from services.director.music_narrative import music_narrative_row_issue
     from services.director.music_review import music_visual_reset_issue

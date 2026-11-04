@@ -26,6 +26,7 @@ from services.director.h3_dialogue import project_subject_lock  # noqa: E402
 from services.director_pipeline import (  # noqa: E402
     _h3_shot_project_context,
     _h3_world_context,
+    _h3_plan_contract_issues,
     _repair_h3_staging,
     _h3_staging_report,
 )
@@ -286,6 +287,65 @@ class StagingRepairInThePlanTests(unittest.TestCase):
 
         self.assertEqual(_repair_h3_staging(plans), 0)
         self.assertEqual([plan["_director_opening_blocking"] for plan in plans], openings)
+
+
+class PlanContractTests(unittest.TestCase):
+    """A plan that ignored the audio and the cast is refused before any GPU work.
+
+    Shaped after a real storyboard: every shot carried a "dialogue" section, one speaker,
+    and no spoken line, and the prompts described people the project had already cast
+    ("the teen boy in earthy brown", "the narrator man in dark grey") instead of
+    <Subject N> / <Picture N>.
+    """
+
+    def _bad(self):
+        return [
+            {
+                "planned_clip": {"dialogue_lines": ["a", "b"]},
+                "_director_subjects_on_screen": [{"name": "Anita"}],
+                "_director_speaker_registry": {"(S)": ""},
+                "video_prompt": (
+                    "detailed_description: (0-10s): The teen boy in earthy brown stands "
+                    "facing the giant man in bronze armor."
+                ),
+            },
+        ]
+
+    def test_a_silent_shot_with_speech_in_its_window_is_reported(self):
+        issues = _h3_plan_contract_issues(self._bad())
+
+        self.assertTrue(any("spoken line" in item for item in issues))
+
+    def test_a_shot_that_ignores_the_cast_is_reported(self):
+        issues = _h3_plan_contract_issues(self._bad())
+
+        self.assertTrue(any("<Subject N>" in item for item in issues))
+
+    def test_a_bare_speaker_label_is_reported(self):
+        issues = _h3_plan_contract_issues(self._bad())
+
+        self.assertTrue(any("names no participant" in item for item in issues))
+
+    def test_a_good_plan_raises_nothing(self):
+        plan = [
+            {
+                "planned_clip": {"dialogue_lines": ["a"]},
+                "_director_subjects_on_screen": [{"name": "Anita"}],
+                "_director_speaker_registry": {"(S1)": "Anita"},
+                "video_prompt": (
+                    "subject_definitions: <Subject 1> (S1) is Anita, using <Picture 1>. "
+                    "detailed_description: [Shot 1] <Subject 1> says: <d>Here it is.</d>"
+                ),
+            },
+            {
+                "planned_clip": {"dialogue_lines": []},
+                "_director_subjects_on_screen": [],
+                "_director_speaker_registry": {"(S1)": "Anita"},
+                "video_prompt": "detailed_description: wide shot of the valley, no speech.",
+            },
+        ]
+
+        self.assertEqual(_h3_plan_contract_issues(plan), [])
 
 
 if __name__ == "__main__":
