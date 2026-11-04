@@ -9621,39 +9621,17 @@ def plan_clip_prompts_and_images(
         "editor nor the video model can identify people by name. Instead, describe "
         "each person by their VISIBLE appearance: clothing, hair, position in frame, "
         "based on what you visually see in the attached reference image. For example, "
-        "write 'the woman in the white lab coat' instead of a character name.\n"
+        "write 'the woman in the white lab coat' instead of 'Dr Ava', or "
+        "'the man in the blue shirt' instead of 'Mr Johnson'.\n"
         "- Character names ARE only allowed in spoken dialogue in the video prompt.\n"
-        "- Describe people using what you SEE in the photo + Scene description."
+        "- Describe characters using what you SEE in the photo + the character descriptions."
     ) if has_image else (
         "- NEVER use character names in image OR video prompts. Instead, describe each "
-        "person by their visual appearance: clothing, hair color, position.\n"
+        "person by their visual appearance: clothing, hair color, position. "
+        "For example, 'the tall woman in the red dress' not 'Sarah'.\n"
         "- Character names ARE only allowed in spoken dialogue in the video prompt.\n"
-        "- ONLY use characters and clothing described in the Scene."
+        "- Describe characters using only the character descriptions provided."
     )
-
-    # Shared rules for all music video modes
-    shared_rules = (
-        "- Use the Scene Concept as your PRIMARY guide for locations, outfits, "
-        "props, and activities.\n"
-        "- LOCATIONS ARE BINDING: if the Scene Concept names a specific location "
-        "or setting, EVERY clip stays in that location unless the Scene Concept "
-        "itself calls for a move. Do NOT invent new locations for visual variety — "
-        "vary the camera angle, framing, distance, and lighting instead.\n"
-        "- Do NOT add subjects, creatures, or objects the Scene Concept and "
-        "reference photos don't contain. Any examples in these instructions "
-        "show FORMAT only — never copy their content into prompts.\n"
-        "- Use the lyrics to inspire mood and visual metaphors, NOT literal text.\n"
-        "- If a clip says 'Performer:', that person must appear.\n"
-        f"{char_rule}\n"
-        "- Do NOT put lyrics or spoken words in prompts.\n"
-        "- CRITICAL: Each image and video prompt is generated INDEPENDENTLY with "
-        "NO context from other clips. The image generator does NOT know who any "
-        "character is. Every prompt must be FULLY SELF-CONTAINED — "
-        "re-describe each character's clothing, hair, and appearance, plus the "
-        "setting, lighting, and atmosphere in EVERY prompt. Never assume the "
-        "generator 'remembers' anything from prior clips.\n"
-    )
-
     if prompt_type == "image":
         if has_image:
             system_prompt = (
@@ -9989,6 +9967,76 @@ def _build_short_film_clip_description(
     )
 
 
+def _short_film_cast_block(scene_description: str, characters: Optional[list] = None) -> tuple:
+    """The cast the brief already declares, with the wardrobe it already states.
+
+    This path told the model to NEVER use a character's name and to describe everyone by
+    invented clothing ("the man in the blue shirt"). Measured on a real project: the brief
+    named Anita, David and Goliath and gave each one a wardrobe read from their own
+    picture, and the prompts came back as "the teen boy in earthy brown", "the narrator man
+    in dark grey" and "the Philistine warrior in blue bronze" ? three people the project
+    had never designed, in a film that was supposed to be one woman narrating.
+
+    Returns ``(block, names)``; an empty block when the brief casts nobody.
+    """
+
+    import re
+
+    try:
+        from services.director.brief_assistant import _cast_rows
+    except Exception:  # noqa: BLE001
+        return "", []
+
+    rows = {}
+    try:
+        rows = _cast_rows(str(scene_description or ""))
+    except Exception:  # noqa: BLE001
+        rows = {}
+    for item in characters or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        desc = str(item.get("description") or "").strip()
+        if name and name not in rows:
+            rows[name] = desc
+
+    if not rows:
+        return "", []
+
+    pictures: dict = {}
+    for match in re.finditer(
+        r"<Picture\s*(\d+)>\s*([^\u2014\n(]+?)\s*(?:\(([^)]{1,12})\))?\s*(?:\u2014|$)",
+        str(scene_description or ""),
+    ):
+        pictures[match.group(2).strip().casefold()] = (
+            int(match.group(1)), (match.group(3) or "").strip()
+        )
+
+    lines = []
+    names = []
+    for label, body in rows.items():
+        name = re.sub(r"\s*\([^)]{1,12}\)\s*$", "", label).strip()
+        if not name:
+            continue
+        cue = label[len(name):].strip()
+        picture = pictures.get(name.casefold())
+        suffix = ""
+        if picture:
+            suffix = f" They are <Picture {picture[0]}>."
+            cue = cue or picture[1]
+        lines.append(f"- {name}{f' {cue}' if cue else ''}: {body}{suffix}".strip())
+        names.append(name)
+    if not lines:
+        return "", []
+    block = (
+        "CAST (this project's own people: use these names and the wardrobe written here, "
+        "never invent a face, a colour or a garment):\n"
+        + "\n".join(lines)
+        + "\n\n"
+    )
+    return block, names
+
+
 def plan_short_film_prompts(
     clips: list,
     scene_description: str,
@@ -10019,14 +10067,36 @@ def plan_short_film_prompts(
     speaker_names: dict = {}
     if speaker_mappings:
         for spk_id, info in speaker_mappings.items():
-            if info.get("name"):
+            if isinstance(info, dict) and info.get("name"):
                 speaker_names[spk_id] = info["name"]
+    if not speaker_names:
+        # The panel only sends a mapping once the person types a name into it, so a project
+        # whose SUBJECT LOCK already names its speaker arrived here with no names at all and
+        # the shot rows said "(S)". The lock is the authority; read it.
+        try:
+            from services.director.speaker_binding import cast_vocabulary
+
+            rows = [
+                {"speakerId": spk_id, "name": (info or {}).get("name", "")}
+                for spk_id, info in (speaker_mappings or {}).items()
+                if isinstance(info, dict) or info is None
+            ]
+            for label, name in cast_vocabulary(
+                rows or None, lyrics, brief=scene_description,
+            ).items():
+                if name and name != label and not name.startswith("("):
+                    speaker_names[label] = name
+        except Exception:  # noqa: BLE001 - names are an improvement, never a blocker
+            pass
 
     has_image = reference_image_path and os.path.isfile(reference_image_path)
 
     # ── Character context for system prompt ──────────────────────
+    cast_block, cast_names = _short_film_cast_block(scene_description, characters)
     char_context = ""
-    if characters:
+    if cast_block:
+        char_context = cast_block
+    elif characters:
         char_lines = []
         for c in characters:
             name = c.get("name", "")
@@ -10058,6 +10128,41 @@ def plan_short_film_prompts(
         "- Character names ARE only allowed in spoken dialogue in the video prompt.\n"
         "- Describe characters using only the character descriptions provided."
     )
+
+    if cast_names:
+        # A registered cast is not "a person the model cannot identify": the renderer
+        # binds each name to its reference picture, and every wardrobe fact is already in
+        # the brief. Inventing a colour here is what makes consecutive clips inconsistent.
+        char_rule = (
+            "- Write every person who appears with the NAME and the WARDROBE the CAST "
+            "block gives, spelled as it is written there.\n"
+            "- Never invent a person, a hair colour, a garment or an accessory that CAST "
+            "does not state, and never rename them: 'the teen boy', 'the narrator man' or "
+            "'the warrior in blue bronze' are people this project never designed.\n"
+            "- When CAST gives someone an identity picture, write them as "
+            "'<Picture N> Name' so the renderer binds them to that reference.\n"
+            "- Copy the same wardrobe into every prompt: a person who changes clothes "
+            "between shots reads as a different person."
+        )
+    elif has_image:
+        char_rule = (
+            "- NEVER use character names in image OR video prompts: neither the image "
+            "editor nor the video model can identify people by name. Instead, describe "
+            "each person by their VISIBLE appearance: clothing, hair, position in frame, "
+            "based on what you visually see in the attached reference image. For example, "
+            "write 'the woman in the white lab coat' instead of 'Dr Ava', or "
+            "'the man in the blue shirt' instead of 'Mr Johnson'.\n"
+            "- Character names ARE only allowed in spoken dialogue in the video prompt.\n"
+            "- Describe characters using what you SEE in the photo + the character descriptions."
+        )
+    else:
+        char_rule = (
+            "- NEVER use character names in image OR video prompts. Instead, describe each "
+            "person by their visual appearance: clothing, hair color, position. "
+            "For example, 'the tall woman in the red dress' not 'Sarah'.\n"
+            "- Character names ARE only allowed in spoken dialogue in the video prompt.\n"
+            "- Describe characters using only the character descriptions provided."
+        )
 
     if prompt_type == "image":
         if has_image:
@@ -10092,7 +10197,7 @@ def plan_short_film_prompts(
                 "- Do NOT start with 'Edit the provided image'.\n"
                 "- Do NOT use preservation meta-language ('preserve', 'maintain', 'keep unchanged').\n"
                 "- Do NOT describe actions or motion — that belongs in video prompts.\n"
-                "- Keep each prompt under 40 words.\n\n"
+                "- Keep each prompt under " + ("120" if cast_names else "40") + " words.\n\n"
                 "Format: numbered list. '1. prompt' then '2. prompt' etc. Output ONLY numbered prompts."
             )
         else:
@@ -10105,23 +10210,29 @@ def plan_short_film_prompts(
                 "- Match the mood and tone of the dialogue.\n"
                 "- Use cinematic composition — think about framing, depth, lighting.\n"
                 f"{char_rule}\n"
-                "- Keep each prompt under 25 words.\n\n"
+                "- Keep each prompt under " + ("90" if cast_names else "25") + " words.\n\n"
                 "Format: numbered list. '1. prompt' then '2. prompt' etc. Output ONLY numbered prompts."
             )
     elif prompt_type == "video":
+        who_line = (
+            "Describe WHO is on screen with the name and the wardrobe the CAST block "
+            "gives, and, when CAST gives them an identity picture, as '<Picture N> Name'. "
+            if cast_names else
+            "Describe WHO is on screen (by clothing and appearance, NOT by name). "
+        )
         system_prompt = (
             f"You write short video motion prompts for a short film.\n"
             f"{char_context}"
             "Each shot is a SINGLE CONTINUOUS TAKE — one unbroken camera move "
-            "with no cuts or edits. Describe WHO is on screen (by clothing and "
-            "appearance, NOT by name), WHAT they are doing "
+            "with no cuts or edits. "
+            + who_line +
+            "Describe WHAT they are doing "
             "(gestures, expressions, body language), the SETTING, and how the "
             "CAMERA moves during this one take.\n\n"
             "RULES:\n"
             "- NEVER say 'montage', 'quick cuts', 'cut to', 'series of shots', "
             "or 'multiple angles' — these are impossible in a single take.\n"
-            "- NEVER use character names — describe people by clothing/appearance only. "
-            "Character names ARE only allowed in spoken dialogue.\n"
+            f"{char_rule}\n"
             "- CRITICAL: Each video prompt is generated INDEPENDENTLY — the video "
             "model has NO memory of previous scenes and does NOT know who any character "
             "is. You MUST re-describe every character's clothing, hair, and appearance "
@@ -10132,7 +10243,7 @@ def plan_short_film_prompts(
             "For dramatic or action scenes, use expressive camera work "
             "(push in, dolly, tracking, pan, orbit).\n"
             "- Match the camera style to the emotional tone of the dialogue.\n"
-            "- Keep each prompt under 25 words.\n\n"
+            "- Keep each prompt under " + ("90" if cast_names else "25") + " words.\n\n"
             "Examples: 'The man in the dark suit slowly stands, camera pushes in on his face as he slams the table.' / "
             "'The blonde woman in the red blouse whispers across the table, camera drifts to a close-up of her trembling hands.' / "
             "'Medium shot, the woman in the gray sweater speaks calmly to camera, soft natural light, steady framing.'\n\n"

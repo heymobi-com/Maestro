@@ -8767,6 +8767,23 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
     )
     clip_plans = director.plan_to_clip_plans(rendered)
 
+    # Persist the plan the moment it exists, before any render or review step.
+    # Measured: a plan that was produced but never sent to render left no file at all, so
+    # the only evidence of why it described people the project never cast was the text the
+    # person pasted by hand. The llm_drafts saved with the state carry the exact prompt the
+    # planner was given, which is what answers that question.
+    try:
+        _update_pipeline(
+            pid,
+            clips=clip_plans,
+            production_plan=plan.to_dict(),
+            phase="planning",
+        )
+        _save_pipeline_state(pid)
+        print(f"[Pipeline {pid}] Plan saved before review; its planner prompt is in the state file.")
+    except Exception as exc:  # noqa: BLE001 - a failed save must not lose the plan
+        print(f"[Pipeline {pid}] Could not save the plan before review: {exc}")
+
     # Build planned_clips from shot data (for story mode which creates clips)
     if pipeline_type == "short_film_story":
         cumulative = 0.0
