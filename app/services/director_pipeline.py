@@ -9901,6 +9901,7 @@ def _report_h3_manifest_issues(
         *_h3_continuity_identity_risk(params or {}, clip_count),
         *_h3_prompt_dilution_report(clip_plans or [], pid=pid),
         *_h3_staging_report(clip_plans or [], pid=pid),
+        *_h3_cast_naming_report(clip_plans or [], pid=pid),
     ]
     if not issues:
         return []
@@ -10429,6 +10430,69 @@ def _repair_h3_staging(clip_plans: list[dict], *, pid: str = "") -> int:
             "presenter framing were given a different one."
         )
     return changed
+
+
+def _h3_cast_naming_report(clip_plans: list[dict], *, pid: str = "") -> list[str]:
+    """Shots that describe somebody the project never cast.
+
+    Measured on the person's own runs. Their good 36-clip plan names Anita in **36 of 36**
+    planner prompts and casts her as ``<Picture 1> Anita (S1)``. The failing plan they were
+    reviewing describes "the teen boy in earthy brown", "the narrator man in dark grey" and
+    "the Philistine warrior in blue bronze" — nobody from a brief that had three named
+    characters with wardrobe read from their pictures. That plan was going to render people
+    the project never designed, and the review screen said nothing.
+
+    Reported at plan time, because that is when the person is looking at it.
+    """
+
+    plans = [plan for plan in (clip_plans or []) if isinstance(plan, dict)]
+    if not plans:
+        return []
+    from services.director.scene_policy import narrator_from_context
+
+    names: list[str] = []
+
+    def _remember(value: str) -> None:
+        # "<Picture 1> Anita (S1) ? Woman, late twenties." names Anita and nothing more.
+        value = re.split(r"[—–:\-]|\(", " ".join(str(value or "").split()), maxsplit=1)[0]
+        value = " ".join(value.split()).strip(" .,;")
+        if len(value) > 40 or not value:
+            return
+        if value.casefold() not in {item.casefold() for item in names}:
+            names.append(value)
+
+    for plan in plans:
+        for subject in plan.get("_director_subjects_on_screen") or []:
+            if not isinstance(subject, dict):
+                continue
+            match = re.match(r"\s*<Picture \d+>\s*([^—\-:]+)", str(subject.get("visual_description") or ""))
+            if match:
+                _remember(match.group(1))
+            _remember(subject.get("name"))
+        _remember(narrator_from_context(str(plan.get("_director_project_context") or "")))
+    # A label is not a name.
+    names = [name for name in names if not re.fullmatch(r"\(?\s*S\s*\d*\s*\)?", name, re.I)]
+    if not names:
+        return []
+
+    def _named(text: str) -> bool:
+        return any(re.search(rf"\b{re.escape(name)}\b", text, re.I) for name in names)
+
+    unnamed = [
+        index + 1
+        for index, plan in enumerate(plans)
+        if str(plan.get("_director_h3_source_prompt") or plan.get("video_prompt") or "").strip()
+        and not _named(str(plan.get("_director_h3_source_prompt") or plan.get("video_prompt") or ""))
+    ]
+    if len(unnamed) < max(2, len(plans) // 2):
+        return []
+    return [
+        f"{len(unnamed)} of {len(plans)} shots describe nobody from the cast ("
+        + ", ".join(names[:4])
+        + f"); the planner wrote its own people instead"
+        + (f", starting at shot {unnamed[0]}" if unnamed else "")
+        + ". Plan again before rendering: those shots cannot match the pictures"
+    ]
 
 
 def _h3_plan_contract_issues(clip_plans: list[dict]) -> list[str]:

@@ -26,6 +26,7 @@ from services.director.h3_dialogue import project_subject_lock  # noqa: E402
 from services.director_pipeline import (  # noqa: E402
     _h3_shot_project_context,
     _h3_world_context,
+    _h3_cast_naming_report,
     _h3_plan_contract_issues,
     _repair_h3_staging,
     _h3_staging_report,
@@ -287,6 +288,48 @@ class StagingRepairInThePlanTests(unittest.TestCase):
 
         self.assertEqual(_repair_h3_staging(plans), 0)
         self.assertEqual([plan["_director_opening_blocking"] for plan in plans], openings)
+
+
+class CastNamingTests(unittest.TestCase):
+    """A plan that writes its own people instead of the cast is reported at plan time.
+
+    The person reviews the shots before rendering, which is exactly when this has to be
+    said: their good plan names Anita in 36 of 36 prompts; the failing one described
+    "the teen boy in earthy brown" and "the narrator man in dark grey".
+    """
+
+    CONTEXT = "Anita (a woman) is ON SCREEN in this shot, inside the scene."
+
+    def _plan(self, prompt):
+        return {
+            "_director_project_context": self.CONTEXT,
+            "_director_subjects_on_screen": [
+                {"visual_description": "<Picture 1> Anita (S1) \u2014 Woman, late twenties."},
+            ],
+            "_director_h3_source_prompt": prompt,
+        }
+
+    def test_a_plan_that_names_the_cast_is_silent(self):
+        plans = [self._plan("Anita walks among the soldiers, at their scale.") for _ in range(4)]
+
+        self.assertEqual(_h3_cast_naming_report(plans), [])
+
+    def test_a_plan_that_invents_its_people_is_reported(self):
+        plans = [
+            self._plan("The teen boy in earthy brown stands facing the giant man in bronze armor.")
+            for _ in range(4)
+        ]
+        findings = _h3_cast_naming_report(plans)
+
+        self.assertEqual(len(findings), 1)
+        self.assertIn("4 of 4", findings[0])
+        self.assertIn("Anita", findings[0])
+
+    def test_a_few_unnamed_shots_are_tolerated(self):
+        plans = [self._plan("Anita walks among the soldiers.") for _ in range(4)]
+        plans[0] = self._plan("A wide shot of the empty valley at dawn.")
+
+        self.assertEqual(_h3_cast_naming_report(plans), [])
 
 
 class PlanContractTests(unittest.TestCase):
