@@ -194,6 +194,7 @@ def create_router(*, generate=None) -> APIRouter:
 
         proposal = mechanical
         method = "normalized"
+        replaced: list[str] = []
         if body.get("use_llm", True) is not False and generate is not None:
             system, user = structure_prompt(
                 mechanical, kind=kind, diagnosis=before, clip_count=clip_count,
@@ -215,8 +216,23 @@ def create_router(*, generate=None) -> APIRouter:
                 # A rewrite that loses the cast or the story is worse than none: keep
                 # the mechanical result unless the model actually produced a brief.
                 if len(candidate) >= 200 and ":" in candidate:
-                    proposal = ground(candidate)
+                    # The model may repair the machine-readable half -- the lock, the rows
+                    # that bind a name to a voice and to its picture -- and nothing else.
+                    # It used to replace the whole brief, so pressing Structure handed back
+                    # a different film and the plan rendered that one instead.
+                    from .brief_assistant import merge_structured
+
+                    # Compared against the person's own text, not against the mechanical
+                    # draft: a freeform brief has no sections, so the model's structure is
+                    # the structure, while a written DESCRIPTION is theirs to keep.
+                    merged, replaced = merge_structured(brief, ground(candidate))
+                    proposal = ground(merged) if merged.strip() else mechanical
                     method = "llm"
+                    if replaced:
+                        print(
+                            "[Director] Structure kept your own "
+                            f"{', '.join(sorted(replaced))}: the proposal rewrote it."
+                        )
             except Exception as exc:  # never block the person on the model
                 print(f"[Director] Brief structuring fell back to the mechanical pass: {exc}")
 
@@ -239,6 +255,7 @@ def create_router(*, generate=None) -> APIRouter:
                 - {finding["code"] for finding in after["findings"]}
             ),
             "remaining": [finding["code"] for finding in after["findings"]],
+            "kept": sorted(replaced) if method == "llm" else [],
         }
 
     return router

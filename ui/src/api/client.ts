@@ -1034,6 +1034,8 @@ export interface BriefStructureResult {
   after: BriefReport
   resolved: string[]
   remaining: string[]
+  /** Sections the model tried to rewrite and the person's own text was kept instead. */
+  kept?: string[]
 }
 
 /** Check a freeform brief without loading a model. */

@@ -616,6 +616,116 @@ def _section_order(brief: str) -> list[tuple[str, str]]:
     return order
 
 
+#: Sections whose prose is the person's film. A structuring pass may not rewrite them: it
+#: exists to make the brief *parse*, not to have a better idea. Measured on a real project,
+#: pressing Structure replaced the writer's description with the model's own version, and
+#: the plan then rendered the model's film -- forty clips of the same scene with different
+#: dialogue.
+_PERSON_SECTIONS = (
+    "DESCRIPTION", "STORY", "SYNOPSIS", "PLOT", "NEGATIVE", "CAMERA", "CINEMATOGRAPHY",
+    "AMBIENCE", "STYLE",
+)
+
+#: Sections that are machine addresses rather than prose: the lock, the rows that bind a
+#: name to a voice and a picture. Only these may be rewritten.
+_STRUCTURE_SECTIONS = (
+    "SUBJECT LOCK", "CHARACTERS", "CHARACTER", "CAST", "PRESENCES", "PRESENCE",
+    "REFERENCES", "VOICES", "AUDIO",
+)
+
+#: Below this share of the writer's own words, a rewritten section is not the same film.
+_STORY_KEPT_MIN = 0.55
+
+
+def _story_words(text: str) -> set:
+    return {
+        word for word in re.findall(r"[a-zà-ɏ']{4,}", str(text or "").casefold())
+        if word not in {
+            "that", "this", "with", "from", "into", "their", "there", "which", "when",
+            "then", "they", "them", "have", "will", "would", "about", "while", "through",
+            "every", "each", "also", "been", "being", "some", "such", "than", "only",
+        }
+    }
+
+
+def keeps_the_story(original: str, rewritten: str) -> bool:
+    """Whether a rewrite still says the person's film rather than a different one."""
+
+    before = _story_words(original)
+    if not before:
+        return True
+    return len(before & _story_words(rewritten)) / len(before) >= _STORY_KEPT_MIN
+
+
+def _merge_rows(person_body: str, model_body: str) -> str:
+    """The person's rows, plus any row the model added that they had not written."""
+
+    rows = _section_rows(person_body) or []
+    if not rows:
+        return person_body
+    kept = list(rows)
+    from .cast_vision import same_name
+
+    for label, body in _section_rows(model_body) or []:
+        if any(same_name(label, known) for known, _ in kept):
+            continue
+        kept.append((label, body))
+    return "\n".join(f"{label}: {body}" for label, body in kept)
+
+
+def _lock_is_about_the_same_people(person_body: str, model_body: str) -> bool:
+    """Whether the model's lock names the participants the person's lock names."""
+
+    from .subject_lock import parse
+
+    person = {name.casefold() for name in parse(person_body).values()}
+    model = {name.casefold() for name in parse(model_body).values()}
+    if not person:
+        return bool(model)
+    return model == person
+
+
+def merge_structured(person_brief: str, proposal: str) -> tuple:
+    """Keep the person's film; take only the machine-readable structure from a rewrite.
+
+    Returns ``(brief, replaced)`` where ``replaced`` names the sections the model tried to
+    rewrite and was not allowed to, so the panel can say so instead of quietly handing back
+    a different film.
+    """
+
+    person = dict(_section_order(person_brief))
+    model = dict(_section_order(proposal))
+    merged: dict = {}
+    replaced: list = []
+
+    for name, body in person.items():
+        if name in _PERSON_SECTIONS:
+            merged[name] = body
+            if name in model and model[name].strip() and not keeps_the_story(body, model[name]):
+                replaced.append(name)
+        elif name == "SUBJECT LOCK":
+            candidate = model.get(name, "")
+            merged[name] = (
+                candidate if candidate.strip() and _lock_is_about_the_same_people(body, candidate)
+                else body
+            )
+            if candidate.strip() and merged[name] is body and candidate.strip() != body.strip():
+                replaced.append(name)
+        elif name.split()[0] in {"CHARACTERS", "CHARACTER", "CAST", "PRESENCES", "PRESENCE"}:
+            merged[name] = _merge_rows(body, model.get(name, ""))
+        else:
+            merged[name] = model.get(name) or body
+
+    for name, body in model.items():
+        if name not in merged and body.strip():
+            merged[name] = body
+
+    rendered = "\n\n".join(
+        f"{name}:\n{body.strip()}" if body.strip() else f"{name}:" for name, body in merged.items()
+    )
+    return rendered + "\n", replaced
+
+
 def _acts_in_story(name: str, story: str, window: int = 48) -> bool:
     """Whether the story has ``name`` itself doing something visible.
 
@@ -670,6 +780,17 @@ def _description_prose(brief: str) -> str:
     return rest[: stop.start()] if stop else rest
 
 
+def _stage_list_block(brief: str) -> str:
+    """The body of whichever section actually numbers the stages, if one does."""
+
+    for _name, body in _section_order(brief):
+        if re.search(
+            r"(?i)\b(?:stage|beat|shot|scene)\s+\d+\s*(?:\([^)]{0,60}\))?\s*:", body
+        ):
+            return body
+    return ""
+
+
 def _stage_texts(brief: str) -> list[tuple[int, str]]:
     """``[(1, "kitchen, dawn: ..."), ...]`` — each stage and its own prose."""
 
@@ -679,6 +800,15 @@ def _stage_texts(brief: str) -> list[tuple[int, str]]:
     matches = list(re.finditer(
         r"(?i)\b(?:stage|beat|shot|scene)\s+(\d+)\s*(?:\(([^)]{0,60})\))?\s*:", prose
     ))
+    if not matches:
+        # A stage list can sit under another heading. Measured on a real brief, the person
+        # numbered "Stage 1 … Stage 5" inside CAMERA and every reader, looking only at
+        # DESCRIPTION, silently replaced their five intended shots with five sentences.
+        numbered = str(_stage_list_block(brief) or "")
+        prose = numbered or prose
+        matches = list(re.finditer(
+            r"(?i)\b(?:stage|beat|shot|scene)\s+(\d+)\s*(?:\(([^)]{0,60})\))?\s*:", prose
+        ))
     if matches:
         stages: list[tuple[int, str]] = []
         for position, match in enumerate(matches):

@@ -40,6 +40,7 @@ export function DirectorBriefAssistant({
   const [proposal, setProposal] = useState<string | null>(null)
   const [method, setMethod] = useState<'llm' | 'normalized' | null>(null)
   const [resolved, setResolved] = useState<string[]>([])
+  const [kept, setKept] = useState<string[]>([])
   const [looks, setLooks] = useState<{ name: string; look: string }[]>([])
   const [roster, setRoster] = useState<BriefReferenceEntry[]>([])
   const [vision, setVision] = useState<BriefVisionStatus | null>(null)
@@ -75,6 +76,7 @@ export function DirectorBriefAssistant({
       setReport(result.after)
       setMethod(result.method)
       setResolved(result.resolved)
+      setKept(result.kept || [])
       setLooks(result.looks || [])
       setRoster(result.roster || [])
       setVision(result.vision || null)
@@ -177,8 +179,9 @@ export function DirectorBriefAssistant({
         <div className="space-y-1" data-testid="brief-assistant-proposal">
           <div className="flex items-center justify-between gap-2">
             <span className="text-[10px] text-text-muted">
-              Proposal ({method === 'llm' ? 'reorganised by the local model' : 'repaired mechanically'})
+              Proposal ({method === 'llm' ? 'structure repaired by the local model' : 'repaired mechanically'})
               {resolved.length > 0 && ` · fixes ${resolved.join(', ')}`}
+              {kept.length > 0 && ` · kept your own ${kept.join(', ')}`}
             </span>
             <div className="flex items-center gap-1">
               <button

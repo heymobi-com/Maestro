@@ -33,6 +33,8 @@ if str(APP) not in sys.path:
 
 from services.director.brief_assistant import (  # noqa: E402
     _cast_rows,
+    keeps_the_story,
+    merge_structured,
     _raw_lock_cues,
     _section_rows,
     diagnose_brief,
@@ -230,6 +232,92 @@ class SpeakerVocabularyTests(unittest.TestCase):
 
         self.assertNotIn("(S2)", vocabulary)
         self.assertNotIn("(S3)", vocabulary)
+
+
+class StructureKeepsTheStoryTests(unittest.TestCase):
+    """Pressing Structure may repair the machine half; it may not replace the film."""
+
+    PERSON = (
+        "SUBJECT LOCK:\n<Subject 1> is ALWAYS Anita.\n\n"
+        "CHARACTERS:\nAnita: young woman, cream button-up shirt, navy pencil skirt.\n"
+        "David: biblical figure.\n\n"
+        "DESCRIPTION:\n"
+        "Anita walks the audience through the ancient landscape, explaining the setting "
+        "while the armies wait. David prepares his sling with grey stones; Anita walks "
+        "beside him.\n\n"
+        "NEGATIVE:\nNo modern clothing.\n"
+    )
+
+    MODEL = (
+        "SUBJECT LOCK:\n<Subject 1> (S1) is ALWAYS Anita.\n\n"
+        "CHARACTERS:\nAnita (S1): young woman, cream button-up shirt, navy pencil skirt, "
+        "black pumps.\nDavid: biblical figure.\nGoliath: giant with bronze armour.\n\n"
+        "DESCRIPTION:\n"
+        "An epic montage of biblical battles unfolds in slow motion, with soldiers "
+        "clashing on a dusty plain while a voice describes the scale of the conflict.\n\n"
+        "NEGATIVE:\nNo modern clothing.\n"
+    )
+
+    def test_the_invented_film_is_discarded(self):
+        merged, replaced = merge_structured(self.PERSON, self.MODEL)
+
+        self.assertIn("Anita walks the audience", merged)
+        self.assertNotIn("montage", merged)
+        self.assertIn("DESCRIPTION", replaced)
+
+    def test_the_useful_half_of_the_answer_is_kept(self):
+        merged, _replaced = merge_structured(self.PERSON, self.MODEL)
+
+        self.assertIn("<Subject 1> (S1) is ALWAYS Anita.", merged)
+        self.assertIn("Goliath", merged)
+
+    def test_the_persons_own_row_is_not_rewritten(self):
+        merged, _replaced = merge_structured(self.PERSON, self.MODEL)
+
+        self.assertIn("Anita: young woman, cream button-up shirt, navy pencil skirt.", merged)
+        self.assertNotIn("black pumps", merged)
+
+    def test_a_faithful_rewrite_is_not_reported_as_a_replacement(self):
+        # The person's own words still win -- the panel only has to explain itself when
+        # the model wrote a different film.
+        rewrite = self.PERSON.replace(
+            "David prepares his sling with grey stones; Anita walks beside him.",
+            "David prepares his sling with grey stones; Anita walks beside him, showing "
+            "how he carries no armour or sword.",
+        )
+        merged, replaced = merge_structured(self.PERSON, rewrite)
+
+        self.assertEqual(replaced, [])
+        self.assertIn("Anita walks the audience", merged)
+
+    def test_a_lock_about_other_people_is_refused(self):
+        model = self.MODEL.replace(
+            "<Subject 1> (S1) is ALWAYS Anita.", "<Subject 1> (S1) is ALWAYS Goliath.",
+        )
+        merged, replaced = merge_structured(self.PERSON, model)
+
+        self.assertIn("<Subject 1> is ALWAYS Anita.", merged)
+        self.assertIn("SUBJECT LOCK", replaced)
+
+
+class StageListTests(unittest.TestCase):
+    def test_a_stage_list_under_another_heading_is_still_read(self):
+        from services.director.brief_assistant import _stage_texts
+
+        brief = (
+            "SUBJECT LOCK:\n<Subject 1> (S1) is ALWAYS Anita.\n\n"
+            "CAMERA:\nPhotorealistic palette. "
+            "Stage 1: Locked-off wide shot of the valley; Anita explains the scale. "
+            "Stage 2: Slow push-in on David as he prepares his sling.\n\n"
+            "DESCRIPTION:\n"
+            "Anita walks the audience through the ancient landscape. David prepares his "
+            "sling. Anita stands near Goliath, contrasting his size with David's.\n"
+        )
+        stages = _stage_texts(brief)
+
+        self.assertEqual([number for number, _body in stages], [1, 2])
+        self.assertIn("wide shot of the valley", stages[0][1])
+        self.assertNotIn("contrasting his size", stages[1][1])
 
 
 def _report(brief: str) -> dict:

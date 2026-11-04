@@ -58,10 +58,36 @@ Two passes, and the deterministic one is not optional:
    numbering restored from the description's own sentences (a fragment like "One night in
    Valdecuna." joins the beat that follows), blank lines, and `strip_template_placeholders`
    removing any line the assistant's own instructions leaked into the text.
-2. The LLM pass reorganises and fills the gaps the diagnosis named. It is told, in the
-   prompt, that every name, image, action and idea is the person's, that a stage is one
-   place and one moment, and that it may never invent a character or an event. Its answer
-   goes through `strip_template_placeholders` too, so a template line cannot come back.
+2. The LLM pass fills the gaps the diagnosis named ? the lock, the rows that bind a name
+   to a voice and to its picture. It is told, in the prompt, that every name, image,
+   action and idea is the person's, and that a stage is one place and one moment. Its
+   answer goes through `strip_template_placeholders` too, so a template line cannot come
+   back.
+
+### The model may not write your film
+
+Being told is not enough. Measured on a real project, pressing **Structure** replaced the
+writer's description with the model's own version, and the plan then rendered *that* film ?
+which is why a brief could be correct and the clips still be a long montage of the same
+scene with different dialogue. Its answer used to replace the brief wholesale, gated only
+by "longer than 200 characters and contains a colon".
+
+`merge_structured(brief, proposal)` now decides section by section:
+
+| section | who wins |
+| --- | --- |
+| `DESCRIPTION`, `STORY`, `PLOT`, `NEGATIVE`, `CAMERA`, `AMBIENCE`, `STYLE` | **the person, always.** `keeps_the_story` measures the rewrite against the writer's own words; if the proposal says a different film, it is discarded and named in the panel (`? kept your own DESCRIPTION`) |
+| `SUBJECT LOCK` | the model, but only if it names exactly the participants the writer's lock names ? that is how a missing `(S1)` gets added without renaming anybody |
+| `CHARACTERS` / `PRESENCES` | the writer's rows win; a row the model adds that was not there is appended |
+| everything else | the model |
+
+A freeform brief has no sections at all, so there the model still supplies the whole
+structure ? that is the case Structure exists for. A written `DESCRIPTION` is not a draft.
+
+One more reader was looking in the wrong place: `_stage_texts` only searched `DESCRIPTION`
+for `Stage N`, so a brief whose numbered stages sat under `CAMERA` had its five intended
+shots silently replaced by five sentences. The stage list is now found in whichever section
+actually numbers it.
 
 The result is shown **in full** with Apply / Discard; nothing replaces your text until you
 press Apply. The response also says which faults were resolved and which remain.
@@ -524,7 +550,7 @@ detection: a brief that only *shows* the narrator doing things is recognised, a 
 character walking is not a presenter, and off-camera wording is repaired for a presenter but
 left alone for a real voiceover.
 
-`tests/test_director_subject_lock.py` (22) pins the one lock reader and everything it
+`tests/test_director_subject_lock.py` (28) pins the one lock reader and everything it
 feeds: the decorated lock parses to `{1: Anita, 2: David, 3: Goliath}` with its cues, the
 compiler reads the same map, a diarizer id is still reported as a wrong cue while a
 `(Picture N)` never is, `normalize_speaker_cues` repairs the id and leaves the picture
@@ -533,9 +559,12 @@ own row and is never invented when the row says nothing, every row of a one-line
 read while a sentence is not a row, a presence row and an object being presented are not
 "undescribed characters" but a person the story acts with still is, the brief raises no
 errors, and the speaker vocabulary names `(S1)` from the lock without promoting `(S2)` or
-`(S3)` into speakers.
+`(S3)` into speakers. It also pins `merge_structured`: an invented film is discarded and
+named, a useful lock fix and a missing row are kept, the writer's own cast row is never
+rewritten, and a faithful rewrite is accepted without being reported; plus a stage list
+written under `CAMERA` still being read.
 
-`tests/test_director_brief_api.py` (10) drives the routes over ASGI: a prose brief is
+`tests/test_director_brief_api.py` (13) drives the routes over ASGI: a prose brief is
 reported, the route works with no model, the mechanical pass still fixes the shape, a
 model answer resolves the fault, a model answer that leaks the template is cleaned before
 it reaches the brief, a model that answers prose does not replace the brief, a model that

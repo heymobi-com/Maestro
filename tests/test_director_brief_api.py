@@ -165,6 +165,63 @@ class StructureRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("template-placeholder", result["remaining"])
 
 
+SECTIONED = (
+    "SUBJECT LOCK:\n<Subject 1> is ALWAYS Abuela Rosa.\n\n"
+    "CHARACTERS:\nAbuela Rosa: old woman, black headscarf.\n\n"
+    "DESCRIPTION:\n"
+    "Stage 1 (kitchen): Abuela Rosa waits at the wooden table and lifts the cup.\n"
+    "Stage 2 (corridor): the tall figure in the shroud enters behind her.\n"
+    "Stage 3 (church): Abuela Rosa kneels in the church as the bell rings.\n\n"
+    "NEGATIVE:\nNo gore, no extra characters.\n"
+)
+
+REWRITTEN_FILM = (
+    "SUBJECT LOCK:\n<Subject 1> (S1) is ALWAYS Abuela Rosa.\n\n"
+    "CHARACTERS:\nAbuela Rosa (S1): old woman, black headscarf, grey skirt.\n"
+    "Don Aurelio: man, 60, worn alb.\n\n"
+    "DESCRIPTION:\n"
+    "An epic montage of biblical battles unfolds in slow motion, with armies clashing "
+    "on a dusty plain while a narrator describes the scale of the conflict.\n\n"
+    "NEGATIVE:\nNo gore, no extra characters.\n"
+)
+
+
+class StructureKeepsTheStoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_rewritten_description_does_not_replace_the_persons_film(self):
+        async with _client(generate=lambda *_: REWRITTEN_FILM) as client:
+            response = await client.post(
+                "/api/v1/director/brief/structure",
+                json=dict(REVIEW_BODY, brief=SECTIONED),
+            )
+
+        result = response.json()
+        self.assertIn("Abuela Rosa waits at the wooden table", result["brief"])
+        self.assertNotIn("biblical battles", result["brief"])
+        self.assertIn("DESCRIPTION", result["kept"])
+
+    async def test_the_model_may_still_fix_the_lock_and_add_a_missing_row(self):
+        async with _client(generate=lambda *_: REWRITTEN_FILM) as client:
+            response = await client.post(
+                "/api/v1/director/brief/structure",
+                json=dict(REVIEW_BODY, brief=SECTIONED),
+            )
+
+        brief = response.json()["brief"]
+        self.assertIn("<Subject 1> (S1) is ALWAYS Abuela Rosa.", brief)
+        self.assertIn("Don Aurelio", brief)
+        self.assertIn("Abuela Rosa: old woman, black headscarf.", brief)
+
+    async def test_a_freeform_brief_lets_the_model_supply_the_structure(self):
+        async with _client(generate=lambda *_: REWRITTEN_FILM) as client:
+            response = await client.post(
+                "/api/v1/director/brief/structure", json=REVIEW_BODY,
+            )
+
+        result = response.json()
+        self.assertEqual(result["method"], "llm")
+        self.assertEqual(result["kept"], [])
+
+
 class CodeFenceTests(unittest.TestCase):
     def test_a_fenced_brief_is_unwrapped(self):
         text = "Here you go:\n```text\nSUBJECT LOCK:\n<Subject 1> is ALWAYS Rosa.\n```\n"
