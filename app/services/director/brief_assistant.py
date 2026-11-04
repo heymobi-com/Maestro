@@ -98,17 +98,37 @@ _PLACEHOLDER_VALUE_RE = re.compile(
 _INSTRUCTION_HEADING_RE = re.compile(r"\s*\((?:only )?what (?:this workflow|the workflow)[^)]*\)")
 
 # The lock with its cue kept raw, so a wrong cue can be named in a finding rather than
-# silently dropped. Mirrors `h3_dialogue._SUBJECT_LOCK_RE`.
+# silently dropped. Mirrors `h3_dialogue._SUBJECT_LOCK_RE`: any number of parentheticals
+# may sit between the number and "is ALWAYS", because a model decorates the line.
+# Measured: "<Subject 1> (S1)(Picture 1) is ALWAYS Anita." used to match no lock at all.
 _SUBJECT_LOCK_RAW_RE = re.compile(
-    r"<Subject\s*(\d+)>\s*(?:\(([^)\n]{1,24})\)\s*)?(?:es\s+SIEMPRE|is\s+ALWAYS)",
+    r"<Subject\s*(\d+)>\s*((?:\([^)\n]{1,40}\)\s*)*)(?:es\s+SIEMPRE|is\s+ALWAYS)",
     re.IGNORECASE,
 )
+
+_PARENTHETICAL_RE = re.compile(r"\(([^)\n]{1,40})\)")
+
+# A parenthetical that is trying to be a voice: the canonical "(S1)", the diarizer's
+# "(SPEAKER_00)", or a bare "(S)". Anything else -- "(Picture 1)", "(ref 2)" -- is
+# decoration and must not be reported as a wrong cue.
+_SPEAKERISH_RE = re.compile(r"^\s*(?:S\s*\d*|SPEAKER[_\s]*\d+)\s*$", re.IGNORECASE)
+
+
+def _raw_lock_cues(text: str) -> set[str]:
+    """The speaker-ish labels the lock states, in whatever spelling."""
+
+    cues: set[str] = set()
+    for match in _SUBJECT_LOCK_RAW_RE.finditer(str(text or "")):
+        for inner in _PARENTHETICAL_RE.findall(match.group(2) or ""):
+            if _SPEAKERISH_RE.match(inner):
+                cues.add(inner.strip())
+    return cues
 
 
 def _is_canonical_cue(cue: str) -> bool:
     """Whether a cue is in the ``S1`` form the compiler reads."""
 
-    return bool(re.fullmatch(r"\(?\s*S\s*\d+\s*\)?", str(cue or "").strip(), re.IGNORECASE))
+    return bool(re.fullmatch(r"S\s*[1-9]\d*", str(cue or "").strip(), re.IGNORECASE))
 
 # A stage is concrete when somebody does something in it. A beat that only describes
 # the format -- "epic scenes illustrate what is being narrated" -- leaves the planner
@@ -204,7 +224,12 @@ def normalize_speaker_cues(
     def replace(match: re.Match) -> str:
         cue = match.group(1).strip()
         if _is_canonical_cue(cue):
-            return f"({cue if cue.startswith('S') else 'S' + cue.lstrip('Ss').strip('()')})"
+            return f"({cue})"
+        # "(Picture 1) is ALWAYS Anita." also ends in a parenthetical before "is ALWAYS".
+        # Rewriting it turned a picture reference into a speaker cue — and then the
+        # picture the narrator was supposed to come from was gone.
+        if not _SPEAKERISH_RE.match(cue):
+            return match.group(0)
         number = re.search(r"(\d+)", cue)
         if number:
             index = int(number.group(1))
@@ -214,7 +239,7 @@ def normalize_speaker_cues(
                 return f"({labels[0]})"
         return f"({fallback})"
 
-    return re.sub(r"\(\s*([^()\n]{1,24})\s*\)(?=\s*(?:is\s+ALWAYS|es\s+SIEMPRE))", replace, brief, flags=re.I)
+    return re.sub(r"\(\s*([^()\n]{1,40})\s*\)(?=\s*(?:is\s+ALWAYS|es\s+SIEMPRE))", replace, brief, flags=re.I)
 
 
 # Capitalized words that open a sentence or describe the film rather than name a person.
@@ -390,6 +415,51 @@ def _sections(brief: str) -> dict[str, str]:
     return found
 
 
+#: A cast row inside a section body: ``Name (S1):`` or ``The Israelite Soldiers:``.
+#: Rows are read from the body rather than line by line because a brief arrives as one
+#: long line (measured: 5,391 characters, zero newlines) and then only the first row of
+#: CHARACTERS was ever seen — David and Goliath were dropped from the cast, and the model
+#: had no appearance for either of them.
+_CAST_ROW_SPLIT_RE = re.compile(
+    r"(?:\A|\n|(?<=[.;])\s)\s*"
+    r"([A-Z][A-Za-z\u00c0-\u024f\u00c1\u00c9\u00cd\u00d3\u00da\u00dc\u00d1"
+    r"0-9 .'\-()]{0,48}?)\s*:\s*"
+)
+
+#: Words that may sit inside a name without being capitalised.
+_NAME_CONNECTORS = {"of", "the", "de", "del", "of", "and", "la", "las", "los", "el", "du"}
+
+
+def _looks_like_a_row_label(label: str) -> bool:
+    words = label.split()
+    if not words or len(words) > 6:
+        return False
+    if not any(len(word) > 1 and word[0].isalpha() for word in words):
+        return False
+    return all(
+        word[0].isupper()
+        or word.casefold() in _NAME_CONNECTORS
+        or (word.startswith("(") and word.endswith(")"))
+        for word in words
+    )
+
+
+def _section_rows(body: str) -> list[tuple[str, str]]:
+    """``[(name, description), ...]`` for the rows a section body writes inline."""
+
+    text = str(body or "")
+    matches = [
+        match for match in _CAST_ROW_SPLIT_RE.finditer(text)
+        if _looks_like_a_row_label(" ".join(match.group(1).split()))
+    ]
+    rows: list[tuple[str, str]] = []
+    for position, match in enumerate(matches):
+        end = matches[position + 1].start() if position + 1 < len(matches) else len(text)
+        label = " ".join(match.group(1).split())
+        rows.append((label, " ".join(text[match.end():end].split())))
+    return rows
+
+
 def _cast_rows(brief: str) -> dict[str, str]:
     """``{"Abuela Rosa": "<its description>", ...}`` from CHARACTERS / PRESENCES."""
 
@@ -399,12 +469,8 @@ def _cast_rows(brief: str) -> dict[str, str]:
         for section_name, text in sections.items():
             if not section_name.startswith(name.split()[0]):
                 continue
-            for line in text.splitlines():
-                match = re.match(r"^\s*(?:[-*]\s*)?S?\d?\s*[\)\].]?\s*([^:\n]{2,50}?)\s*:\s*(.+)$", line)
-                if not match:
-                    continue
-                label = " ".join(match.group(1).split())
-                rows.setdefault(label, " ".join(match.group(2).split()))
+            for label, body in _section_rows(text):
+                rows.setdefault(label, body)
     return rows
 
 
@@ -550,6 +616,23 @@ def _section_order(brief: str) -> list[tuple[str, str]]:
     return order
 
 
+def _acts_in_story(name: str, story: str, window: int = 48) -> bool:
+    """Whether the story has ``name`` itself doing something visible.
+
+    The clause the name opens is what counts: "King Saul's Tent is shown: inside ... King
+    Saul sits" has "sits" nearby, but it belongs to King Saul, and the tent is an object
+    the film presents.
+    """
+
+    from .scene_policy import EVENT_ACTION_RE
+
+    for match in re.finditer(rf"\b{re.escape(name)}\b", story):
+        tail = re.split(r"[.;:,]", story[match.end():match.end() + window], maxsplit=1)[0]
+        if EVENT_ACTION_RE.search(tail):
+            return True
+    return False
+
+
 def _name_words(name: str) -> list[str]:
     return [
         word.casefold()
@@ -675,11 +758,7 @@ def diagnose_brief(
     # 1b. The lock names the participant; the audio has a voice. Nothing tied the two
     # together, so a plan described the narrator with no (S1) and the compiler had to
     # infer the speaker from row order.
-    raw_cues = {
-        match.group(2)
-        for match in _SUBJECT_LOCK_RAW_RE.finditer(text)
-        if match.group(2)
-    }
+    raw_cues = _raw_lock_cues(text)
     wrong_cue = [cue for cue in raw_cues if not _is_canonical_cue(cue)]
     if lock and has_audio and wrong_cue:
         add("lock-cue-not-canonical", "error",
@@ -760,6 +839,12 @@ def diagnose_brief(
     if stages:
         from .cast_vision import same_name
 
+        # A PRESENCES row is a cast member too, and only CHARACTERS rows were compared.
+        # Measured on the David-y-Goliat brief, whose lock names "the Israelite Soldiers":
+        # "Israelite" was then reported as a character the story invents an appearance
+        # for, when the row describing those soldiers sat in the brief all along.
+        listed_words = {word for name in cast_rows for word in _name_words(name)}
+
         story = " ".join(body for _, body in stages)
         for match in re.finditer(
             r"\b([A-ZÁÉÍÓÚÜÑ][a-záéíóúüñ]{2,}(?:\s+[A-ZÁÉÍÓÚÜÑ][a-záéíóúüñ]{2,})?)", story
@@ -767,6 +852,8 @@ def diagnose_brief(
             candidate = match.group(1)
             lowered = candidate.casefold()
             if any(same_name(candidate, name) for name in cast_rows):
+                continue
+            if lowered.split()[0] in listed_words:
                 continue
             # A place ("Kitchen:") and a sentence opener are not cast.
             if lowered.split()[0] in _PLACE_WORDS:
@@ -787,8 +874,15 @@ def diagnose_brief(
             # A name used once is usually the town or the night; a person the story
             # acts with recurs. A two-word name is specific enough to flag either way.
             appearances = len(re.findall(rf"(?i)\b{re.escape(candidate)}\b", story))
-            if appearances < 2 and len(candidate.split()) == 1:
-                continue
+            if len(candidate.split()) == 1:
+                if appearances < 2:
+                    continue
+                # A single word must also be doing something: "King Saul's Tent is
+                # shown:" made "Tent" an undescribed character on a real brief, and a
+                # warning about a person who does not exist costs more trust than one
+                # that is missed.
+                if not _acts_in_story(candidate, story):
+                    continue
             add("undescribed-character", "warning",
                 f"'{candidate}' appears in the story but has no entry in CHARACTERS, so the "
                 "model invents an appearance for it.",

@@ -385,12 +385,21 @@ def bind_dialogue_speakers(
 def cast_vocabulary(
     speaker_mappings: Iterable[Any] | None,
     lyrics: Iterable[Any] | None = None,
+    *,
+    brief: str = "",
 ) -> dict[str, str]:
     """Return ``{stable_label: display_name}`` for this project.
 
     The user-authored mapping is authoritative. Any diarized speaker without a
     mapping entry is still listed, so the planner always has a complete and
     closed set of labels instead of inventing its own.
+
+    ``brief`` supplies the participant each label belongs to when the mapping does not.
+    Measured on a real project, the mapping was ``[{"speakerId": "(S1)", "name": ""}]``, so
+    the cast block told the planner the only speaker was literally ``(S1)`` — no name, no
+    gender — while the brief's SUBJECT LOCK said ``<Subject 1> (S1) is ALWAYS Anita``. The
+    planner then wrote a nameless ``(S)`` and described the narrator as male. The lock is the
+    authority the brief already states; it fills the empty name here.
     """
 
     vocabulary: dict[str, str] = {}
@@ -406,6 +415,22 @@ def cast_vocabulary(
         vocabulary[label] = name or label
     for label in speaker_label_order(lyrics).values():
         vocabulary.setdefault(label, label)
+    if brief:
+        try:
+            from services.director.h3_dialogue import project_subject_lock
+
+            lock = project_subject_lock(brief)
+        except Exception:  # noqa: BLE001 - naming is an improvement, never a blocker
+            lock = {}
+        # Only a label the audio actually uses gets a name: the lock also numbers the people
+        # who never speak, and listing them here would declare a closed cast of three voices
+        # where the project has one.
+        for subject, name in sorted(lock.items()):
+            label = f"(S{int(subject)})"
+            if not name or label not in vocabulary:
+                continue
+            if vocabulary[label] == label:
+                vocabulary[label] = name
     return vocabulary
 
 

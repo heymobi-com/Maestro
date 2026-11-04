@@ -5644,26 +5644,18 @@ def _reference_relationships(
 # ``<Valeria>``, ``"Valeria"`` -- so the decoration is accepted and dropped.
 # Without this the lock parsed to nothing and every identity bound only by a
 # reference picture lost its name.
-_SUBJECT_LOCK_RE = re.compile(
-    r"<Subject\s*(\d+)>\s*(?:\(([^)\n]{1,24})\)\s*)?"
-    r"(?:es\s+SIEMPRE|is\s+ALWAYS)\s+"
-    r"[<\"'“‘*]?"
-    # "la Figura del Purgatorio" names the Figure, not "la": the article is not part
-    # of the participant, and a lock read as {2: "la"} matches no row at all.
-    r"(?:(?:la|el|los|las|the|un|una|a|an)\s+)?"
-    r"([A-Za-z\u00c1\u00c9\u00cd\u00d3\u00da\u00dc\u00d1"
-    r"\u00e1\u00e9\u00ed\u00f3\u00fa\u00fc\u00f1]+)",
-    re.IGNORECASE,
-)
+# The lock is parsed by `subject_lock`, the single reader the compiler, the brief
+# validator and the narrator check all share. Three copies of this regex drifted, and each
+# drift cost a real run: a brief decorated as "<Subject 1> (S1)(Picture 1) is ALWAYS
+# Anita." matched none of them, so the compiler attributed every voice by row order and the
+# planner wrote a nameless "(S)" narrator.
+from . import subject_lock as _subject_lock
 
 
 def project_subject_lock(project_context: str) -> dict[int, str]:
     """The Subject-to-participant map a project declares in its own SUBJECT LOCK block."""
 
-    lock: dict[int, str] = {}
-    for match in _SUBJECT_LOCK_RE.finditer(str(project_context or "")):
-        lock[int(match.group(1))] = match.group(3)
-    return lock
+    return dict(_subject_lock.parse(project_context))
 
 
 def project_subject_lock_cues(project_context: str) -> dict[int, str]:
@@ -5672,21 +5664,11 @@ def project_subject_lock_cues(project_context: str) -> dict[int, str]:
     A lock written ``<Subject 1> (S1) is ALWAYS Anita.`` names both the participant and
     the voice. The cue is what lets the compiler attribute a spoken line without
     guessing from row order, and it was being dropped by a lock regex that only looked
-    for the name.
-
-    The cue is accepted in any spelling and normalized. A brief that copied the raw
-    diarization id (``(SPEAKER_00)``) used to break the regex itself, so the whole lock
-    failed to parse and every shot fell back to row order.
+    for the name. The cue is accepted in any spelling and normalized, wherever it sits
+    among the parentheticals a model decorates the line with.
     """
 
-    from .cast_vision import canonical_speaker_label
-
-    cues: dict[int, str] = {}
-    for match in _SUBJECT_LOCK_RE.finditer(str(project_context or "")):
-        cue = canonical_speaker_label(match.group(2))
-        if cue:
-            cues[int(match.group(1))] = cue
-    return cues
+    return dict(_subject_lock.cues(project_context))
 
 
 _H3_SUBJECT_SLOT_RE = re.compile(r"<\s*Subject\s+(\d+)\s*>", re.IGNORECASE)
@@ -5695,7 +5677,7 @@ _H3_SPEAKER_TOKEN_RE = re.compile(r"\(\s*S\s*(\d+)\s*\)", re.IGNORECASE)
 # their label in ``speaker_name`` ("(S1)"), and printing it as the participant's name
 # produced ``<Subject 1> ((S1))`` and ``<Subject 1> is (S1)`` -- a Subject introduced
 # by the very cue the definition is supposed to explain.
-_H3_BARE_SPEAKER_RE = re.compile(r"^\(?\s*S\s*\d+\s*\)?$", re.IGNORECASE)
+_H3_BARE_SPEAKER_RE = re.compile(r"^\(?\s*S\s*\d*\s*\)?$", re.IGNORECASE)
 
 
 def _h3_name_not_a_cue(value: Any) -> str:

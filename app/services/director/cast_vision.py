@@ -39,6 +39,7 @@ __all__ = [
     "canonical_speaker_label",
     "canonical_speaker_labels",
     "cast_descriptions",
+    "gender_of",
     "looks_block",
     "picture_map",
     "reference_roster",
@@ -59,7 +60,8 @@ CAST_LOOK_PROMPT = (
     "Describe only the person in this picture, as a compact costume and continuity note for "
     "a film crew. Answer in ONE paragraph of at most 120 words, in this exact order, "
     "separated by semicolons:\n"
-    "1. apparent age range and build;\n"
+    "1. GENDER AND AGE — first, always: apparent gender presentation (woman, man, or "
+    "androgynous) and apparent age range; then build;"
     "2. skin tone;\n"
     "3. hair: exact colour, length, how it is worn (loose, tied back, bun, braid, updo, "
     "under a headscarf), parting;\n"
@@ -82,7 +84,7 @@ CAST_WARDROBE_FOLLOWUP = (
     "You left out the clothing. Answer again in one short paragraph, and this time start "
     "with the WARDROBE: every garment from top to bottom with its exact colour, fabric and "
     "fit, then footwear, then jewellery. Only after that, at most one short clause each, the "
-    "age range, skin, hair and face."
+    "apparent gender presentation, age range, skin, hair and face."
 )
 
 #: Longest appearance kept. A 2K reference warrants detail, but this sentence travels
@@ -269,6 +271,55 @@ def appearance_from_reference(
         print(f"[CastVision] Could not read {os.path.basename(image_path)}: {exc}")
         return ""
     return _clean(answer)
+
+
+def gender_of(look: str) -> str:
+    """``"woman"``, ``"man"`` or ``""`` from an appearance read, when it states one."""
+
+    text = str(look or "").casefold()
+    if not text:
+        return ""
+    woman = re.search(r"\b(woman|female|girl|lady|she/her)\b", text)
+    man = re.search(r"\b(man|male|boy|gentleman|he/him)\b", text)
+    if woman and not man:
+        return "woman"
+    if man and not woman:
+        return "man"
+    return ""
+
+
+def narrator_gender(brief: str, looks: Optional[dict] = None) -> str:
+    """``"woman"``/``"man"`` for the presenter, from her own read or from the brief.
+
+    The planner writes a narrator it cannot see. Measured on a real project the brief named
+    Anita and her reference picture was a woman, but the plan described "the narrator" as
+    male in every shot, because nothing in the deterministic layer ever stated a gender.
+    The appearance read states it first (a picture is authoritative); the CHARACTERS row is
+    the fallback, since a brief that describes its cast says "young woman" there.
+    """
+
+    from .scene_policy import narrator_name
+
+    name = narrator_name(brief)
+    if not name:
+        return ""
+    if isinstance(looks, dict):
+        for key, look in looks.items():
+            if str(key).casefold().strip() == name.casefold():
+                gender = gender_of(look)
+                if gender:
+                    return gender
+    try:
+        from .brief_assistant import _cast_rows
+    except Exception:  # noqa: BLE001
+        return ""
+    for label, body in _cast_rows(brief).items():
+        bare = re.sub(r"\s*\([^)]{1,16}\)\s*$", "", label).strip()
+        if bare.casefold() == name.casefold() or same_name(bare, name):
+            gender = gender_of(body)
+            if gender:
+                return gender
+    return ""
 
 
 def _names_wardrobe(text: str) -> bool:

@@ -7211,7 +7211,10 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
         )
 
         raw_to_label = speaker_label_order(lyrics)
-        vocabulary = cast_vocabulary(speaker_mappings, lyrics)
+        # The brief's SUBJECT LOCK names the person each label belongs to; the mapping often
+        # does not. Without it the cast block said the only speaker was "(S1)" with no name,
+        # and the planner wrote a nameless "(S)" and a male narrator.
+        vocabulary = cast_vocabulary(speaker_mappings, lyrics, brief=story_description)
         cast_section = cast_section_for_prompt(story_description, vocabulary)
 
         def speaker_display(raw_speaker) -> str:
@@ -7360,9 +7363,15 @@ FULL SCREENPLAY FOR ACTION AND RELATIONSHIP CONTEXT ONLY:
         # A brief that puts the narrator inside the scene must survive as an on-screen
         # presence. Without this block every shot was planned as an off-screen voiceover
         # and the narrator appeared in none of them.
+        from ..cast_vision import narrator_gender
         from ..scene_policy import narration_presence
 
-        narration_presence_block = narration_presence(story_description)
+        # The gender comes from her own reference read, which the structuring pass already
+        # wrote into her CHARACTERS row: a plan with no gender writes a man, and this
+        # brief's narrator is a woman.
+        narration_presence_block = narration_presence(
+            story_description, gender=narrator_gender(story_description),
+        )
 
         system_prompt = f"""You are a cinematic scene planner for a short film with dialogue audio. Output ONLY the JSON array.
 
@@ -8737,9 +8746,12 @@ SCREENPLAY TO REPAIR:
         )
 
         story_scene_guidance_block = scene_guidance("short_film_story")
+        from ..cast_vision import narrator_gender as _narrator_gender
         from ..scene_policy import narration_presence as _narration_presence
 
-        story_narration_presence_block = _narration_presence(story_description)
+        story_narration_presence_block = _narration_presence(
+            story_description, gender=_narrator_gender(story_description),
+        )
         pass2_system = f"""You are a film director breaking a screenplay into shots. Output ONLY the JSON array.
 
 {char_rules}

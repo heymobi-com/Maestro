@@ -182,8 +182,8 @@ Three layers now close it:
 | layer | what it does |
 | --- | --- |
 | `canonical_speaker_labels` | turns any list of ids into `["S1", "S2"]`, by first-appearance position, never by the `_00` suffix |
-| `normalize_speaker_cues` | rewrites a cue in the model's answer (`(SPEAKER_00)` → `(S1)`) before it becomes the proposal |
-| `_SUBJECT_LOCK_RE` | accepts any short parenthetical as a cue and normalizes it, so a saved brief with a bad cue still parses |
+| `normalize_speaker_cues` | rewrites a cue in the model's answer (`(SPEAKER_00)` → `(S1)`) before it becomes the proposal, and leaves anything that is not a voice alone |
+| `subject_lock.parse` | one reader for the block, shared by the compiler, the validator and the narrator check; it accepts any number of parentheticals and normalizes the cue, so a saved brief with a bad cue still parses |
 
 The structure prompt is told the canonical labels, is told never to write a diarization id,
 and the report shows what the audio actually offers (`audio voice S1 (SPEAKER_00→S1)`).
@@ -215,6 +215,54 @@ emits a contract that reaches the planner **and** every compiled shot:
 
 The H3 guide's voiceover rule was amended to match: voiceover is only for a speaker the
 project places off camera. A story brief with no presenter gets no presence rule.
+
+### The picture that broke the lock
+
+Once the structuring pass learned to reference each character's picture, a brief came back
+with the picture written *inside* the lock:
+
+    SUBJECT LOCK: <Subject 1> (S1)(Picture 1) is ALWAYS Anita. \
+<Subject 2> (S2) (Picture 2)is ALWAYS David. <Subject 3> (S3) (Picture 3) is ALWAYS Goliath.
+
+That brief was correct. Three separate copies of the lock regex accepted exactly **one**
+parenthetical, so it parsed to nothing, and everything downstream degraded at once:
+
+- the compiler attributed every voice by row order;
+- the planner received the speakers as bare labels with no name, wrote a nameless `(S)`
+  narrator, and made her male;
+- `narration_is_present` found no narrator name, so the on-screen contract never fired and
+  the whole documentary was planned as an off-screen voiceover with Anita in no shot.
+
+`normalize_speaker_cues` made it worse: it rewrote *any* parenthetical before "is ALWAYS",
+so `(Picture 2)` became `(S1)` and the picture reference it was meant to protect was gone.
+
+There is now one reader, `services/director/subject_lock.py`, and the compiler, the
+validator and the narrator check all use it. It accepts any number of parentheticals,
+takes the one that looks like a voice (`S1`, `SPEAKER_00`, a bare `S`) as the cue, and
+treats everything else — `(Picture 1)`, `(ref 2)` — as decoration that is never rewritten.
+
+The presentation travels with the name. `narration_presence` writes **"Anita (a woman)"**
+and adds "never change the presenter's gender, age or build between shots", from
+`cast_vision.narrator_gender(brief)`: her own reference read first, her CHARACTERS row
+second ("Young woman, medium build…"). With nothing to read, no gender is invented.
+
+### A brief that arrives as one line
+
+The same brief reached the validator with 5,391 characters and **zero newlines**, and again
+with 7,629 characters. Every reader that worked line by line saw a single section, so
+`CHARACTERS` yielded only its first row — David and Goliath were dropped from the cast, and
+the model had no appearance for either. `_cast_rows` now reads rows out of the section body
+(`Anita (S1): …`, `David (S2): …`, `The Israelite Soldiers: …`) instead of out of lines.
+
+That exposed two false warnings of the same family as `"Beat"`:
+
+| warning | why it was wrong | rule now |
+| --- | --- | --- |
+| `'Israelite' appears in the story but has no entry in CHARACTERS` | the row `The Israelite Soldiers:` was in `PRESENCES` all along; only `CHARACTERS` rows were compared | every cast and presence row's words count as listed |
+| `'Tent' … so the model invents an appearance for it` | `King Saul's Tent is shown:` is an object being presented | a one-word candidate must itself be the subject of a visible action |
+
+Both were reported to the user as things to fix in a brief that was already correct, which
+costs more than the warning is worth.
 
 ## Why forty clips can be one shot
 
@@ -475,6 +523,17 @@ one.
 detection: a brief that only *shows* the narrator doing things is recognised, a secondary
 character walking is not a presenter, and off-camera wording is repaired for a presenter but
 left alone for a real voiceover.
+
+`tests/test_director_subject_lock.py` (22) pins the one lock reader and everything it
+feeds: the decorated lock parses to `{1: Anita, 2: David, 3: Goliath}` with its cues, the
+compiler reads the same map, a diarizer id is still reported as a wrong cue while a
+`(Picture N)` never is, `normalize_speaker_cues` repairs the id and leaves the picture
+byte-identical, the narrator is named and marked present, her gender is `woman` from her
+own row and is never invented when the row says nothing, every row of a one-line brief is
+read while a sentence is not a row, a presence row and an object being presented are not
+"undescribed characters" but a person the story acts with still is, the brief raises no
+errors, and the speaker vocabulary names `(S1)` from the lock without promoting `(S2)` or
+`(S3)` into speakers.
 
 `tests/test_director_brief_api.py` (10) drives the routes over ASGI: a prose brief is
 reported, the route works with no model, the mechanical pass still fixes the shape, a

@@ -172,18 +172,19 @@ _PRESENCE_PHRASES = (
     "in sync with the spoken account",
 )
 
-_LOCK_NAME_RE = re.compile(
-    r"<Subject\s*1>\s*(?:\([^)\n]{1,24}\)\s*)?(?:is\s+ALWAYS|es\s+SIEMPRE)\s+"
-    r"(?:(?:the|la|el|los|las)\s+)?([A-Za-zÁÉÍÓÚÜÑáéíóúüñ'\-]+)",
-    re.IGNORECASE,
-)
-
 
 def narrator_name(brief: str) -> str:
-    """The first Subject's name, or ``""`` when the brief names none."""
+    """The first Subject's name, or ``""`` when the brief names none.
 
-    match = _LOCK_NAME_RE.search(str(brief or ""))
-    return match.group(1) if match else ""
+    Parsed by the shared lock reader. A local copy of this regex required one
+    parenthetical, so a lock written ``<Subject 1> (S1)(Picture 1) is ALWAYS Anita.``
+    yielded no name — and with no name there was no on-screen narrator either, so a whole
+    documentary was planned with Anita speaking from off camera and appearing in no shot.
+    """
+
+    from .subject_lock import parse
+
+    return parse(brief).get(1, "")
 
 
 def narration_is_present(brief: str) -> bool:
@@ -258,7 +259,7 @@ def presenter_voiceover_repair(brief: str, prompt: str) -> str:
     return repaired
 
 
-def narration_presence(brief: str, *, compact: bool = False) -> str:
+def narration_presence(brief: str, *, compact: bool = False, gender: str = "") -> str:
     """The on-screen-narrator contract for a brief that asks for one, or ``""``.
 
     A brief that says the narrator "moves through the settings" and "stands at the centre
@@ -276,15 +277,20 @@ def narration_presence(brief: str, *, compact: bool = False) -> str:
     if not narration_is_present(brief):
         return ""
     name = narrator_name(brief) or "the narrator"
+    # The picture read states the presentation; the brief often does not, and a planner
+    # with no gender writes a man. Measured on a real run: the narrator was described as
+    # male in every shot while her own reference was a woman.
+    who = f"{name} (a {gender})" if gender in ("woman", "man") else name
     if compact:
         return (
-            f"{name} is ON SCREEN in this shot, inside the scene, speaking on camera with "
+            f"{who} is ON SCREEN in this shot, inside the scene, speaking on camera with "
             f"the mouth visible. Never off-screen voiceover for {name}. If the line "
             f"describes something else, {name} is still in frame watching or gesturing at "
             f"it."
         )
-    return f"""NARRATION PRESENCE — {name} IS IN THE FILM, NOT OVER IT (non-negotiable):
-- {name} is a visible participant of EVERY shot: on screen, in frame, inside the scene being described. Never off camera, never a disembodied voice.
+    return f"""NARRATION PRESENCE — {who.upper()} IS IN THE FILM, NOT OVER IT (non-negotiable):
+- {who} is a visible participant of EVERY shot: on screen, in frame, inside the scene being described. Never off camera, never a disembodied voice.
+- Never change the presenter's gender, age or build between shots: {who}.
 - Every shot lists {name} in subjects_on_screen with her own speaker cue, and her line is delivered ON CAMERA with the mouth visible and moving.
 - Never write "off-screen voiceover", "voiceover", "narrates over the image", "the voice of", or "lips remain completely closed" for {name} while the brief puts her inside the scene.
 - When the line describes something else in the place, {name} is still in frame: watching it, standing in it, walking through it, gesturing at it. The described action happens without her being cropped out or replaced by a cutaway of only the described subject.
@@ -311,7 +317,8 @@ EVENT_ACTION_RE = re.compile(
     r"throwing|strikes?|striking|climbs?|climbing|runs?|running|opens?|closes?|"
     r"falls?|falling|rises?|arrives?|leaves?|steps?|crosses?|reaches?|touches?|"
     r"prays?|praying|fights?|fighting|draws?|aims?|shoots?|washes?|builds?|"
-    r"sleeps?|wakes?|weeps?|cries?|laughs?|shouts?|plants|swings|releases|crouches?)\b",
+    r"sleeps?|wakes?|weeps?|cries?|laughs?|shouts?|calls?|answers?|greets?|"
+    r"whispers?|plants|swings|releases|crouches?)\b",
     re.I,
 )
 

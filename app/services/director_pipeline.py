@@ -8871,6 +8871,7 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
                         clip_plans[index] if index < len(clip_plans) else {},
                         brief=scene_description,
                     ),
+                    narrator_gender=_h3_narrator_gender(cast_looks, scene_description),
                 ),
                 "_director_environment": getattr(shot, "environment", ""),
                 "_director_audio_policy": metadata.get("_director_audio_policy") or director_audio_policy(scene_description),
@@ -9994,8 +9995,19 @@ def _h3_picture_map_for_shot(params: dict, clip_plan: dict, brief: str = "") -> 
         return ""
 
 
+def _h3_narrator_gender(cast_looks: dict, brief: str) -> str:
+    """The narrator's presentation, from her own picture read, else from her cast row."""
+
+    try:
+        from services.director.cast_vision import narrator_gender
+    except Exception:  # noqa: BLE001
+        return ""
+    return narrator_gender(brief, cast_looks if isinstance(cast_looks, dict) else None)
+
+
 def _h3_shot_project_context(
     brief: str, index: int, total: int, cast_looks: str = "", pictures: str = "",
+    narrator_gender: str = "",
 ) -> str:
     """What one shot may read from the brief: the world, and its own stage.
 
@@ -10020,7 +10032,7 @@ def _h3_shot_project_context(
     try:
         from services.director.scene_policy import narration_presence
 
-        presence = narration_presence(brief, compact=True)
+        presence = narration_presence(brief, compact=True, gender=narrator_gender)
         if presence:
             parts.append(presence)
     except Exception:  # noqa: BLE001 - guidance only
