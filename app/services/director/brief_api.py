@@ -174,13 +174,17 @@ def create_router(*, generate=None) -> APIRouter:
 
         def ground(text: str) -> str:
             """Everything the manifest knows, written into the text, mechanically."""
-            from .brief_assistant import consolidate_cast_rows, normalize_speaker_cues
+            from .brief_assistant import (
+                consolidate_cast_rows,
+                drop_repeated_sections,
+                normalize_speaker_cues,
+            )
 
             grounded = normalize_speaker_cues(text, speakers)
             grounded = apply_cast_descriptions(grounded, looks) if looks else grounded
             if roster:
                 grounded = apply_reference_roster(grounded, references, looks)
-            return consolidate_cast_rows(grounded)
+            return drop_repeated_sections(consolidate_cast_rows(grounded))
 
         before = _report_of(brief, body)
         # The cue, the roster and the picture's own sentences go in before the model

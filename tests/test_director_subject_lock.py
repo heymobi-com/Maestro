@@ -33,6 +33,7 @@ if str(APP) not in sys.path:
 
 from services.director.brief_assistant import (  # noqa: E402
     _cast_rows,
+    drop_repeated_sections,
     keeps_the_story,
     merge_structured,
     _raw_lock_cues,
@@ -318,6 +319,50 @@ class StageListTests(unittest.TestCase):
         self.assertEqual([number for number, _body in stages], [1, 2])
         self.assertIn("wide shot of the valley", stages[0][1])
         self.assertNotIn("contrasting his size", stages[1][1])
+
+
+class MalformedBriefTests(unittest.TestCase):
+    """What a structuring pass does to a brief when it appends instead of editing."""
+
+    CONTAINER = (
+        "SUBJECT LOCK:\n<Subject 1> (S1) is ALWAYS Anita.\n\n"
+        "PRESENCES:\nNPC's: King Saul: grey-streaked hair and a full beard. "
+        "The Israelite Soldiers: lean, sun-darkened men in linen tunics. "
+        "King Saul: grey-streaked hair and a full beard.\n\n"
+        "AMBIENCE:\nThe Land of the Story, hills of cracked earth.\n\n"
+        "CAMERA:\nEye-level for Anita.\n\n"
+        "DESCRIPTION:\nAnita walks the audience through the ancient landscape.\n\n"
+        "NEGATIVE:\nNo modern clothing.\n\n"
+        "AMBIENCE:\nThe Land of the Story, hills of cracked earth.\n"
+    )
+
+    def test_a_grouping_label_does_not_become_a_character(self):
+        rows = _cast_rows(self.CONTAINER)
+
+        self.assertNotIn("NPC's", rows)
+        self.assertIn("King Saul", rows)
+        self.assertIn("The Israelite Soldiers", rows)
+
+    def test_the_person_inside_the_grouping_is_listed_once(self):
+        rows = _cast_rows(self.CONTAINER)
+
+        self.assertEqual(sum(1 for name in rows if name.casefold() == "king saul"), 1)
+
+    def test_a_section_repeated_word_for_word_is_dropped(self):
+        tidied = drop_repeated_sections(self.CONTAINER)
+
+        self.assertEqual(tidied.count("AMBIENCE:"), 1)
+        self.assertIn("NEGATIVE:", tidied)
+        self.assertIn("Anita walks the audience", tidied)
+
+    def test_a_clean_brief_is_returned_unchanged(self):
+        clean = (
+            "SUBJECT LOCK:\n<Subject 1> (S1) is ALWAYS Anita.\n\n"
+            "AMBIENCE:\nThe valley.\n\n"
+            "DESCRIPTION:\nAnita walks.\n"
+        )
+
+        self.assertEqual(drop_repeated_sections(clean), clean)
 
 
 def _report(brief: str) -> dict:

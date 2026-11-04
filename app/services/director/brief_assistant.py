@@ -460,6 +460,35 @@ def _section_rows(body: str) -> list[tuple[str, str]]:
     return rows
 
 
+#: A row label that is a container, not a person: the model groups the silent cast under
+#: one and then lists them inside it ("PRESENCES: NPC's: King Saul: ... The soldiers: ...").
+#: Read literally it becomes a character named "NPC's", which the planner then has to cast.
+_CONTAINER_LABELS = {
+    "npc", "npcs", "npc's", "npcs'", "presences", "presence", "others", "background",
+    "the others", "extras", "silent", "silent figures", "non speakers", "non-speaking",
+}
+
+
+def _is_container_label(label: str) -> bool:
+    return " ".join(str(label or "").split()).casefold().strip(":'\"") in {
+        item.strip(":'\"") for item in _CONTAINER_LABELS
+    }
+
+
+def _expand_container(label: str, body: str) -> list[tuple[str, str]]:
+    """Rows a container actually holds, or the container itself when it holds none."""
+
+    if not _is_container_label(label):
+        return [(label, body)]
+    nested = _section_rows(body)
+    if not nested:
+        return [(label, body)]
+    first = " ".join(body.split()).casefold()
+    if not first.startswith(nested[0][0].casefold()):
+        return [(label, body)]
+    return nested
+
+
 def _cast_rows(brief: str) -> dict[str, str]:
     """``{"Abuela Rosa": "<its description>", ...}`` from CHARACTERS / PRESENCES."""
 
@@ -470,8 +499,37 @@ def _cast_rows(brief: str) -> dict[str, str]:
             if not section_name.startswith(name.split()[0]):
                 continue
             for label, body in _section_rows(text):
-                rows.setdefault(label, body)
+                for row_label, row_body in _expand_container(label, body):
+                    rows.setdefault(row_label, row_body)
     return rows
+
+
+def drop_repeated_sections(brief: str) -> str:
+    """Delete a section that repeats an earlier one, word for word.
+
+    Measured on a real brief: ``AMBIENCE`` appeared twice with identical text, after
+    ``NEGATIVE``, and the planner read the world twice while the negative sat between the
+    two copies. Duplicated headings are what a model produces when it appends to a brief
+    instead of editing it, and nothing downstream deduplicated them.
+    """
+
+    text = str(brief or "")
+    order = _section_order(text)
+    if len(order) < 2:
+        return text
+    seen: set = set()
+    kept: list = []
+    for name, body in order:
+        key = (name, " ".join(body.split()).casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append((name, body))
+    if len(kept) == len(order):
+        return text
+    return "\n\n".join(
+        f"{name}:\n{body}" if body.strip() else f"{name}:" for name, body in kept
+    ) + "\n"
 
 
 def consolidate_cast_rows(brief: str) -> str:
@@ -502,11 +560,12 @@ def consolidate_cast_rows(brief: str) -> str:
     from .cast_vision import same_name
 
     def rows(body: str) -> list[tuple[str, str]]:
+        # Read inside the body, not line by line: a brief arrives as one line, and a
+        # line-based reader saw only the first row of each section -- so the duplicate it
+        # was written to merge was never found.
         found: list[tuple[str, str]] = []
-        for line in body.splitlines():
-            match = re.match(r"^\s*(?:[-*]\s*)?([^:\n]{2,50}?)\s*:\s*(.+)$", line)
-            if match:
-                found.append((" ".join(match.group(1).split()), " ".join(match.group(2).split())))
+        for label, row_body in _section_rows(body):
+            found.extend(_expand_container(label, row_body))
         return found
 
     character_rows = rows(characters)
