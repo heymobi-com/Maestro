@@ -791,7 +791,7 @@ class PictureMapTests(unittest.TestCase):
             brief="Anita.",
         )
 
-        self.assertIn("never write a <Picture N> tag yourself", block)
+        self.assertIn("never write a <Picture N> tag", block)
 
     def test_no_references_is_no_block(self):
         from services.director_pipeline import _h3_picture_map_for_shot

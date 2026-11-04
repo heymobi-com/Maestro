@@ -619,8 +619,7 @@ def picture_map(pictures: Optional[list[dict]]) -> str:
     if not lines:
         return ""
     return (
-        "PICTURES IN THIS SHOT (the renderer binds these exact numbers; never "
-        "renumber them and never write a <Picture N> tag yourself):\n"
+        "PICTURES IN THIS SHOT (bind these numbers; never write a <Picture N> tag):\n"
         + "\n".join(f"- {line}" for line in lines)
     )
 

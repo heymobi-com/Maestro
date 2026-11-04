@@ -300,9 +300,13 @@ def narration_presence(brief: str, *, compact: bool = False, gender: str = "") -
     # male in every shot while her own reference was a woman.
     who = f"{name} (a {gender})" if gender in ("woman", "man") else name
     if compact:
+        # 160 characters, not 330: this text is injected into every clip, and on a real
+        # plan it was 798 characters against a 638-character scene, so the instructions
+        # outweighed the shot. The rest of the contract lives in the planner's prompt,
+        # which is read once.
         return (
-            f"{who} is ON SCREEN in this shot, inside the scene, speaking on camera with "
-            f"the mouth visible. Never off-screen voiceover for {name}. {staging_rules(name, compact=True)}"
+            f"{who} is ON SCREEN, speaking on camera with the mouth visible, at the SAME "
+            f"DEPTH AND SCALE as what {name} describes; never off-screen voiceover."
         )
     return f"""NARRATION PRESENCE — {who.upper()} IS IN THE FILM, NOT OVER IT (non-negotiable):
 - {who} is a visible participant of EVERY shot: on screen, in frame, inside the scene being described. Never off camera, never a disembodied voice.

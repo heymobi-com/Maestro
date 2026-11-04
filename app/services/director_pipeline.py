@@ -9807,6 +9807,25 @@ def _repeated_camera_runs(
     return runs
 
 
+def _lock_cues_the_name(brief: str, words: set) -> bool:
+    """Whether the brief's SUBJECT LOCK binds one of these name words to a cue."""
+
+    try:
+        from services.director.subject_lock import cues, parse
+    except Exception:  # noqa: BLE001
+        return False
+    labels = cues(brief)
+    for subject, name in parse(brief).items():
+        if subject not in labels:
+            continue
+        name_words = {
+            word.casefold() for word in re.findall(r"[A-Za-z\u00c0-\u024f'\-]+", str(name))
+        }
+        if name_words & {str(word).casefold() for word in words}:
+            return True
+    return False
+
+
 def _h3_manifest_issues(params: dict) -> list[str]:
     """References that cannot be matched to this project, named before the render.
 
@@ -9841,7 +9860,15 @@ def _h3_manifest_issues(params: dict) -> list[str]:
         words = _h3_reference_name_words(reference)
         if words and not (words & brief_words):
             foreign.append(label)
-        elif words and not _h3_reference_speaker_labels(reference):
+        elif (
+            words
+            and not _h3_reference_speaker_labels(reference)
+            and not _lock_cues_the_name(brief, words)
+        ):
+            # David and Goliath never speak in a narrated film, so the panel gives their
+            # pictures no cue -- and warning about it told the person to fix a brief that
+            # already said "<Subject 2> (S2) is ALWAYS David". The lock is the authority;
+            # only a name the lock does not bind either is a real gap.
             unlabelled.append(label)
     issues: list[str] = []
     if unnamed:
