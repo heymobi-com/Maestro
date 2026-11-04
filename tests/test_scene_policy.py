@@ -185,6 +185,60 @@ class NarrationPresenceTests(unittest.TestCase):
             "SUBJECT LOCK:\n<Subject 1> is ALWAYS Rosa.\n\nDESCRIPTION:\nStage 1: kitchen."
         ))
 
+    def test_a_brief_that_only_shows_the_narrator_doing_things_is_recognised(self):
+        # The measured real brief said none of the rule phrases: "Anita walks the
+        # audience through the landscape", "Anita stands near him".
+        from services.director.scene_policy import narration_is_present
+
+        brief = (
+            "SUBJECT LOCK: <Subject 1> (S1) is ALWAYS Anita. "
+            "DESCRIPTION: Stage 1 (Valley Overview): Anita walks the audience as a modern "
+            "guide in the ancient landscape. Stage 2: David prepares his sling; Anita walks "
+            "beside him. Stage 3: Goliath steps forward; Anita stands near him."
+        )
+
+        self.assertTrue(narration_is_present(brief))
+
+    def test_a_secondary_character_walking_does_not_make_them_a_presenter(self):
+        from services.director.scene_policy import narration_is_present
+
+        brief = (
+            "SUBJECT LOCK:\n<Subject 1> is ALWAYS Rosa.\n\n"
+            "DESCRIPTION:\nStage 1: Anita walks through the market and Rosa lifts the cup.\n"
+        )
+
+        self.assertFalse(narration_is_present(brief))
+
+    def test_off_camera_wording_is_repaired_for_a_presenter(self):
+        from services.director.scene_policy import presenter_voiceover_repair
+
+        prompt = (
+            "Anita (S1) says in an off-screen voiceover that four giants existed, "
+            "while her lips remain completely closed. She opens the codex."
+        )
+        brief = (
+            "SUBJECT LOCK: <Subject 1> (S1) is ALWAYS Anita. "
+            "DESCRIPTION: Anita walks the audience through the valley."
+        )
+
+        repaired = presenter_voiceover_repair(brief, prompt)
+
+        self.assertNotIn("voiceover", repaired.lower())
+        self.assertNotIn("completely closed", repaired.lower())
+        self.assertIn("on camera", repaired)
+        self.assertIn("She opens the codex.", repaired)
+
+    def test_the_repair_leaves_a_real_voiceover_alone(self):
+        from services.director.scene_policy import presenter_voiceover_repair
+
+        prompt = "Anita (S1) says in an off-screen voiceover that four giants existed."
+        brief = (
+            "SUBJECT LOCK: <Subject 1> (S1) is ALWAYS Anita.\n\n"
+            "DESCRIPTION:\nStage 1: Rosa lifts the cup in the kitchen.\n"
+        )
+
+        self.assertEqual(presenter_voiceover_repair(brief, prompt), prompt)
+
     def test_the_name_comes_from_the_lock(self):
         from services.director.scene_policy import narrator_name
 

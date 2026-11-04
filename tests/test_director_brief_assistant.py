@@ -20,10 +20,13 @@ if str(APP) not in sys.path:
 
 from services.director.brief_assistant import (  # noqa: E402
     CANONICAL_SECTIONS,
+    _description_prose,
     _number_stages,
+    _sections,
     _stage_texts,
     diagnose_brief,
     normalized_brief,
+    reflow_brief,
     strip_template_placeholders,
     structure_prompt,
 )
@@ -497,6 +500,44 @@ class NumberingOnlyShootableSentencesTests(unittest.TestCase):
         )
 
         self.assertEqual(_number_stages(text), text)
+
+
+class FlattenedBriefTests(unittest.TestCase):
+    """A brief that arrives as one long line still has sections.
+
+    Measured on a real project: 7,629 characters, zero newlines, so every line-based
+    reader saw one section and the description, the cast and the negative were one blob.
+    """
+
+    FLAT = (
+        "SUBJECT LOCK: <Subject 1> (S1) is ALWAYS Anita. "
+        "CHARACTERS: Anita (S1): cream blouse, navy skirt. "
+        "AMBIENCE: Hills of cracked earth and scattered olive trees. "
+        "DESCRIPTION: Stage 1 (Valley Overview): Anita walks the audience through the "
+        "landscape. Stage 2 (Preparation): David prepares his sling; Anita walks beside him. "
+        "NEGATIVE: No modern clothing. "
+        "REFERENCES: <Picture 1> Anita (S1)."
+    )
+
+    def test_the_sections_are_recovered(self):
+        self.assertEqual(
+            list(_sections(self.FLAT)),
+            ["SUBJECT LOCK", "CHARACTERS", "AMBIENCE", "DESCRIPTION", "NEGATIVE", "REFERENCES"],
+        )
+
+    def test_the_description_is_no_longer_the_whole_document(self):
+        prose = _description_prose(self.FLAT)
+
+        self.assertIn("Anita walks the audience", prose)
+        self.assertNotIn("No modern clothing", prose)
+
+    def test_the_stages_survive(self):
+        self.assertEqual([number for number, _body in _stage_texts(self.FLAT)], [1, 2])
+
+    def test_a_brief_already_written_in_lines_is_untouched(self):
+        lined = "SUBJECT LOCK:\n<Subject 1> is ALWAYS Anita.\n\nDESCRIPTION:\nStage 1: kitchen.\n"
+
+        self.assertEqual(reflow_brief(lined), lined)
 
 
 if __name__ == "__main__":

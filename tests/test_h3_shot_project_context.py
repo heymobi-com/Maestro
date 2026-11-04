@@ -76,17 +76,17 @@ class ShotContextTests(unittest.TestCase):
         self.assertNotIn("Aurelio", context)
         self.assertNotIn("chasuble", context)
 
-    def test_the_priest_survives_in_his_own_stage(self):
-        # Stage 3 of 4 sits in the middle of the film; clip 5 of 8 is inside it.
-        context = _h3_shot_project_context(BRIEF, 5, 8)
+    def test_the_stage_list_never_reaches_a_shot(self):
+        # The stage restated the film's beat list inside every clip, and contradicted the
+        # shot: a measured clip's context said "Locked-off wide shot of the valley" while
+        # its own description said "Medium static shot of Anita". The shot is the authority
+        # on what it shows.
+        contexts = [_h3_shot_project_context(BRIEF, index, 8) for index in range(8)]
 
-        self.assertIn("Aurelio", context)
-
-    def test_the_clip_gets_its_own_stage_and_nothing_else(self):
-        context = _h3_shot_project_context(BRIEF, 0, 8)
-
-        self.assertIn("fog gathering", context)
-        self.assertNotIn("the closed door", context)
+        for context in contexts:
+            self.assertNotIn("fog gathering", context)
+            self.assertNotIn("the closed door", context)
+            self.assertNotIn("Aurelio", context)
 
     def test_the_lock_survives_in_the_shape_the_compiler_parses(self):
         context = _h3_shot_project_context(BRIEF, 0, 8)
@@ -116,9 +116,25 @@ class ShotContextTests(unittest.TestCase):
 
         context = _h3_shot_project_context(brief, 0, 8)
 
-        self.assertIn("NARRATION PRESENCE", context)
-        self.assertIn("visible participant of EVERY shot", context)
+        self.assertIn("ON SCREEN", context)
+        self.assertIn("Anita", context)
         self.assertIn("off-screen voiceover", context)
+
+    def test_the_presence_rule_is_compact_because_it_repeats_in_every_shot(self):
+        # The long form was 1,005 characters of identical text against a 734-character
+        # scene, which is how forty clips become one shot.
+        brief = (
+            "SUBJECT LOCK:\n<Subject 1> (S1) is ALWAYS Anita.\n\n"
+            "DESCRIPTION:\nSTANDING RULE: Anita moves through the settings at the center "
+            "of the cinematic action.\n"
+        )
+
+        self.assertLess(len(_h3_shot_project_context(brief, 0, 8)), 700)
+
+    def test_the_whole_context_stays_smaller_than_a_real_scene(self):
+        context = _h3_shot_project_context(BRIEF, 0, 26)
+
+        self.assertLess(len(context), 734)
 
     def test_a_film_without_a_presenter_gets_no_presence_rule(self):
         brief = (
@@ -126,7 +142,66 @@ class ShotContextTests(unittest.TestCase):
             "DESCRIPTION:\nStage 1: Rosa lifts the cup in the kitchen.\n"
         )
 
-        self.assertNotIn("NARRATION PRESENCE", _h3_shot_project_context(brief, 0, 8))
+        self.assertNotIn("ON SCREEN", _h3_shot_project_context(brief, 0, 8))
+
+
+class DilutionTests(unittest.TestCase):
+    """The failure the user paid for: forty clips, one shot, different audio."""
+
+    def test_boilerplate_that_outweighs_the_scene_is_reported(self):
+        from services.director_pipeline import _h3_prompt_dilution_report
+
+        plans = [
+            {"_director_project_context": "x" * 2900, "_director_h3_source_prompt": "y" * 700}
+            for _ in range(6)
+        ]
+
+        findings = _h3_prompt_dilution_report(plans, pid="t")
+
+        self.assertTrue(any("boilerplate" in line for line in findings))
+
+    def test_a_lean_context_is_not_reported(self):
+        from services.director_pipeline import _h3_prompt_dilution_report
+
+        plans = [
+            {"_director_project_context": "x" * 400, "_director_h3_source_prompt": "y" * 800}
+            for _ in range(6)
+        ]
+
+        self.assertEqual(_h3_prompt_dilution_report(plans, pid="t"), [])
+
+    def test_nearly_identical_compiled_prompts_are_reported(self):
+        from services.director_pipeline import _h3_prompt_dilution_report
+
+        shared = " ".join(f"word{index}" for index in range(120))
+        plans = [
+            {
+                "_director_h3_compiled_prompt": f"{shared} unique{index}",
+                "_director_project_context": "x" * 100,
+                "_director_h3_source_prompt": "y" * 800,
+            }
+            for index in range(5)
+        ]
+
+        findings = _h3_prompt_dilution_report(plans, pid="t")
+
+        self.assertTrue(any("nearly the same prompt" in line for line in findings))
+
+    def test_distinct_compiled_prompts_are_not_reported(self):
+        from services.director_pipeline import _h3_prompt_dilution_report
+
+        plans = [
+            {
+                "_director_h3_compiled_prompt": " ".join(
+                    f"clip{index}word{word}" for word in range(120)
+                ),
+                "_director_project_context": "x" * 100,
+                "_director_h3_source_prompt": "y" * 800,
+            }
+            for index in range(5)
+        ]
+
+        self.assertEqual(_h3_prompt_dilution_report(plans, pid="t"), [])
 
 
 class ProtectedContextTests(unittest.TestCase):

@@ -485,6 +485,36 @@ def consolidate_cast_rows(brief: str) -> str:
     return "\n\n".join(rebuilt) + "\n"
 
 
+_KNOWN_SECTIONS = (
+    "SUBJECT LOCK", "CHARACTERS", "CHARACTER", "CAST", "PRESENCES", "PRESENCE",
+    "CAMERA", "CINEMATOGRAPHY", "AMBIENCE", "DESCRIPTION", "STORY", "SYNOPSIS",
+    "PLOT", "NEGATIVE", "REFERENCES", "STYLE", "VOICES", "AUDIO",
+)
+
+
+def reflow_brief(brief: str) -> str:
+    """Put the sections back on their own lines when a brief arrives as one long line.
+
+    Measured on a real project: a 7,629-character brief reached the pipeline with no
+    newlines at all — ``SUBJECT LOCK: … CHARACTERS: … DESCRIPTION: Stage 1 (Valley
+    Overview): … NEGATIVE: … REFERENCES: …`` — so every reader that works line by line saw
+    one section, the description had no boundary, and the cast and the negative were parsed
+    as part of the prose. A brief is written in sections; this restores the line breaks the
+    text already implies.
+    """
+
+    text = str(brief or "")
+    if not text or text.count("\n") >= 3:
+        return text
+    for section in _KNOWN_SECTIONS:
+        text = re.sub(
+            rf"(?<!\n)\s*\b({section})\s*:",
+            lambda match: f"\n\n{match.group(1)}:",
+            text,
+        )
+    return text.lstrip("\n")
+
+
 def _section_order(brief: str) -> list[tuple[str, str]]:
     """The sections of a brief, in the order they are written, unparsed.
 
@@ -499,6 +529,7 @@ def _section_order(brief: str) -> list[tuple[str, str]]:
         "CAMERA", "CINEMATOGRAPHY", "AMBIENCE", "DESCRIPTION", "STORY", "SYNOPSIS",
         "PLOT", "NEGATIVE", "REFERENCES", "STYLE", "VOICES", "AUDIO",
     }
+    brief = reflow_brief(brief)
     order: list[tuple[str, str]] = []
     current = ""
     lines: list[str] = []
@@ -548,10 +579,10 @@ def _description_prose(brief: str) -> str:
     """
 
     text = str(brief or "")
-    heading = _DESCRIPTION_HEADING_RE.search(text)
+    heading = _DESCRIPTION_HEADING_RE.search(reflow_brief(text))
     if not heading:
         return ""
-    rest = text[heading.end():]
+    rest = reflow_brief(text)[heading.end():]
     stop = _DESCRIPTION_STOP_RE.search(rest)
     return rest[: stop.start()] if stop else rest
 

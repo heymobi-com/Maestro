@@ -216,6 +216,52 @@ emits a contract that reaches the planner **and** every compiled shot:
 The H3 guide's voiceover rule was amended to match: voiceover is only for a speaker the
 project places off camera. A story brief with no presenter gets no presence rule.
 
+## Why forty clips can be one shot
+
+The user's report — "los clips repiten la misma escena una y otra vez", "una copia de la
+misma escena con distinto diálogo" — was measured on their own run, not guessed. On a real
+42-clip project:
+
+| measure | value |
+| --- | --- |
+| words shared between consecutive compiled prompts | **0.75** (81–90% in five runs) |
+| injected project context per clip | **2,857–4,005 chars** against a **734-char** scene |
+| every clip's plan-level description | distinct, ~0.55 similar |
+| "says in an off-screen voiceover … lips remain completely closed" | **all 42** |
+
+So the plan was varied and the *prompt* was not: the same boilerplate outweighed the scene
+four to one, and the one instruction that mattered (the narrator is in the film) never fired.
+Three fixes, all deterministic:
+
+1. **The context is compact now.** 2,857 → ~330 chars. The long presence essay lives once in
+   the planner's system prompt; a shot gets the rule. The wardrobe read is not repeated (the
+   planner already writes it into the subject rows, and the compiler copies those into
+   `subject_definitions`), and the world anchor is capped at 200 characters.
+2. **The stage is no longer injected.** It restated the film's beats in every clip and
+   contradicted the shot: one clip's context said "Locked-off wide shot of the valley" while
+   its own description said "Medium static shot of Anita". The shot is the authority.
+3. **Off-camera wording is repaired for a presenter.** `presenter_voiceover_repair` rewrites
+   "says in an off-screen voiceover" and removes "lips remain completely closed" when the
+   brief puts the speaker in the scene — a wording repair, not a re-plan.
+
+### The brief arrives as one long line
+
+Measured on the same project: 7,629 characters and **zero newlines**. Every line-based reader
+saw one section, so the description had no boundary, the cast and the negative were part of
+the prose, and the stage list could not be read. `reflow_brief` restores the breaks the text
+already implies, using only the section names this module knows.
+
+### The guard that would have caught it before the GPU
+
+`_h3_prompt_dilution_report` runs with the manifest checks and publishes into
+`plan_warnings`:
+
+> 42 of 42 shots carry as much injected boilerplate as scene description
+> clips 15-24 compile to nearly the same prompt (81% of their words shared); they will
+> render as one shot repeated with different audio
+
+That is the symptom, in the composer, before a single frame is rendered.
+
 ## H3's prompt budget: where instructions could go missing
 
 **H3 does not truncate the prompt.** `MiniMaxH3Qwen3VL._plain_inputs` tokenizes the whole
@@ -393,7 +439,7 @@ a short film, the strictest case.
 
 ## Tests
 
-`tests/test_director_brief_assistant.py` (37) holds the diagnosis per code, the ordering
+`tests/test_director_brief_assistant.py` (51) holds the diagnosis per code, the ordering
 of errors before warnings, that every finding carries a fix, the workflow-specific
 expectations (a podcast is not asked for stages, a music video is asked for sections), the
 mechanical normalization — sections reordered, beats numbered from prose, a podcast not
@@ -417,6 +463,18 @@ that only thinks is retried with more room), the saved-project manifest fallback
 documentary case: the Anita prose yields no stages, reports `narration-driven` with audio
 and `abstract-beats` without it, and the prompt forbids inventing stages while a story
 brief still gets them.
+
+`tests/test_h3_shot_project_context.py` (18) pins the shot context: the priest never
+reaches a shot, the stage list never reaches a shot, the lock survives in the shape the
+compiler parses, the presence rule is present and compact, the whole context stays smaller
+than a real scene, the context survives compaction while boilerplate is removed, and
+`_h3_prompt_dilution_report` fires on a real-shaped diluted plan and stays quiet on a lean
+one.
+
+`tests/test_scene_policy.py` (27) covers the per-workflow contract and the presenter
+detection: a brief that only *shows* the narrator doing things is recognised, a secondary
+character walking is not a presenter, and off-camera wording is repaired for a presenter but
+left alone for a real voiceover.
 
 `tests/test_director_brief_api.py` (10) drives the routes over ASGI: a prose brief is
 reported, the route works with no model, the mechanical pass still fixes the shape, a

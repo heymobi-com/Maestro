@@ -187,24 +187,102 @@ def narrator_name(brief: str) -> str:
 
 
 def narration_is_present(brief: str) -> bool:
-    """Whether the brief puts the narrator inside the film rather than over it."""
+    """Whether the brief puts the narrator inside the film rather than over it.
 
-    text = str(brief or "").casefold()
-    return any(phrase in text for phrase in _PRESENCE_PHRASES)
+    Two ways to say it, and the second is the one real briefs use. Some write a rule
+    ("STANDING RULE: inside every scene"); most just show the narrator doing things —
+    "Anita walks the audience through the ancient landscape", "Anita stands near him",
+    "Anita moves through the camp". The phrase list alone missed a real 42-clip brief
+    built exactly that way, so the narrator was never marked as present and every shot was
+    planned as an off-screen voiceover.
+
+    So: an explicit phrase, or the narrator's own name next to a verb of presence.
+    """
+
+    text = str(brief or "")
+    lowered = text.casefold()
+    if any(phrase in lowered for phrase in _PRESENCE_PHRASES):
+        return True
+    name = narrator_name(text)
+    if not name:
+        return False
+    return bool(re.search(
+        rf"\b{re.escape(name)}\b[^.\n]{{0,90}}?\b"
+        r"(walks?|walking|stands?|standing|steps?|moves?|moving|crosses?|crossing|"
+        r"enters?|entering|kneels?|kneeling|sits?|sitting|points?|pointing|gestures?|"
+        r"gesturing|holds?|holding|leads?|leading|guides?|guiding|tours?|shows?|"
+        r"showing|beside|between|among|next to|in front of|through)\b",
+        text,
+        re.IGNORECASE,
+    ))
 
 
-def narration_presence(brief: str) -> str:
+def presenter_voiceover_repair(brief: str, prompt: str) -> str:
+    """Undo the off-camera wording when the brief puts the speaker inside the film.
+
+    The planner is told to use "says in an off-screen voiceover" for narration, and a
+    presenter who stands in the scene is not narration. Measured on a real 42-clip run,
+    every clip said "Anita (S1) says in an off-screen voiceover … while her lips remain
+    completely closed", so the renderer drew her as a voice and she appeared in no shot.
+
+    This is the deterministic half: if the brief has a presenter, that phrasing is rewritten
+    to on-camera delivery and the closed-lips clause is removed. It is a wording repair,
+    not a re-plan.
+    """
+
+    text = str(prompt or "")
+    name = narrator_name(brief)
+    if not text or not name or not narration_is_present(brief):
+        return text
+    repaired = re.sub(
+        r"(?i)\bsays?\s+in\s+an?\s+off[- ]screen\s+voiceover\b",
+        "says on camera, lips visible and moving",
+        text,
+    )
+    repaired = re.sub(
+        r"(?i)\b(the\s+)?voice[- ]over\b",
+        "on-camera speech",
+        repaired,
+    )
+    repaired = re.sub(
+        rf"(?i)(?:\s*,?\s*while\s+(?:her|his|their)\s+lips\s+remain\s+completely\s+closed)"
+        rf"|(?:\s*,?\s*and\s+(?:her|his|their)\s+lips\s+remain\s+completely\s+closed)",
+        "",
+        repaired,
+    )
+    repaired = re.sub(
+        r"(?i)\s+with\s+(?:her|his|their)\s+lips\s+(?:remaining\s+)?closed\b",
+        " with the mouth visible",
+        repaired,
+    )
+    return repaired
+
+
+def narration_presence(brief: str, *, compact: bool = False) -> str:
     """The on-screen-narrator contract for a brief that asks for one, or ``""``.
 
     A brief that says the narrator "moves through the settings" and "stands at the centre
     of the cinematic action" is asking for a presenter who is *in* the film. The planner
     read that as narration over the image and planned every shot as an off-screen
     voiceover, so the one person the film is built around appeared in none of them.
+
+    ``compact`` is for the per-shot context. The long form belongs in the planner's system
+    prompt, where it is read once; a shot needs the rule, not the essay. Measured on a real
+    42-clip run, the long form was 1,005 characters injected into every clip — identical —
+    while that clip's own action was 734, so the instruction outweighed the scene four to
+    one and every clip rendered the same shot.
     """
 
     if not narration_is_present(brief):
         return ""
     name = narrator_name(brief) or "the narrator"
+    if compact:
+        return (
+            f"{name} is ON SCREEN in this shot, inside the scene, speaking on camera with "
+            f"the mouth visible. Never off-screen voiceover for {name}. If the line "
+            f"describes something else, {name} is still in frame watching or gesturing at "
+            f"it."
+        )
     return f"""NARRATION PRESENCE — {name} IS IN THE FILM, NOT OVER IT (non-negotiable):
 - {name} is a visible participant of EVERY shot: on screen, in frame, inside the scene being described. Never off camera, never a disembodied voice.
 - Every shot lists {name} in subjects_on_screen with her own speaker cue, and her line is delivered ON CAMERA with the mouth visible and moving.

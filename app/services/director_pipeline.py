@@ -7875,7 +7875,9 @@ def _run_pipeline(pid: str, resume: bool = False):
         _director_prompt_diversity_report(
             clip_plans, pid=pid, kind=str(params.get("pipeline_type") or ""),
         )
-        _report_h3_manifest_issues(pid, params, clip_count=len(clip_plans))
+        _report_h3_manifest_issues(
+            pid, params, clip_count=len(clip_plans), clip_plans=clip_plans,
+        )
 
         _update_pipeline(pid, clip_plans=clip_plans, llm_streaming=False)
         _save_pipeline_state(pid)  # Save after planning
@@ -8826,14 +8828,36 @@ def _run_planning_v2(pid: str, params: dict, pipeline_type: str):
         }
         if is_h3_model:
             audio_plan = getattr(shot, "audio_plan", None)
+            source_prompt = (
+                clip_plans[index].get("video_prompt", "")
+                if index < len(clip_plans) else ""
+            )
+            # A presenter brief must not be planned as off-camera narration. Measured on a
+            # real 42-clip run, every clip said "says in an off-screen voiceover … while her
+            # lips remain completely closed", so the narrator was drawn as a voice and
+            # appeared in none of the shots.
+            try:
+                from services.director.scene_policy import presenter_voiceover_repair
+
+                repaired = presenter_voiceover_repair(scene_description, source_prompt)
+                if repaired != source_prompt:
+                    print(
+                        f"[Pipeline] Clip {index + 1}: the speaker is on screen in this "
+                        "brief; the off-camera voiceover wording was rewritten to "
+                        "on-camera delivery."
+                    )
+                    source_prompt = repaired
+                    if index < len(clip_plans):
+                        clip_plans[index]["video_prompt"] = repaired
+                    if index < len(planned_clips):
+                        planned_clips[index]["video_prompt"] = repaired
+            except Exception:  # noqa: BLE001 - a wording repair must never stop a plan
+                pass
             shot_state.update({
                 # Keep the planner's audiovisual description immutable. The
                 # final compiler may run once for review and again after the
                 # actual start/end/reference assets are known.
-                "_director_h3_source_prompt": (
-                    clip_plans[index].get("video_prompt", "")
-                    if index < len(clip_plans) else ""
-                ),
+                "_director_h3_source_prompt": source_prompt,
                 "_director_h3_prompt_mode": h3_initial_prompt_mode,
                 "_director_h3_model_family": h3_model_family,
                 "_director_project_context": _h3_shot_project_context(
@@ -9828,13 +9852,14 @@ def _h3_continuity_identity_risk(
 
 
 def _report_h3_manifest_issues(
-    pid: str, params: dict, *, clip_count: int = 0,
+    pid: str, params: dict, *, clip_count: int = 0, clip_plans: list[dict] | None = None,
 ) -> list[str]:
     """Print the reference problems and publish them with the plan warnings."""
 
     issues = [
         *_h3_manifest_issues(params or {}),
         *_h3_continuity_identity_risk(params or {}, clip_count),
+        *_h3_prompt_dilution_report(clip_plans or [], pid=pid),
     ]
     if not issues:
         return []
@@ -9860,6 +9885,14 @@ def _h3_world_context(brief: str, *, limit: int = 700) -> str:
     """The brief's world/style sections — never its cast list."""
 
     text = str(brief or "")
+    try:
+        from services.director.brief_assistant import reflow_brief
+
+        # A brief that arrives as one long line has no section boundaries at all, and this
+        # reader would find nothing or everything.
+        text = reflow_brief(text)
+    except Exception:  # noqa: BLE001 - guidance only
+        pass
     lines = text.splitlines()
     kept: list[str] = []
     capturing = False
@@ -9981,18 +10014,22 @@ def _h3_shot_project_context(
     parts: list[str] = []
     # Who is in every shot, when the brief asks for a presenter inside the film. The
     # planner can forget it; H3 must not, or the narrator is drawn as a voice with no body.
+    # The COMPACT form: this text is injected into every clip, and the long form was
+    # 1,005 characters of identical instruction against a 734-character scene, which is how
+    # a film ends up as the same shot forty times.
     try:
         from services.director.scene_policy import narration_presence
 
-        presence = narration_presence(brief)
+        presence = narration_presence(brief, compact=True)
         if presence:
             parts.append(presence)
     except Exception:  # noqa: BLE001 - guidance only
         pass
     if pictures:
         parts.append(pictures)
-    if cast_looks:
-        parts.append(cast_looks)
+    # Appearances are NOT repeated here: the planner already writes them into each
+    # subject row, and the compiler copies that row into subject_definitions. Injecting
+    # them again was pure duplication in every clip.
     # The lock's own S1/S2 lines are what number the participants, so they stay; the
     # "S3-S7 are presence-only" enumeration beside them names every other character
     # and is dropped with the rest of the cast list. They are re-emitted in the shape
@@ -10017,19 +10054,92 @@ def _h3_shot_project_context(
         cue_label = canonical_speaker_label(match.group(2))
         cue = f" ({cue_label})" if cue_label else ""
         parts.append(f"<Subject {int(match.group(1))}>{cue} is ALWAYS {words[0]}.")
-    world = _h3_world_context(brief)
+    # The world anchor, capped hard. The compiled prompt already carries `Canonical
+    # identity and world` from the shot's own environment and the visual style from its
+    # own field, so this is a reminder, not a description: every character it spends is a
+    # character the scene does not get.
+    world = _h3_world_context(brief, limit=200)
     if world:
         parts.append(world)
-    try:
-        from services.director.planners.short_film import _brief_stage_list, _stage_for_clip
-
-        stage = _stage_for_clip(_brief_stage_list(brief), index, total)
-    except Exception:
-        stage = None
-    if stage:
-        label = f" ({stage['label']})" if stage["label"] else ""
-        parts.append(f"Stage {stage['number']}{label}: {stage['text'][:400]}")
+    # The stage is NOT injected. It restated the film's own beat list inside every clip,
+    # and it contradicted the shot: a measured clip's context said "Locked-off wide shot of
+    # the valley" while its own description said "Medium static shot of Anita", so the two
+    # instructions fought and the repeated one won by volume. The shot's own description is
+    # the authority on what it shows.
     return "\n\n".join(parts)
+
+
+def _h3_prompt_dilution_report(clip_plans: list[dict], *, pid: str = "") -> list[str]:
+    """Say when the boilerplate outweighs the scene, which renders one shot forty times.
+
+    Measured on a real 42-clip run: the same 2,857-4,005 characters of injected context sat
+    inside every compiled prompt against a 734-character scene, and consecutive prompts
+    shared 75-88% of their words. The plan *looked* varied — every clip had its own action
+    and its own dialogue — and rendered as the same shot with different audio. Nothing
+    reported it, so it was paid for in GPU time.
+
+    Two measures, both on whatever compiled prompts exist:
+
+    * dilution — the injected context against the shot's own description;
+    * sameness — the word overlap between each prompt and the one before it.
+    """
+
+    if not clip_plans:
+        return []
+    findings: list[str] = []
+    diluted: list[int] = []
+    for index, plan in enumerate(clip_plans):
+        if not isinstance(plan, dict):
+            continue
+        context = str(plan.get("_director_project_context") or "")
+        source = str(plan.get("_director_h3_source_prompt") or plan.get("video_prompt") or "")
+        if not context or not source:
+            continue
+        if len(context) >= len(source) * 0.9:
+            diluted.append(index + 1)
+    if diluted:
+        findings.append(
+            f"{len(diluted)} of {len(clip_plans)} shots carry as much injected boilerplate as "
+            f"scene description (clips {', '.join(str(shot) for shot in diluted[:8])}"
+            + (", ..." if len(diluted) > 8 else "")
+            + "); the same text outweighs the action, so the model renders the same shot"
+        )
+
+    compiled = [
+        " ".join(str((plan or {}).get("_director_h3_compiled_prompt") or "").split())
+        for plan in clip_plans
+    ]
+    if sum(1 for text in compiled if text) >= 4:
+
+        def jaccard(left: str, right: str) -> float:
+            a, b = set(left.lower().split()), set(right.lower().split())
+            if not a or not b:
+                return 0.0
+            return len(a & b) / len(a | b)
+
+        runs: list[tuple[int, int, float]] = []
+        first = last = 0
+        for index in range(1, len(compiled)):
+            if not compiled[index] or not compiled[index - 1]:
+                continue
+            score = jaccard(compiled[index - 1], compiled[index])
+            if score >= 0.72:
+                if runs and runs[-1][1] == index - 1:
+                    previous = runs[-1]
+                    runs[-1] = (previous[0], index, max(previous[2], score))
+                else:
+                    runs.append((index - 1, index, score))
+        for start, end, score in runs:
+            if end - start + 1 < 3:
+                continue
+            findings.append(
+                f"clips {start + 1}-{end + 1} compile to nearly the same prompt "
+                f"({round(score * 100)}% of their words shared); they will render as one "
+                "shot repeated with different audio"
+            )
+    for finding in findings:
+        print(("[Pipeline %s] " % pid if pid else "[Pipeline] ") + finding)
+    return findings
 
 
 def _director_prompt_diversity_report(
@@ -10404,7 +10514,9 @@ def _run_video_generation(pid: str, params: dict, clip_plans: list[dict],
     _director_prompt_diversity_report(
         clip_plans, pid=pid, kind=str(params.get("pipeline_type") or ""),
     )
-    _report_h3_manifest_issues(pid, params, clip_count=len(clip_plans))
+    _report_h3_manifest_issues(
+            pid, params, clip_count=len(clip_plans), clip_plans=clip_plans,
+        )
     video_params = params.get("video_params", {})
     video_loras = params.get("video_loras", {})
     # Mirror of the image-LoRA file-existence filter — see _run_image_generation

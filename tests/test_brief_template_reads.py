@@ -71,18 +71,17 @@ class TemplateBriefTests(unittest.TestCase):
         self.assertEqual(_stage_for_clip(stages, 0, TOTAL_CLIPS)["number"], 1)
         self.assertEqual(_stage_for_clip(stages, TOTAL_CLIPS - 1, TOTAL_CLIPS)["number"], 7)
 
-    def test_the_priest_exists_only_in_his_own_stage(self):
-        stages = _brief_stage_list(BRIEF)
-        context_by_stage: dict[int, str] = {}
+    def test_the_priest_never_reaches_any_shot_context(self):
+        # The stage is no longer injected: it restated the film's beats inside every clip
+        # and contradicted the shot ("Locked-off wide shot" against "Medium static shot").
+        # So the priest's wardrobe cannot reach a shot by that route at all.
         for index in range(TOTAL_CLIPS):
-            number = _stage_for_clip(stages, index, TOTAL_CLIPS)["number"]
-            context_by_stage[number] = _h3_shot_project_context(BRIEF, index, TOTAL_CLIPS)
+            context = _h3_shot_project_context(BRIEF, index, TOTAL_CLIPS)
 
-        mentions = sorted(
-            number for number, context in context_by_stage.items()
-            if re.search(r"aurelio|chasuble|alb", context, re.I)
-        )
-        self.assertEqual(mentions, [5])
+            self.assertIsNone(
+                re.search(r"aurelio|chasuble|faded alb", context, re.I),
+                msg=f"clip {index + 1} learned the priest",
+            )
 
     def test_a_clip_never_learns_the_whole_cast(self):
         context = _h3_shot_project_context(BRIEF, 0, TOTAL_CLIPS)
