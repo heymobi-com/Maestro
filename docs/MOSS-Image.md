@@ -9,6 +9,64 @@ Start at **1024 × 1024, 50 steps, guidance 3, flow shift 5, batch 1**. These
 checkpoints are not step-distilled. SFT adds curated-data post-training to Base;
 both use the same architecture and generation recipe.
 
+## Reference editing
+
+The separate **MOSS Image Edit SFT** and **MOSS Image Edit HQ v5** entries use
+the SFT transformer with a required editing adapter. In **Studio → Image →
+Generate**, add one to four source images in the desired order, select an editor,
+and describe what to change and what to keep. These are community editors;
+Base and SFT text-to-image entries retain their existing behavior.
+
+Start with 50 Euler steps, shift 5 and batch 1. Edit SFT defaults to guidance 4;
+HQ v5 defaults to guidance 3. The selected resolution sets the output canvas.
+HQ fits each reference within 384 pixels per side; Edit SFT fits within 1024.
+Fitting retains the full image and rounds dimensions to the VAE's 16-pixel
+lattice. Small details can be lost when references are reduced.
+
+For a localized edit, try: `Change only the jacket to dark blue. Preserve the
+person's face, hair, pose, background and lighting.` For several sources, say
+`Keep the person from image 1, use the jacket from image 2, and preserve the room
+from image 3.` Explain each source's role. HQ is primarily intended for bounded
+single-source edits; multi-image compositing is less established. Neither
+editor guarantees unchanged pixels or provides masks, inpainting or outpainting.
+The layout Prompt Helper remains exclusive to text-to-image generation.
+
+Prompt enhancement is optional. The editor guide refines the requested changes
+and preservation instructions instead of compiling a new scene or layout boxes.
+The required editor adapter loads automatically; it is excluded from optional
+LoRA choices to avoid applying it twice or mixing the two editor contracts.
+Additional MOSS style adapters remain separate and can affect preservation.
+
+Both editors reuse already downloaded SFT/text-encoder files. They also require
+the full Flux2 VAE's image encoder and their own editing adapter; the small MOSS
+decoder and normalization statistics stay in use. Model readiness checks include
+these companions. The HQ preset pins the author's recommended armV5, rather
+than experimental v6. See the [HQ model card](https://huggingface.co/akhaliq/MOSS-Image-Edit-HQ/tree/b4114b929f5e24904ae72697d9a719810aac1da9)
+and [component notices](../app/models/moss_image/NOTICE). The original chinoll
+adapter repository does not declare weight-license terms; its terms should not
+be inferred from the SFT base's Apache-2.0 license.
+
+### Reference cache
+
+The editor's advanced controls offer **Disabled**, **Enabled**, **INT8** and
+**INT8 in RAM**. Disabled is the default and recomputes reference features each
+step. Enabled retains full-precision reference K/V for this generation. INT8
+compresses those cached tensors, with a numerical-precision tradeoff; it does
+not quantize the whole model or halve total job memory. RAM mode streams each
+layer's cache and may be slower because of transfers.
+
+Caches are local to one request and released on completion, cancellation or
+failure. HQ keeps its guidance branches independent. Step-varying LoRAs require
+fresh reference projections, so caching is disabled for those schedules.
+The first denoising pass is uncached so MMGP can settle transformer residency;
+the memory check then runs before caches are populated on subsequent passes.
+Conservative memory checks can decline caching; the runtime log reports the
+requested mode, actual mode and fallback reason. A selected cache option is not
+proof that acceleration ran. Start at a smaller canvas and batch 1 on limited
+VRAM; GPU speed and quality measurements for the new editors remain pending.
+
+## Text-to-image prompts
+
 Write a natural-language caption or tags. Describe the subject, composition,
 lighting and materials. Quote exact requested lettering. Prompt enhancement is
 optional and off by default; the enhancer follows MOSS's own caption/layout rules.
@@ -190,3 +248,64 @@ geometry, exact multilingual text, invalid-layout repair and legacy-layout
 preservation, plus desktop/mobile checks for character and canvas-arrangement
 controls. These checks do not measure the quality of live LLM rewrites or new
 image generations; the existing GPU smoke tests above predate this follow-up.
+
+## Reference-editing validation — 26 October 2026
+
+The local editing implementation passed 248 offline CPU regressions spanning
+MOSS generation/editing, LoRAs, cache storage and budgeting, Studio workflows,
+and enhancement routing for MOSS, Flux and H3. Coverage includes cached versus
+uncached tiny-model results, separate HQ guidance states and layer skipping,
+INT8 numerical tolerance, changed-reference/request isolation, cancellation
+cleanup, encoder latent packing, small overlapping tiles, and ordered enhancer
+attachments. The production UI build and configured undefined-name checks for
+the changed application modules also passed.
+
+A separate meta-model audit compared the actual released safetensors JSON
+headers to Maestro's native modules and LoRA preprocessor. Both chosen adapters
+matched all 252 target modules / 504 matrices. All 108 full-VAE encoder keys and
+143 small-decoder/normalization keys matched, with no missing keys or shape
+mismatches. This audit fetched metadata and headers, without tensor payloads.
+
+These checks establish integration and shape compatibility, not trained editing
+quality or GPU acceleration. No new editor GPU jobs or full weight downloads
+were run in this implementation pass. Visual editing, full-precision/INT8 cache
+comparisons, memory use and actual speed on 24GB, 12GB and 8GB machines remain
+pending. The earlier text-to-image GPU results above do not validate the new
+reference editors.
+
+## Reference-editing GPU follow-up — 27 October 2026
+
+Eighteen bounded SFT/HQ editing and cache cases completed on RTX 4090 24GB,
+RTX 3080 Ti 12GB, and RTX 5070 Laptop 8GB systems. The actual 512×512 outputs
+were fully decoded on CPU and every contact sheet was reviewed. Original
+preferences were preserved.
+
+HQ's 16-bit, INT8-VRAM, and INT8-RAM caches activated on the 24GB and 12GB
+machines. On 8GB all three requested cache modes safely declined the memory
+budget and completed uncached. That is a functioning fallback, not an 8GB
+cache acceleration result. Single-reference edits retained the robot while
+changing the wall color. Two-reference composition added the cup but changed
+its handle and the robot's antenna, with some cup shapes leaking into the
+face. These fixtures do not establish general quality or a matched speedup;
+the machines retained their different saved memory policies.
+
+### HQ v5 conditioning correction
+
+Further user testing exposed two gaps: a stale reference selector after switching
+from Fibo could reject both editors, and the HQ port omitted image features in
+the text encoder. The small robot outputs above exercised the old latent-only
+HQ path; they do not establish faithful HQ v5 conditioning.
+
+HQ v5 requires both VAE reference latents and Qwen3.5 vision features inside its
+text input. Its separate vision component adds a roughly 912 MB download; the
+existing MOSS text weights remain in use. Vision references use a 512×512 pixel
+budget, while VAE references preserve more detail within a 1024-pixel maximum
+side. These are separate from the selected output canvas and the VAE tile size.
+SFT continues to use its original latent-only reference contract.
+Both editors preserve each source image's native proportions through shared
+preprocessing. A fixed output canvas does not letterbox the references; the
+model's own bounded reference encoders perform their later resizing.
+
+For HQ, start with one source and a localized edit. Multi-image compositing and
+precise hand or text replacement remain quality-sensitive. A job completing
+without an exception does not establish that its edit is visually successful.

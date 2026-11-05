@@ -18,7 +18,10 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'app'))
 from services import llm_service, studio_enhancement as enhancement
+from services.comfyui_runtime import ServiceError as ComfyServiceError
 from services.job_lifecycle import finish_job, generation_slot, is_cancel_requested, request_cancel, snapshot_job, try_start, update_job
+from services.agent_access.backend import AgentAccessBackend, is_restricted_agent
+from services.agent_access.context import principal_context
 
 TREE = ast.parse((ROOT / 'app/launch.py').read_text(encoding='utf-8'))
 
@@ -51,6 +54,13 @@ class EnhancedJobWiringTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.archive = enhancement.StudioJobArchive(self.temp.name)
+        access_root = Path(self.temp.name) / 'agent-access-root'
+        access_root.mkdir()
+        self.agent_backend = AgentAccessBackend(
+            SimpleNamespace(directory=Path(self.temp.name) / 'agent-access-settings', backend=lambda: {}),
+            access_root,
+            recover_previous=False,
+        )
         self.engine = SimpleNamespace(wan_model=None, offloadobj=None, release_model=Mock(),
             get_model_def=lambda _: {'architecture': 'minimax_h3', 'fps': 24, 'frames_maximum': 345})
         self.params = {'model_type': 'minimax_h3_fused_turbo', 'prompt': 'A mountain duel.',
@@ -63,18 +73,30 @@ class EnhancedJobWiringTests(unittest.TestCase):
             return {'params': deepcopy(params), 'workspace': 'captured'}
         self.prepare = AsyncMock(side_effect=prepare)
         self.writer = AsyncMock(return_value={'enhanced': 'Finished native prompt.'})
+        self.comfy_adapter = SimpleNamespace(
+            capture_engine=Mock(return_value={"engine": "native"}),
+            attach_native=Mock(return_value=None),
+        )
         self.ns = dict(asyncio=asyncio, deepcopy=deepcopy, wraps=wraps, Request=Request, HTTPException=HttpError,
             Path=Path, _app_dir=self.temp.name,
             uuid=uuid, time=time, threading=threading, wgp=self.engine, update_job=update_job,
             is_cancel_requested=is_cancel_requested, snapshot_job=snapshot_job,
             _studio_job_archive=self.archive, _jobs=self.jobs, _studio_submission_lock=threading.RLock(),
+            _agent_access_backend=self.agent_backend,
+            _is_restricted_agent=is_restricted_agent,
+            principal_context=principal_context,
             _gen_lock=threading.Lock(), enhancement_context=enhancement.enhancement_context,
             prepare_enhanced_job=enhancement.prepare_enhanced_job, public_enhancement=enhancement.public_enhancement,
             new_enhancement=enhancement.new_enhancement, _enhancement_settings_snapshot=lambda: {'llm_model_id': 'writer-a'},
             _llm_enhance_prompt_payload=self.writer, _prepare_generation_submission=self.prepare,
             _get_active_workspace=lambda: 'captured', _workspace_dir=lambda name: 'captured-output',
-            _run_generation=Mock())
+            _run_generation=Mock(), _comfy_adapter=self.comfy_adapter,
+            _ComfyServiceError=ComfyServiceError)
+        load('_agent_require_job_access', self.ns)
         self.run_enhancement = load('_prepare_job_enhancement', self.ns)
+        load('_pop_editor_submission', self.ns)
+        load('_existing_editor_operation_job', self.ns)
+        load('_bind_editor_operation_job', self.ns)
         for method in ('is_loaded', 'unload_model'):
             mock = patch.object(llm_service, method, return_value=(method == 'is_loaded'))
             mock.start()
@@ -266,11 +288,29 @@ class EnhancedJobWiringTests(unittest.TestCase):
             response = enqueue(body)
         thread.assert_not_called()
         self.writer.assert_not_awaited()
+        self.comfy_adapter.capture_engine.assert_called_once()
+        self.comfy_adapter.attach_native.assert_not_called()
         body['prompt'] = 'Changed after submission'
         saved = self.archive.recover()[response['job_id']]
         self.assertEqual(saved['status'], 'held')
         self.assertEqual(saved['enhancement']['original_prompt'], 'A mountain duel.')
         self.assertNotIn('_deferred_generation_prepare', saved['enhancement']['original_params'])
+
+    def test_comfy_engine_snapshot_is_preserved_for_held_submission(self):
+        snapshot = {"engine": "comfyui", "route": {"name": "fixture"}}
+        self.comfy_adapter.capture_engine.return_value = snapshot
+        enqueue = load("_enqueue_deferred_generation_preparation", self.ns)
+        body = {**self.params, "_enhance_on_generation": True, "_queue_mode": "held"}
+
+        with patch.object(threading, "Thread") as thread:
+            response = enqueue(body)
+
+        saved = self.archive.recover()[response["job_id"]]
+        thread.assert_not_called()
+        self.comfy_adapter.capture_engine.assert_called_once()
+        self.comfy_adapter.attach_native.assert_not_called()
+        self.assertEqual(saved["generation_engine_snapshot"], snapshot)
+        self.writer.assert_not_awaited()
 
     def test_submission_retry_does_not_create_second_job(self):
         load('_enqueue_deferred_generation_preparation', self.ns)
@@ -282,6 +322,8 @@ class EnhancedJobWiringTests(unittest.TestCase):
             second = asyncio.run(generate(request))
         self.assertEqual(first['job_id'], second['job_id'])
         self.assertEqual(thread.call_count, 1)
+        self.comfy_adapter.capture_engine.assert_called_once()
+        self.comfy_adapter.attach_native.assert_not_called()
 
     def test_retry_reuses_draft_refreshes_only_on_request_and_accepts_review_explicitly(self):
         retry = load('retry_enhanced_job', self.ns)

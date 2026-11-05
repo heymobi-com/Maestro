@@ -13,6 +13,7 @@ import socket
 import threading
 from typing import Callable
 from services.enhancement_diagnostics import capture_drafts
+from services.generation_details import is_terminal_studio_failure, public_generation_details
 
 
 _request_context: ContextVar[dict | None] = ContextVar("studio_enhancement", default=None)
@@ -205,6 +206,31 @@ def public_enhancement(record: dict | None, *, summary: bool = False, include_dr
     return {key: deepcopy(record.get(key)) for key in keys}
 
 
+def canonical_h3_enhancement_inputs(prompt: str, references) -> dict:
+    """Build writer inputs from the same reference bindings used by generation.
+
+    Browser prose is useful for older clients, but it must not override the
+    selected media's identity, scene, composition or voice associations.
+    """
+    from models.minimax_h3.ref2va import align_ref2va_voice_reference_order
+    from models.minimax_h3.reference_manifest import validate_reference_manifest
+    from services.h3_reference_audio import measure_video_audio_metadata
+    from services.h3_sequence_planner import _reference_context
+
+    validated = validate_reference_manifest(
+        references, require_files=False, require_visual=False, allow_empty=True,
+    )
+    measured = measure_video_audio_metadata(validated)
+    aligned_prompt, ordered, _remap = align_ref2va_voice_reference_order(prompt, measured)
+    relationships, retention, _task_types = _reference_context(ordered)
+    return {
+        "prompt": aligned_prompt,
+        "minimax_h3_references": ordered,
+        "image_paths": [item["path"] for item in ordered if item.get("type") == "image" and item.get("path")],
+        "reference_context": "\n".join(part for part in (relationships, retention) if part),
+    }
+
+
 def enhancement_request(params: dict, model: dict) -> tuple[dict, bool]:
     """Construct the same native writer inputs used by interactive Enhance."""
     mode = params.get("generation_mode") or ("image" if model.get("image_outputs") else "video")
@@ -221,20 +247,29 @@ def enhancement_request(params: dict, model: dict) -> tuple[dict, bool]:
         params.get("ltx_multi_window") and total > window)
     images: list[str] = []
     context: list[str] = []
+    native_reference_inputs: dict = {}
     if omni:
-        from services.h3_sequence_planner import _reference_context
-        from models.minimax_h3.ref2va import canonicalize_ref2va_reference_order
-        from services.h3_reference_audio import measure_video_audio_metadata
-        references = measure_video_audio_metadata(params.get("minimax_h3_references") or [])
-        _, references, _ = canonicalize_ref2va_reference_order("", references)
-        relationships, retention, _ = _reference_context(references)
-        context.extend([relationships, retention])
-        images.extend(ref["path"] for ref in references if ref.get("type") == "image" and ref.get("path"))
+        native_reference_inputs = canonical_h3_enhancement_inputs(
+            str(params.get("prompt") or ""), params.get("minimax_h3_references") or [],
+        )
+        context.append(native_reference_inputs["reference_context"])
+        images.extend(native_reference_inputs["image_paths"])
     elif mode == "image":
         if params.get("image_guide") and "V" in str(params.get("video_prompt_type") or ""):
             images.append(params["image_guide"])
             context.append("Picture 1 is the source/control image. Preserve the requested structure and change only what the user asks to edit.")
-        images.extend(params.get("image_refs") or [])
+        image_refs = params.get("image_refs") or []
+        images.extend(image_refs)
+        if model.get("moss_edit") and image_refs:
+            context.append(
+                "The MOSS Image Edit reference attachments follow image_refs order. "
+                "The brief assigns their roles; the order map itself does not assign roles."
+            )
+        elif model.get("instruction_image_edit") and image_refs:
+            context.append(
+                "Reference image numbers follow image_refs attachment order, beginning at image 1. "
+                "Preserve the roles assigned by the user; do not exchange source identities."
+            )
     else:
         for field, time in (("image_start", "0.00"), ("image_end", f"{total / fps:.2f}")):
             if params.get(field):
@@ -254,6 +289,7 @@ def enhancement_request(params: dict, model: dict) -> tuple[dict, bool]:
         "image_paths": images, "reference_context": "\n".join(context),
         "activated_loras": deepcopy(params.get("activated_loras") or []),
     }
+    payload.update(native_reference_inputs)
     return payload, sequence
 
 
@@ -310,7 +346,7 @@ async def prepare_enhanced_job(params: dict, model: dict, enhance, prepare, *, p
 
 
 class StudioJobArchive:
-    """Atomic checkpoints for opted-in Studio jobs, without browser state."""
+    """Enhancement checkpoints and terminal Studio failures, without browser state."""
     def __init__(self, directory: str | Path):
         self.directory = Path(directory)
 
@@ -320,15 +356,30 @@ class StudioJobArchive:
         return self.directory / (job_id + ".json")
 
     def save(self, job: dict, *_args) -> None:
-        if not job.get("enhancement"):
-            return
         with _disk_lock:
             if job.get("dismissed"):
                 self.remove(job["id"])
                 return
+            if not self._eligible(job):
+                return
             path = self._path(job["id"])
             self.directory.mkdir(parents=True, exist_ok=True)
-            data = {key: deepcopy(value) for key, value in job.items() if not key.startswith('_')}
+            if job.get("enhancement"):
+                # Enhancement records are resumable and retain their existing
+                # execution checkpoint. Ordinary failures are display history,
+                # never an executable request after restart.
+                data = {key: deepcopy(value) for key, value in job.items() if not key.startswith('_')}
+            else:
+                details = public_generation_details(job)
+                fields = {
+                    "id", "kind", "status", "progress", "step", "total_steps", "phase",
+                    "message", "error", "output_files", "created_at", "workspace",
+                    "client_submission_id", "show_in_gallery", "oom_info",
+                }
+                data = {key: deepcopy(value) for key, value in job.items() if key in fields}
+                data["params"] = details["params"]
+                if "performance_plan" in details:
+                    data["performance_plan"] = details["performance_plan"]
             temporary = path.with_suffix('.tmp')
             with temporary.open('w', encoding='utf-8') as file:
                 json.dump(data, file, ensure_ascii=False)
@@ -336,12 +387,16 @@ class StudioJobArchive:
                 os.fsync(file.fileno())
             os.replace(temporary, path)
 
+    @staticmethod
+    def _eligible(job: dict) -> bool:
+        return bool(job.get("enhancement")) or is_terminal_studio_failure(job)
+
     def recover(self) -> dict:
         result = {}
         for path in self.directory.glob('*.json'):
             try:
                 job = json.loads(path.read_text(encoding='utf-8'))
-                if self._path(job['id']) != path or not job.get('enhancement'):
+                if self._path(job['id']) != path or not self._eligible(job) or job.get('dismissed'):
                     continue
                 if job['status'] in {'queued', 'running'}:
                     # Never rerun a possibly finished diffusion pass after an

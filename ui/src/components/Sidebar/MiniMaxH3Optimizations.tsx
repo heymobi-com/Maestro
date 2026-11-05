@@ -5,6 +5,7 @@ import type { ModelOptions } from '../../types'
 import { InfoTooltip } from './InfoTooltip'
 import { H3SetupGuide } from './H3SetupGuide'
 import { readPersistentDisclosure, writePersistentDisclosure } from '../../lib/persistentDisclosure'
+import { isPikaFlexModelType } from '../../lib/h3Memory'
 
 const H3_OPTIMIZATIONS_EXPANDED_KEY = 'maestro-h3-optimizations-expanded'
 
@@ -14,9 +15,10 @@ export function MiniMaxH3Optimizations() {
     readPersistentDisclosure(H3_OPTIMIZATIONS_EXPANDED_KEY, true)
   ))
   const modelOptions = useStore(s => s.modelOptions)
-  const option = useStore(s => s.modelOptions?.minimax_h3_turbo)
-  const advisory = useStore(s => s.modelOptions?.minimax_h3_runtime_advisory)
   const params = useStore(s => s.params)
+  const pikaFlex = isPikaFlexModelType(params.model_type, modelOptions)
+  const option = pikaFlex ? undefined : modelOptions?.minimax_h3_turbo
+  const advisory = useStore(s => s.modelOptions?.minimax_h3_runtime_advisory)
   const currentSteps = useStore(s => s.params.num_inference_steps)
   const defaultSteps = useStore(s => s.modelOptions?.minimax_h3_turbo?.unaccelerated_steps
     ?? s.modelOptions?.default_num_inference_steps)
@@ -46,7 +48,7 @@ export function MiniMaxH3Optimizations() {
           revision: '',
         }]
       : []
-  const turboEnabled = params.minimax_h3_turbo_mode === true
+  const turboEnabled = !pikaFlex && params.minimax_h3_turbo_mode === true
   const defaultTurboPreset = (
     turboPresets.find(preset => preset.id === option?.preset_id)
     || turboPresets[0]
@@ -67,9 +69,10 @@ export function MiniMaxH3Optimizations() {
   const solEnabled = params.override_attention === 'sol'
   const slaEnabled = params.override_attention === 'sla'
   const vedaEnabled = params.override_attention === 'veda'
-  const cacheEnabled = params.skip_steps_cache_type === 'first_block'
+  const cacheEnabled = !pikaFlex && params.skip_steps_cache_type === 'first_block'
   const solSupported = modelOptions?.sol_attention_status?.supported === true
   const slaSupported = modelOptions?.sla_attention_status?.supported === true
+  const slaFallbackActive = pikaFlex && slaEnabled && !slaSupported
   const slaExperimental = modelOptions?.sla_attention_experimental === true
   const vedaStatus = modelOptions?.veda_attention_status
   const vedaSupported = vedaStatus?.supported === true
@@ -98,7 +101,7 @@ export function MiniMaxH3Optimizations() {
       setParam('override_attention', '')
     }
   }, [params.override_attention, solCheck.blocked, slaCheck.blocked, vedaCheck.blocked, setParam])
-  const activeCount = [turboEnabled, solEnabled, slaEnabled, vedaEnabled, cacheEnabled].filter(Boolean).length
+  const activeCount = [turboEnabled, solEnabled && solSupported, slaEnabled && slaSupported, vedaEnabled && vedaSupported, cacheEnabled].filter(Boolean).length
 
   if (!isH3 && !advisory) return null
 
@@ -341,6 +344,26 @@ export function MiniMaxH3Optimizations() {
               </div>
             )}
 
+            {pikaFlex && (
+              <div className="flex items-center gap-3 px-3 py-2">
+                <div className="min-w-0 flex-1">
+                  <label htmlFor="pika-dense-attention" className="block text-[11px] font-medium text-text-primary">Dense attention</label>
+                  <p className="text-[9px] text-text-muted">{slaFallbackActive ? 'SLA is selected; dense fallback is active on this GPU.' : 'Choosing a dense backend turns sparse attention off.'}</p>
+                </div>
+                <select
+                  id="pika-dense-attention"
+                  value={slaFallbackActive ? 'fallback' : solEnabled || slaEnabled ? 'sparse' : params.override_attention === 'sdpa' ? 'sdpa' : 'sage2'}
+                  onChange={event => setParam('override_attention', event.target.value as 'sage2' | 'sdpa')}
+                  className="rounded-md border border-border bg-bg-secondary px-2 py-1.5 text-[10px] text-text-primary outline-none focus:border-accent-blue"
+                >
+                  {slaFallbackActive && <option value="fallback" disabled>Dense fallback active</option>}
+                  {(solEnabled || slaEnabled) && !slaFallbackActive && <option value="sparse" disabled>Sparse attention active</option>}
+                  <option value="sage2">Sage2</option>
+                  <option value="sdpa">SDPA</option>
+                </select>
+              </div>
+            )}
+
             {modelOptions?.sol_attention && !solCheck.blocked && (
               <div className={`flex items-center gap-2 px-3 py-2 transition-colors ${
                 solEnabled ? 'bg-accent-blue/10' : ''
@@ -360,7 +383,7 @@ export function MiniMaxH3Optimizations() {
                   />
                   <Gauge size={13} className={solEnabled ? 'text-accent-blue' : 'text-text-muted'} />
                   <span className="min-w-0">
-                    <span className="block text-[11px] font-medium text-text-primary">Sol Engine</span>
+                    <span className="block text-[11px] font-medium text-text-primary">Sol Engine{pikaFlex ? ' — Experimental' : ''}</span>
                     <span className="block text-[9px] text-text-muted">
                       {solSupported ? 'H3 sparse attention' : 'Unavailable in this runtime'}
                     </span>
@@ -394,7 +417,7 @@ export function MiniMaxH3Optimizations() {
                     </span>
                     <span className="block text-[9px] text-text-muted">
                       {slaSupported
-                        ? slaExperimental ? 'Optional acceleration; compare motion and audio' : 'Published FastH3 sparse recipe'
+                        ? slaExperimental ? pikaFlex ? 'Default on supported GPUs; compare motion and audio' : 'Optional acceleration; compare motion and audio' : 'Published FastH3 sparse recipe'
                         : 'Safe dense fallback when unavailable'}
                     </span>
                   </span>
@@ -403,7 +426,7 @@ export function MiniMaxH3Optimizations() {
                   label="About H3 SLA"
                   text={slaSupported
                     ? slaExperimental
-                      ? 'Uses 90% block-sparse attention on this Full or Pruned checkpoint. Off by default; speed, motion, reference fidelity and audio quality need comparison. The first use compiles Triton kernels. Reference and audio prefix rows stay protected.'
+                      ? pikaFlex ? 'Default on supported GPUs. Uses 90% block-sparse attention and safely falls back to dense attention when unavailable. Compare motion and audio; the first use compiles Triton kernels.' : 'Uses 90% block-sparse attention on this Full or Pruned checkpoint. Off by default; speed, motion, reference fidelity and audio quality need comparison. The first use compiles Triton kernels. Reference and audio prefix rows stay protected.'
                       : 'Uses the checkpoint author\'s 90% block-sparse SLA recipe. The first use compiles and caches Triton kernels; reference and audio prefix rows stay protected.'
                     : `${modelOptions?.sla_attention_status?.reason || 'SLA is unavailable in this runtime.'} Maestro will automatically use dense attention.`}
                 />
@@ -448,7 +471,7 @@ export function MiniMaxH3Optimizations() {
               </div>
             )}
 
-            {modelOptions?.first_block_cache && (
+            {!pikaFlex && modelOptions?.model_type === params.model_type && modelOptions.first_block_cache && (
               <div className={`flex items-center gap-2 px-3 py-2 transition-colors ${
                 cacheEnabled ? 'bg-accent-blue/10' : ''
               }`}>

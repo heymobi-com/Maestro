@@ -2,22 +2,31 @@ import { useEffect, useRef, useState } from 'react'
 import {
   Check,
   ChevronDown,
+  AudioLines,
+  Archive,
   CopyPlus,
   Download,
+  FileText,
   FilePlus2,
   Loader2,
   Menu,
   Redo2,
+  RotateCcw,
   Save,
   Settings,
+  Sparkles,
   Trash2,
   Undo2,
 } from 'lucide-react'
 import { GlobalQueuePopover } from '../components/GlobalQueuePopover'
 import { AppModeToggle, MaestroBrand } from '../components/AppModeNavigation'
-import { useIsMobile } from '../lib/useIsMobile'
+import { useIsMobileSidecar } from '../lib/useIsMobile'
 import { useStore } from '../stores/useStore'
 import { EditorExportDialog } from './EditorExportDialog'
+import { EditorCaptionsDialog } from './EditorCaptionsDialog'
+import { EditorAudioTools } from './EditorAudioTools'
+import { EditorProjectTools } from './EditorProjectTools'
+import { EditorAutoEditDialog } from './EditorAutoEditDialog'
 import { useEditorStore } from './useEditorStore'
 
 const CANVAS_PRESETS = [
@@ -61,11 +70,16 @@ function ProjectNameField({
 }
 
 export function EditorTopBar() {
-  const isMobile = useIsMobile()
+  const isMobile = useIsMobileSidecar()
   const rootRef = useRef<HTMLDivElement>(null)
   const [projectMenuOpen, setProjectMenuOpen] = useState(false)
   const [exportDialogOpen, setExportDialogOpen] = useState(false)
+  const [captionsDialogOpen, setCaptionsDialogOpen] = useState(false)
+  const [audioToolsOpen, setAudioToolsOpen] = useState(false)
+  const [projectToolsOpen, setProjectToolsOpen] = useState(false)
+  const [autoEditOpen, setAutoEditOpen] = useState(false)
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
+  const [discardConfirmed, setDiscardConfirmed] = useState(false)
   const project = useEditorStore(state => state.project)
   const projects = useEditorStore(state => state.projects)
   const dirty = useEditorStore(state => state.dirty)
@@ -213,6 +227,19 @@ export function EditorTopBar() {
                 </div>
               ))}
             </div>
+            {project && (
+              <div className="border-t border-border p-2">
+                <button type="button" disabled={saving} onClick={() => {
+                  if (dirty && !discardConfirmed) { setDiscardConfirmed(true); return }
+                  void loadProject(project.id, { discardUnsaved: true })
+                  setDiscardConfirmed(false)
+                  setProjectMenuOpen(false)
+                }} className={`flex w-full items-center gap-2 rounded-lg px-2 py-2 text-xs disabled:opacity-40 ${discardConfirmed ? 'bg-red-500/10 text-red-400' : 'text-text-secondary hover:bg-bg-hover'}`}>
+                  <RotateCcw size={13} />{discardConfirmed ? 'Discard unsaved edits and reload — confirm' : 'Reload saved project'}
+                </button>
+                {dirty && <p className="px-2 pt-1 text-xs text-text-muted">Use Version to keep a separate copy of these edits.</p>}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -234,6 +261,41 @@ export function EditorTopBar() {
       )}
 
       <div className={`ml-auto flex shrink-0 items-center gap-0.5 md:gap-1 ${isMobile ? 'order-2' : ''}`}>
+        <button type="button" aria-label="Auto-edit" title="Review an automatic edit plan" disabled={!project}
+          onClick={() => { setExportDialogOpen(false); setProjectToolsOpen(false); setAudioToolsOpen(false); setCaptionsDialogOpen(false); setAutoEditOpen(true) }}
+          className="flex items-center gap-1.5 rounded-lg p-2 text-accent-blue hover:bg-accent-blue/10 disabled:opacity-40">
+          <Sparkles size={isMobile ? 18 : 16} /><span className="hidden text-xs font-medium xl:inline">Auto-edit</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => { setCaptionsDialogOpen(false); setAudioToolsOpen(false); setExportDialogOpen(false); setProjectToolsOpen(true) }}
+          disabled={!project}
+          aria-label="Project tools"
+          className="rounded-lg p-2 text-text-secondary hover:bg-bg-hover hover:text-text-primary disabled:opacity-40"
+          title="Project history and portable ZIP tools"
+        >
+          <Archive size={isMobile ? 18 : 15} />
+        </button>
+        <button
+          type="button"
+          onClick={() => { setProjectToolsOpen(false); setAudioToolsOpen(false); setCaptionsDialogOpen(true) }}
+          disabled={!project}
+          aria-label="Captions"
+          className="rounded-lg p-2 text-text-secondary hover:bg-bg-hover hover:text-text-primary disabled:opacity-40"
+          title="Import, edit, and export captions"
+        >
+          <FileText size={isMobile ? 18 : 15} />
+        </button>
+        <button
+          type="button"
+          onClick={() => { setProjectToolsOpen(false); setCaptionsDialogOpen(false); setAudioToolsOpen(true) }}
+          disabled={!project}
+          aria-label="Audio tools"
+          className="rounded-lg p-2 text-text-secondary hover:bg-bg-hover hover:text-text-primary disabled:opacity-40"
+          title="Ducking, loudness, and transcription tools"
+        >
+          <AudioLines size={isMobile ? 18 : 15} />
+        </button>
         {!isMobile && (
           <>
             <button type="button" onClick={undo} disabled={history.length === 0} className="rounded-lg p-2 text-text-secondary hover:bg-bg-hover hover:text-text-primary disabled:opacity-25" title="Undo (Ctrl+Z)">
@@ -274,6 +336,10 @@ export function EditorTopBar() {
         </button>
       </div>
       <EditorExportDialog open={exportDialogOpen} onClose={() => setExportDialogOpen(false)} />
+      <EditorCaptionsDialog open={captionsDialogOpen} onClose={() => setCaptionsDialogOpen(false)} />
+      <EditorAudioTools open={audioToolsOpen} onClose={() => setAudioToolsOpen(false)} />
+      <EditorProjectTools open={projectToolsOpen} onClose={() => setProjectToolsOpen(false)} />
+      <EditorAutoEditDialog open={autoEditOpen} onClose={() => setAutoEditOpen(false)} />
     </header>
   )
 }

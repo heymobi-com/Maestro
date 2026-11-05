@@ -2,7 +2,7 @@ const {
   isSolCapable,
   needsCuda13DriverUpdate,
   runtimeProfile,
-} = require("./launcher_profile")
+} = require("./scripts/pinokio/launcher_profile")
 
 module.exports = async (kernel) => {
   const runtime = runtimeProfile(kernel)

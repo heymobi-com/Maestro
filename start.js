@@ -3,7 +3,7 @@ const {
   legacyRuntimeProfile,
   runtimeProfile,
   rtx50Profile,
-} = require("./launcher_profile")
+} = require("./scripts/pinokio/launcher_profile")
 
 const appControlFailureEvent = "/(?:smart app control|application control|app control|device guard|wdac).*\\b(?:block(?:ed|ing)?|deny|denied|denial|prevent(?:ed|ing)?|restrict(?:ed|ion)?|unsigned|untrusted|reject(?:ed|ion)?|not allowed|not permitted)\\b|\\b(?:block(?:ed|ing)?|deny|denied|denial|prevent(?:ed|ing)?|restrict(?:ed|ion)?|unsigned|untrusted|reject(?:ed|ion)?|not allowed|not permitted)\\b.*(?:smart app control|application control|app control|device guard|wdac)|this app has been blocked by (?:your )?system administrator|blocked by group policy/i"
 const readyUrlPattern = /^http:\/\/(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d):(?:[1-9]\d{0,3}|[1-5]\d{4}|6[0-4]\d{3}|65[0-4]\d{2}|655[0-2]\d|6553[0-5])$/
@@ -59,6 +59,15 @@ module.exports = async (kernel) => {
         // Remove stale readiness keys without starting a share before launch.
         method: "local.rm",
         params: ["url", "port"],
+      },
+      {
+        // Keep the CPU-only control plane in its own Pinokio daemon. This is
+        // best-effort so Agent Access startup never blocks the model engine.
+        method: "shell.run",
+        params: {
+          path: ".",
+          message: ["node scripts/pinokio/agent_access_rpc.js autostart"],
+        },
       },
       ...runtimeGuard,
       {
@@ -121,7 +130,8 @@ module.exports = async (kernel) => {
           venv: selectedEnv,
           venv_python: selectedPython,
           env: {
-            SERVER_PORT: port
+            SERVER_PORT: port,
+            MAESTRO_LAUNCHER_SCRIPT: "start.js",
           },
           path: "app",
           message: [

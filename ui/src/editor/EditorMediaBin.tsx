@@ -8,14 +8,20 @@ import {
   Image as ImageIcon,
   Loader2,
   Plus,
+  List,
+  Grid2X2,
+  Eye,
   RefreshCw,
   Search,
+  Sparkles,
   Type,
   Upload,
 } from 'lucide-react'
 import type { EditorAsset, EditorMediaType, PipelineListItem } from '../types'
 import { useEditorMediaPreview } from './editorMediaPreview'
 import { useEditorStore } from './useEditorStore'
+import { EditorSourceViewer } from './EditorSourceViewer'
+import { EditorAnimatedTitleDialog } from './EditorAnimatedTitleDialog'
 
 type Filter = 'all' | 'favorites' | 'director' | EditorMediaType
 const MEDIA_BATCH_SIZE = 80
@@ -98,10 +104,10 @@ function DirectorRunPreview({ run, compact }: { run: PipelineListItem; compact: 
       ) : (
         <Clapperboard size={compact ? 28 : 22} className="text-accent-warm/80" />
       )}
-      <span className="absolute left-1.5 top-1.5 rounded bg-black/60 px-1.5 py-0.5 text-[7px] uppercase tracking-wide text-white/75">
+      <span className="absolute left-1.5 top-1.5 rounded bg-black/60 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-white/75">
         {run.pipeline_type === 'music_video' ? 'Music video' : run.pipeline_type === 'short_film_story' ? 'Short film' : 'Director'}
       </span>
-      <span className="absolute bottom-1.5 right-1.5 rounded bg-black/60 px-1.5 py-0.5 text-[7px] text-white/75">
+      <span className="absolute bottom-1.5 right-1.5 rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white/75">
         {run.clip_count} shot{run.clip_count === 1 ? '' : 's'}
       </span>
     </div>
@@ -115,6 +121,13 @@ export function EditorMediaBin({ compact = false }: { compact?: boolean }) {
   const [workspaceFilter, setWorkspaceFilter] = useState('all')
   const [visibleLimit, setVisibleLimit] = useState(MEDIA_BATCH_SIZE)
   const [uploading, setUploading] = useState(false)
+  const [view, setView] = useState<'grid' | 'list'>('grid')
+  const [thumbnailSize, setThumbnailSize] = useState(120)
+  const [usedOnly, setUsedOnly] = useState(false)
+  const [sourceAsset, setSourceAsset] = useState<EditorAsset | null>(null)
+  const [titleOpen, setTitleOpen] = useState(false)
+  const project = useEditorStore(state => state.project)
+  const cards = compact && view === 'grid'
   const library = useEditorStore(state => state.library)
   const projectWorkspace = useEditorStore(state => state.project?.workspace || 'default')
   const libraryWorkspaces = useEditorStore(state => state.libraryWorkspaces)
@@ -126,16 +139,21 @@ export function EditorMediaBin({ compact = false }: { compact?: boolean }) {
   const addMedia = useEditorStore(state => state.addMedia)
   const importDirectorRun = useEditorStore(state => state.importDirectorRun)
   const addTitle = useEditorStore(state => state.addTitle)
+  const usedAssets = useMemo(() => new Set((project?.tracks || []).flatMap(track => track.items)
+    .map(item => project?.assets[item.asset_id || '']).filter((asset): asset is EditorAsset => Boolean(asset))
+    .map(asset => `${asset.origin}:${asset.workspace || ''}:${asset.name}`)), [project])
+  const isUsed = (asset: EditorAsset) => usedAssets.has(`${asset.origin}:${asset.workspace || ''}:${asset.name}`)
 
   const visible = useMemo(() => {
     const query = search.trim().toLowerCase()
     if (filter === 'director') return []
     return library.filter(asset => (
       (workspaceFilter === 'all' || asset.workspace === workspaceFilter)
+      && (!usedOnly || usedAssets.has(`${asset.origin}:${asset.workspace || ''}:${asset.name}`))
       && (filter === 'all' || (filter === 'favorites' ? asset.favorite : asset.type === filter))
       && (!query || asset.name.toLowerCase().includes(query))
     ))
-  }, [filter, library, search, workspaceFilter])
+  }, [filter, library, search, workspaceFilter, usedOnly, usedAssets])
   const visibleDirectorRuns = useMemo(() => {
     if (filter !== 'director') return []
     const query = search.trim().toLowerCase()
@@ -163,46 +181,92 @@ export function EditorMediaBin({ compact = false }: { compact?: boolean }) {
 
   return (
     <section className={`flex min-h-0 flex-col bg-bg-secondary ${compact ? 'h-full' : 'w-[260px] shrink-0 border-r border-border'}`}>
-      <div className="space-y-2 border-b border-border p-2.5">
-        <div className="flex items-center justify-between">
-          <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-text-secondary">Media</h2>
-          <button type="button" onClick={() => void refreshLibrary()} className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text-primary" title="Refresh media">
-            <RefreshCw size={12} />
+      <div data-testid="editor-media-bin-header" className="shrink-0 space-y-1.5 border-b border-border p-2">
+        <div className="flex min-w-0 items-center gap-1">
+          <h2 className="min-w-0 flex-1 whitespace-nowrap text-[11px] font-semibold uppercase tracking-[0.12em] text-text-secondary">Media</h2>
+          <button type="button" onClick={() => setUsedOnly(value => !value)} aria-pressed={usedOnly}
+            aria-label="Used in project" title="Used in project"
+            className={`min-h-9 shrink-0 rounded-md border px-1 text-[10px] font-medium ${usedOnly ? 'border-accent-blue/50 bg-accent-blue/10 text-accent-blue' : 'border-border text-text-secondary'}`}>Used</button>
+          {/* Global range styling outranks width utilities, so inline dimensions keep this slider inside the compact header and touch-sized. */}
+          {cards && <input type="range" min={100} max={220} step={10} value={thumbnailSize} aria-label="Media thumbnail size"
+            title="Thumbnail size" onChange={event => setThumbnailSize(Number(event.target.value))}
+            className="shrink-0 accent-[var(--color-accent-blue)]"
+            style={{
+              width: 44,
+              height: 36,
+              background: 'linear-gradient(to bottom, transparent calc(50% - 2px), var(--color-border) calc(50% - 2px), var(--color-border) calc(50% + 2px), transparent calc(50% + 2px))',
+            }} />}
+          <div className="flex shrink-0 items-center gap-0.5">
+            <button type="button" aria-label="Grid view" aria-pressed={view === 'grid'} onClick={() => setView('grid')}
+              className={`grid min-h-9 min-w-8 place-items-center rounded-md ${view === 'grid' ? 'bg-bg-active text-accent-blue' : 'text-text-muted hover:bg-bg-hover'}`}><Grid2X2 size={14} /></button>
+            <button type="button" aria-label="List view" aria-pressed={view === 'list'} onClick={() => setView('list')}
+              className={`grid min-h-9 min-w-8 place-items-center rounded-md ${view === 'list' ? 'bg-bg-active text-accent-blue' : 'text-text-muted hover:bg-bg-hover'}`}><List size={14} /></button>
+          </div>
+          <button type="button" aria-label="Refresh media" onClick={() => void refreshLibrary()}
+            className="grid min-h-9 min-w-8 shrink-0 place-items-center rounded-md text-text-muted hover:bg-bg-hover hover:text-text-primary" title="Refresh media">
+            <RefreshCw size={13} />
           </button>
         </div>
-        <div className="relative">
-          <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted" />
+        <div className="grid grid-cols-2 gap-1">
+          <div className="relative min-w-0">
+            <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted" />
+            <input
+              aria-label="Search media"
+              value={search}
+              onChange={event => {
+                setSearch(event.target.value)
+                setVisibleLimit(MEDIA_BATCH_SIZE)
+              }}
+              placeholder="Search media"
+              className="h-8 w-full min-w-0 rounded-lg border border-border bg-bg-tertiary pl-7 pr-2 text-[11px] text-text-primary outline-none placeholder:text-text-muted focus:border-accent-blue/60"
+            />
+          </div>
+          <label className="relative flex min-w-0 items-center">
+            <FolderOpen size={11} className="pointer-events-none absolute left-2 text-text-muted" />
+            <select
+              value={workspaceFilter}
+              onChange={event => {
+                setWorkspaceFilter(event.target.value)
+                setVisibleLimit(MEDIA_BATCH_SIZE)
+              }}
+              className="h-8 w-full min-w-0 appearance-none rounded-lg border border-border bg-bg-tertiary pl-6 pr-5 text-[10px] text-text-secondary outline-none focus:border-accent-blue/60"
+              aria-label="Filter media by workspace"
+            >
+              <option value="all">All workspaces</option>
+              {libraryWorkspaces.map(workspace => (
+                <option key={workspace} value={workspace}>{workspace === 'default' ? 'Default workspace' : workspace}</option>
+              ))}
+              <option value="__uploads__">Uploads</option>
+            </select>
+            <span className="pointer-events-none absolute right-2 text-[10px] text-text-muted">▾</span>
+          </label>
+        </div>
+        <div data-testid="editor-media-bin-toolbar" className="grid grid-cols-3 gap-1">
+          <button type="button" aria-label="Upload media" title="Upload media" onClick={() => inputRef.current?.click()}
+            disabled={uploading}
+            className="flex min-h-9 min-w-0 items-center justify-center gap-1 rounded-lg border border-dashed border-border-light bg-bg-tertiary px-1.5 text-[11px] font-medium text-text-secondary hover:border-accent-blue/50 hover:text-accent-blue disabled:opacity-50">
+            {uploading ? <Loader2 size={12} className="shrink-0 animate-spin" /> : <Upload size={12} className="shrink-0" />}<span className="truncate">Upload</span>
+          </button>
+          <button type="button" aria-label="Add text title" title="Add text title" onClick={() => addTitle(undefined, selectedTrackId || undefined)}
+            className="flex min-h-9 min-w-0 items-center justify-center gap-1 rounded-lg border border-border bg-bg-tertiary px-1.5 text-[11px] font-medium text-text-secondary hover:border-accent-blue/40 hover:text-accent-blue">
+            <Type size={12} className="shrink-0" /><span className="truncate">Text</span>
+          </button>
+          <button type="button" aria-label="Create animated title" title="Create animated title" disabled={!project} onClick={() => setTitleOpen(true)}
+            className="flex min-h-9 min-w-0 items-center justify-center gap-1 rounded-lg border border-accent-blue/30 bg-accent-blue/5 px-1.5 text-[11px] font-medium text-accent-blue disabled:opacity-40">
+            <Sparkles size={12} className="shrink-0" /><span className="truncate">Animated</span>
+          </button>
           <input
-            value={search}
-            onChange={event => {
-              setSearch(event.target.value)
-              setVisibleLimit(MEDIA_BATCH_SIZE)
-            }}
-            placeholder="Search media"
-            className="w-full rounded-lg border border-border bg-bg-tertiary py-1.5 pl-7 pr-2 text-[10px] text-text-primary outline-none placeholder:text-text-muted focus:border-accent-blue/60"
+            ref={inputRef}
+            type="file"
+            accept="video/*,image/*,audio/*,.mkv,.webm,.mov,.mp4,.wav,.mp3,.m4a,.flac,.ogg"
+            multiple
+            className="hidden"
+            onChange={event => void handleFiles(event.target.files)}
           />
         </div>
-        <label className="relative flex items-center">
-          <FolderOpen size={11} className="pointer-events-none absolute left-2.5 text-text-muted" />
-          <select
-            value={workspaceFilter}
-            onChange={event => {
-              setWorkspaceFilter(event.target.value)
-              setVisibleLimit(MEDIA_BATCH_SIZE)
-            }}
-            className="w-full appearance-none rounded-lg border border-border bg-bg-tertiary py-1.5 pl-7 pr-7 text-[9px] text-text-secondary outline-none focus:border-accent-blue/60"
-            aria-label="Filter media by workspace"
-          >
-            <option value="all">All workspaces</option>
-            {libraryWorkspaces.map(workspace => (
-              <option key={workspace} value={workspace}>{workspace === 'default' ? 'Default workspace' : workspace}</option>
-            ))}
-            <option value="__uploads__">Uploads</option>
-          </select>
-          <span className="pointer-events-none absolute right-2.5 text-[8px] text-text-muted">▾</span>
-        </label>
-        <div className="grid grid-cols-6 gap-1">
+        <div data-testid="editor-media-bin-filters" className="grid grid-cols-6 gap-1">
           {(['all', 'video', 'image', 'audio', 'director', 'favorites'] as Filter[]).map(value => {
+            const label = value === 'all' ? 'All media' : value[0].toUpperCase() + value.slice(1)
             const Icon = value === 'video'
               ? Film
               : value === 'image'
@@ -218,49 +282,29 @@ export function EditorMediaBin({ compact = false }: { compact?: boolean }) {
               <button
                 key={value}
                 type="button"
+                aria-label={label}
+                aria-pressed={filter === value}
                 onClick={() => {
                   setFilter(value)
                   setVisibleLimit(MEDIA_BATCH_SIZE)
                 }}
-                className={`rounded-md px-1 py-1 text-[9px] capitalize transition-colors ${filter === value ? value === 'favorites' ? 'bg-red-500/15 text-red-400' : 'bg-accent-blue/15 text-accent-blue' : 'text-text-muted hover:bg-bg-hover hover:text-text-secondary'}`}
-                title={value === 'favorites' ? 'Favorites' : value}
+                className={`grid min-h-9 min-w-0 place-items-center rounded-md px-1 text-[11px] capitalize transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue/60 ${filter === value ? value === 'favorites' ? 'bg-red-500/15 text-red-400' : 'bg-accent-blue/15 text-accent-blue' : 'text-text-muted hover:bg-bg-hover hover:text-text-secondary'}`}
+                title={label}
               >
-                {Icon ? <Icon size={10} className="mx-auto" fill={value === 'favorites' && filter === 'favorites' ? 'currentColor' : 'none'} /> : 'All'}
+                {Icon ? <Icon size={12} className="mx-auto" fill={value === 'favorites' && filter === 'favorites' ? 'currentColor' : 'none'} /> : 'All'}
               </button>
             )
           })}
         </div>
-        <div className="grid grid-cols-2 gap-1.5">
-          <button
-            type="button"
-            onClick={() => inputRef.current?.click()}
-            disabled={uploading}
-            className="flex items-center justify-center gap-1 rounded-lg border border-dashed border-border-light bg-bg-tertiary px-2 py-1.5 text-[9px] text-text-secondary hover:border-accent-blue/50 hover:text-accent-blue disabled:opacity-50"
-          >
-            {uploading ? <Loader2 size={11} className="animate-spin" /> : <Upload size={11} />} Upload
-          </button>
-          <button
-            type="button"
-            onClick={() => addTitle(undefined, selectedTrackId || undefined)}
-            className="flex items-center justify-center gap-1 rounded-lg border border-border bg-bg-tertiary px-2 py-1.5 text-[9px] text-text-secondary hover:border-accent-blue/40 hover:text-accent-blue"
-          >
-            <Type size={11} /> Title
-          </button>
-          <input
-            ref={inputRef}
-            type="file"
-            accept="video/*,image/*,audio/*,.mkv,.webm,.mov,.mp4,.wav,.mp3,.m4a,.flac,.ogg"
-            multiple
-            className="hidden"
-            onChange={event => void handleFiles(event.target.files)}
-          />
-        </div>
       </div>
 
-      <div className={`min-h-0 flex-1 overflow-y-auto p-2.5 ${compact ? 'grid auto-rows-max grid-cols-2 gap-2.5' : 'space-y-1.5'}`}>
+      <div className={`min-h-0 flex-1 overflow-y-auto p-2.5 ${cards ? 'grid auto-rows-max gap-2.5' : 'space-y-1.5'}`}
+        data-testid="editor-media-bin-scroller"
+        style={cards ? { gridTemplateColumns: `repeat(auto-fill, minmax(${thumbnailSize}px, 1fr))` } : undefined}>
         {renderedDirectorRuns.map(run => (
           <article
             key={run.id}
+            data-testid="editor-media-director-run"
             className={`group overflow-hidden rounded-xl border border-accent-warm/20 bg-gradient-to-br from-accent-warm/10 via-bg-tertiary to-bg-tertiary transition-all hover:border-accent-warm/40 ${compact ? 'shadow-sm' : 'p-2'}`}
           >
             <DirectorRunPreview
@@ -269,16 +313,16 @@ export function EditorMediaBin({ compact = false }: { compact?: boolean }) {
               compact={compact}
             />
             <div className={compact ? 'p-2' : 'pt-2'}>
-              <div className="line-clamp-2 text-[9px] font-medium leading-snug text-text-primary" title={run.scene_description}>
+              <div className="line-clamp-2 text-[11px] font-medium leading-snug text-text-primary" title={run.scene_description}>
                 {run.scene_description || `Director run ${run.id}`}
               </div>
-              <div className="mt-1 flex items-center justify-between gap-1 text-[7px] text-text-muted">
+              <div className="mt-1 flex items-center justify-between gap-1 text-[10px] text-text-muted">
                 <span className="truncate">{run.workspace} · {run.status}</span>
                 <button
                   type="button"
                   onClick={() => void importDirectorRun(run.id)}
                   disabled={Boolean(directorImportingId)}
-                  className="flex shrink-0 items-center gap-1 rounded-md bg-accent-warm/15 px-1.5 py-1 text-[8px] font-medium text-accent-warm hover:bg-accent-warm/25 disabled:cursor-wait disabled:opacity-45"
+                  className="flex shrink-0 items-center gap-1 rounded-md bg-accent-warm/15 px-1.5 py-1 text-[11px] font-medium text-accent-warm hover:bg-accent-warm/25 disabled:cursor-wait disabled:opacity-45"
                   title="Add every Director shot and its master soundtrack at the playhead"
                 >
                   {directorImportingId === run.id ? <Loader2 size={9} className="animate-spin" /> : <Plus size={9} />}
@@ -291,6 +335,7 @@ export function EditorMediaBin({ compact = false }: { compact?: boolean }) {
         {rendered.map(asset => (
           <article
             key={`${asset.origin}:${asset.name}`}
+            data-testid="editor-media-asset"
             draggable
             onDragStart={event => {
               event.dataTransfer.effectAllowed = 'copy'
@@ -301,19 +346,23 @@ export function EditorMediaBin({ compact = false }: { compact?: boolean }) {
               event.dataTransfer.setData('text/plain', `maestro-editor-asset:${payload}`)
             }}
             onDoubleClick={() => void addMedia(asset, undefined, selectedTrackId || undefined)}
-            className={`group overflow-hidden rounded-xl border border-border bg-bg-tertiary transition-all hover:border-border-light hover:bg-bg-hover ${compact ? 'shadow-sm' : 'flex items-center gap-2 p-1.5'}`}
+            className={`group overflow-hidden rounded-xl border border-border bg-bg-tertiary transition-colors hover:border-border-light hover:bg-bg-hover ${cards ? 'shadow-sm' : 'flex items-center gap-2 p-1.5'}`}
           >
-            <div className={`relative shrink-0 overflow-hidden bg-media-canvas ${compact ? 'aspect-video w-full' : 'h-12 w-16 rounded-md'}`}>
+            <div className={`relative shrink-0 overflow-hidden bg-media-canvas ${cards ? 'aspect-video w-full' : 'h-12 w-16 rounded-md'}`}>
               <MediaPreview asset={asset} workspace={projectWorkspace} />
-              <span className="absolute bottom-1 left-1 max-w-[80%] truncate rounded bg-black/65 px-1 py-0.5 text-[7px] text-white/80" title={asset.workspace || asset.origin}>
+              <span className="absolute bottom-1 left-1 max-w-[80%] truncate rounded bg-black/65 px-1 py-0.5 text-[10px] text-white/80" title={asset.workspace || asset.origin}>
                 {asset.workspace === '__uploads__' ? 'Uploads' : asset.workspace || asset.origin}
               </span>
               {asset.favorite && <Heart size={9} fill="currentColor" className="absolute right-1 top-1 text-red-400 drop-shadow" />}
+              {isUsed(asset) && <span className="absolute right-1 bottom-1 rounded bg-black/70 px-1 text-[10px] text-white">Used</span>}
             </div>
-            <div className={`min-w-0 ${compact ? 'p-2' : 'flex-1'}`}>
-              <div className="truncate text-[9px] font-medium text-text-secondary" title={asset.display_name || asset.name}>{asset.display_name || asset.name}</div>
-              <div className="mt-0.5 flex items-center justify-between gap-1 text-[8px] text-text-muted">
+            <div className={`min-w-0 ${cards ? 'p-2' : 'flex-1'}`}>
+              <div className="truncate text-[11px] font-medium text-text-secondary" title={asset.display_name || asset.name}>{asset.display_name || asset.name}</div>
+              <div className="mt-0.5 flex items-center justify-between gap-1 text-[11px] text-text-muted">
                 <span className="capitalize">{asset.type}</span>
+                {asset.duration > 0 && <span>{asset.duration.toFixed(1)}s</span>}
+                <button type="button" onClick={() => setSourceAsset(asset)} title="Preview and mark In/Out" aria-label={`Preview ${asset.display_name || asset.name}`}
+                  className="ml-auto rounded p-1.5 hover:bg-bg-hover hover:text-text-primary"><Eye size={13} /></button>
                 <button
                   type="button"
                   onClick={() => void addMedia(asset, undefined, selectedTrackId || undefined)}
@@ -330,7 +379,7 @@ export function EditorMediaBin({ compact = false }: { compact?: boolean }) {
           <button
             type="button"
             onClick={() => setVisibleLimit(limit => limit + MEDIA_BATCH_SIZE)}
-            className="col-span-full w-full rounded-lg border border-border bg-bg-tertiary px-3 py-2 text-[9px] text-text-secondary hover:border-accent-blue/40 hover:text-accent-blue"
+            className="col-span-full w-full rounded-lg border border-border bg-bg-tertiary px-3 py-2 text-[11px] text-text-secondary hover:border-accent-blue/40 hover:text-accent-blue"
           >
             Show more · {visibleItems.length - (filter === 'director' ? renderedDirectorRuns.length : rendered.length)} remaining
           </button>
@@ -348,6 +397,8 @@ export function EditorMediaBin({ compact = false }: { compact?: boolean }) {
           </div>
         )}
       </div>
+      {sourceAsset && <EditorSourceViewer key={sourceAsset.id} asset={sourceAsset} onClose={() => setSourceAsset(null)} />}
+      <EditorAnimatedTitleDialog open={titleOpen} onClose={() => setTitleOpen(false)} />
     </section>
   )
 }

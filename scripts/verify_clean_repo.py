@@ -16,18 +16,17 @@ So nothing explicit should ever be committed. This script enforces that, so a
 public snapshot can never accidentally carry material that is meant to stay
 local.
 
-It scans git-TRACKED files only — the exact set that gets published — so anything
-gitignored (a leftover supplement-pack dir, finetune inline guides, downloaded
-weights and their .civitai.json sidecars, per-LoRA .guide.md files) is correctly
-out of scope automatically; the guard can't silently drift as new gitignored
-dirs are added.
+It scans git-TRACKED files only — the exact set that gets published. Ignored
+files stay out of that set during ordinary Git adds. Explicitly forbidden local
+paths are also rejected if someone force-adds them, and their contents are never
+read or printed. Add a matching path rule when new private runtime or maintainer
+state is added to the repository's ignore rules.
 
 Two checks:
-  A. Forbidden vulgar prose / stale sanitization markers in tracked text files,
-     with an allowlist for upstream code that legitimately uses the vocabulary.
-  B. Gitignore-boundary assertion — never-publish artifacts (a leftover
-     supplement pack, finetunes/*.json, *.guide.md, *.civitai.json) must NOT
-     be tracked.
+  A. Forbidden vulgar prose / stale sanitization markers in public tracked text
+     files, with an allowlist for upstream code that legitimately uses the
+     vocabulary.
+  B. Never-publish private, runtime, and generated paths must NOT be tracked.
 
 Run it before publishing a snapshot (Phase 5), or wire it into CI / a pre-commit
 hook once the public repo exists.
@@ -157,9 +156,53 @@ TEXT_EXTENSIONS = (
 )
 
 # ── Check B: paths that must NEVER be git-tracked ────────────────────
-# Regex over the '/'-normalized repo-relative path. These are the locally-
-# generated / mature artifacts the whole architecture keeps out of git.
+# Regex over the '/'-normalized repo-relative path. This includes generated
+# runtime state and maintainer-local material that must stay out of the public
+# repository, even if someone force-adds it. Keep these paths specific: public
+# source, examples, schema fixtures, and vendored code remain publishable.
 FORBIDDEN_TRACKED_PATTERNS = [
+    (re.compile(
+        r"^(?:\.codex-tmp|\.codex|\.claude|\.agents|\.aws|\.ssh)(?:/|$)"
+    ),
+     "local developer state (must stay gitignored)"),
+    (re.compile(r"^docs/(?:development|private)(?:/|$)"),
+     "private maintainer notes (must stay gitignored)"),
+    (re.compile(r"^(?:AGENTS\.md|ENVIRONMENT|docs/release_todo\.md)$"),
+     "local instructions or release checklist (must stay gitignored)"),
+    (re.compile(
+        r"^(?:logs|cache|uploads|ss|dist|archive|pinokio_agent|\.masks|\.temp_frames)(?:/|$)"
+    ),
+     "local runtime, upload, or archive data (must stay gitignored)"),
+    (re.compile(
+        r"^app/(?:env|env-agent|env-rtx50|env-sol|env-ltx25(?:-[^/]+)?|temp|ckpts|loras|"
+        r"loras_i2v|loras_metadata|outputs|outputs2|gradio_outputs|storage|"
+        r"samples|settings|uploads|recipes_user|icons/lora_previews)(?:/|$)"
+    ),
+     "local app runtime or user data (must stay gitignored)"),
+    (re.compile(r"^app/services/sam/(?:env|sam3|checkpoints)(?:/|$)"),
+     "local SAM runtime files (must stay gitignored)"),
+    (re.compile(r"^app/services/_supplement_pack/"),
+     "supplement pack contents (mature — must stay gitignored)"),
+    (re.compile(r"^app/third_party/ltx25-runtime/"),
+     "downloaded LTX runtime checkout (must stay gitignored)"),
+    (re.compile(r"^app/plugins/(?:wan2gp-gallery|wan2gp-lora-manager|wan2gp-lora-multipliers-ui)(?:/|$)"),
+     "downloaded upstream plugin checkout (must stay gitignored)"),
+    (re.compile(r"^ui/\.maestro-(?:source-baseline|build-receipt)\.json$"),
+     "local UI build metadata (must stay gitignored)"),
+    (re.compile(r"^ui/\.maestro-(?:staging|build-backups)-[^/]+(?:/|$)"),
+     "local UI build staging or backups (must stay gitignored)"),
+    (re.compile(r"(^|/)__pycache__/"),
+     "Python bytecode cache (must stay gitignored)"),
+    (re.compile(r"(^|/)\.DS_Store$|(^|/)Thumbs\.db$"),
+     "operating-system metadata (must stay gitignored)"),
+    (re.compile(r"(^|/)\.env(?:$|\.(?!(?:example|sample)$)[^/]+$)"),
+     "local environment variables (must stay gitignored)"),
+    (re.compile(r"^app/services_config\.json$"),
+     "local services configuration (must stay gitignored)"),
+    (re.compile(r"^app/wgp_config\.json(?:\.bak)?$"),
+     "local app configuration or backup (must stay gitignored)"),
+    (re.compile(r"^app/(?:plugins_local|loras_url_cache|presets)\.json$"),
+     "local app configuration or cache (must stay gitignored)"),
     (re.compile(r"(^|/)_supplement_pack/"),
      "supplement pack contents (mature — must stay gitignored)"),
     (re.compile(r"(^|/)app/postprocessing/seedvc/"),
@@ -212,10 +255,18 @@ def main() -> int:
         norm = rel.replace("\\", "/")
 
         # Check B — boundary assertion runs on EVERY tracked path.
+        is_forbidden_path = False
         for pat, label in FORBIDDEN_TRACKED_PATTERNS:
             if pat.search(norm):
                 boundary.append((norm, label))
+                is_forbidden_path = True
                 break
+
+        # Never inspect private/generated files after identifying their path.
+        # Even a diagnostic snippet from these files could expose local notes
+        # or configuration values in CI logs.
+        if is_forbidden_path:
+            continue
 
         # Check A — content scan: text files only, skip the allowlist.
         if not norm.endswith(TEXT_EXTENSIONS):

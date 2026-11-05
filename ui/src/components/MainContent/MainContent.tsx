@@ -1,7 +1,7 @@
 import { outputIdentity } from '../../lib/galleryIdentity'
 import { isDirectorRenderChild } from '../../lib/directorJobs'
 import { useRef, useCallback, useState, useEffect, useLayoutEffect, useMemo, type JSX } from 'react'
-import { Film, Play, Square, FolderOpen, Plus, Check, Loader2, X, BookMarked, Upload, Trash2, ChevronDown, ChevronUp, Maximize2 } from 'lucide-react'
+import { Film, Play, Square, FolderOpen, Plus, Check, Loader2, X, BookMarked, Upload, Trash2, ChevronDown, ChevronUp, Maximize2, PanelRightOpen, PanelRightClose } from 'lucide-react'
 import { TabFilter } from './TabFilter'
 import { ThumbnailGallery } from './ThumbnailGallery'
 import { MediaFeedItem } from './MediaFeedItem'
@@ -9,7 +9,9 @@ import { PlanProgressCard } from './PlanProgressCard'
 import { BlockedDeleteDialog } from './BlockedDeleteDialog'
 import { GalleryViewer, type GalleryImageChoice } from './GalleryViewer'
 import { GenerationPreview } from './GenerationPreview'
+import { JobSettingsDetails } from './JobSettingsDetails'
 import { GlobalQueuePopover } from '../GlobalQueuePopover'
+import { ComfyUIWorkflowDialogHost } from '../Sidebar/ComfyUIWorkflowDialog'
 import { useStore } from '../../stores/useStore'
 import { useIsMobileSidecar } from '../../lib/useIsMobile'
 import { captureGallerySourceImages } from '../../lib/galleryInputs'
@@ -431,6 +433,7 @@ export function JobPlaceholder({ job, onStop, onDismiss }: { job: GenerationJob;
           </button>
         )}
       </div>
+      {isFailed && <JobSettingsDetails job={job} />}
     </div>
   )
 }
@@ -612,6 +615,19 @@ function PipelinePlaceholder({ job }: { job: GenerationJob | null }) {
 
 export function MainContent() {
   const isMobile = useIsMobileSidecar()
+  const [desktopThumbnailsOpen, setDesktopThumbnailsOpen] = useState(() => {
+    try { return localStorage.getItem('maestro-thumbnail-panel-open') !== 'false' } catch { return true }
+  })
+  const [mobileThumbnailsOpen, setMobileThumbnailsOpen] = useState(false)
+  const thumbnailsOpen = isMobile ? mobileThumbnailsOpen : desktopThumbnailsOpen
+  const setThumbnailsOpen = useCallback((open: boolean) => {
+    if (isMobile) {
+      setMobileThumbnailsOpen(open)
+    } else {
+      setDesktopThumbnailsOpen(open)
+      try { localStorage.setItem('maestro-thumbnail-panel-open', String(open)) } catch { /* Session-only when storage is unavailable. */ }
+    }
+  }, [isMobile])
   const outputs = useStore(s => s.filteredOutputs())
   const outputsTotal = useStore(s => s.outputsTotal)
   const rootOutputsLoaded = useStore(s => s.outputs.length)
@@ -1097,6 +1113,7 @@ export function MainContent() {
 
   return (
     <main className="flex-1 flex flex-col min-h-0 min-w-0 h-full overflow-hidden">
+      <ComfyUIWorkflowDialogHost />
       {/* Top bar */}
       <div className="px-2 md:px-6 py-2 md:py-3 border-b border-border flex items-center justify-between gap-2">
         <TabFilter />
@@ -1119,17 +1136,33 @@ export function MainContent() {
           </button>
           <WorkspaceSelector />
           {!isMobile && <GlobalQueuePopover />}
+          {(outputs.length > 0 || outputsLoading) && (
+            <button
+              type="button"
+              aria-label={thumbnailsOpen ? 'Hide thumbnails' : 'Show thumbnails'}
+              title={thumbnailsOpen ? 'Hide thumbnails' : 'Show thumbnails'}
+              aria-expanded={thumbnailsOpen}
+              aria-controls="gallery-thumbnail-panel"
+              onClick={() => setThumbnailsOpen(!thumbnailsOpen)}
+              className={`rounded-lg p-1.5 transition-colors ${thumbnailsOpen
+                ? 'bg-accent-blue/10 text-accent-blue hover:bg-accent-blue/20'
+                : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary'}`}
+            >
+              {thumbnailsOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}
+            </button>
+          )}
         </div>
       </div>
 
       <BlockedDeleteDialog />
 
       {/* Content area: feed + thumbnails */}
-      <div className="flex-1 flex flex-row gap-0 overflow-hidden relative">
+      <div data-testid="gallery-content" className="flex-1 min-h-0 flex flex-row gap-0 overflow-hidden relative">
         {/* Scrollable media feed */}
         <div
           ref={feedRef}
-          className="flex-1 overflow-y-auto p-3 md:p-4"
+          data-testid="gallery-feed"
+          className="flex-1 min-w-0 overflow-y-auto p-3 md:p-4"
           style={{ overflowAnchor: 'none' }}
           onScroll={handleFeedScroll}
           onWheelCapture={releaseNavigationTarget}
@@ -1226,6 +1259,8 @@ export function MainContent() {
         <ThumbnailGallery
           activeIndex={activeIndex}
           onThumbnailClick={handleThumbnailClick}
+          open={thumbnailsOpen}
+          onClose={() => setThumbnailsOpen(false)}
         />
       </div>
       {viewerSession && (

@@ -564,8 +564,8 @@ The October 7 memory bench completed 21 H3 generations, including a longer
 reference-and-LoRA confirmation. It compared INT8 backends, streaming profiles,
 preload modes, pinning, read ahead, head splitting and Sol. Component CUDA
 probes and small Flux/Qwen VAE parity checks are documented in the
-[port review](development/wan2gp-17-port.md) and
-[memory benchmark](development/memory-benchmark.md). These are not full
+[port review](technical/wan2gp-17-port.md) and
+[memory benchmark](testing/memory-benchmark.md). These are not full
 end-to-end verification of every affected model family.
 
 ### 12 GB RTX 3080 Ti / 32 GB RAM Windows machine
@@ -596,7 +596,7 @@ Existing private reports in the Test-Bench workspace record these results:
   establish a full 4m15s render time or isolate encoder-only speed gains.
 
 The matched methodology and limits are in the
-[cross-app benchmark guide](development/h3-cross-app-benchmark.md).
+[cross-app benchmark guide](testing/h3-cross-app-benchmark.md).
 Private reports, prompts, music, media, hardware identifiers and SSH material
 remain excluded from source control.
 
@@ -1415,7 +1415,7 @@ learning and test reports remain local, bounded and optional.
 Attribution, upstream license copies and native allocator provenance are in
 [THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES.md),
 [MMGP provenance](../app/mmgp/PROVENANCE.json) and the
-[port review](development/wan2gp-17-port.md). The optional H3 VAE 2× integration
+[port review](technical/wan2gp-17-port.md). The optional H3 VAE 2× integration
 is documented separately in the [decoder guide](H3-VAE-x2.md). The LTX 2.5 detail refiner and other unlisted
 WanGP 17 workflows or model packages are not included.
 

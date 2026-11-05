@@ -10,6 +10,7 @@ from unittest.mock import Mock
 
 APP = Path(__file__).resolve().parents[1] / "app"
 sys.path.insert(0, str(APP))
+from services.agent_access.context import principal_context
 INCOMPLETE = (
     'Alex says, "Welcome." Sam replies, "Look at me!" '
     'Casey says in a frustrated voice "Thanks a lot. You son of a '
@@ -43,7 +44,7 @@ def load_routes():
     names = {
         "_is_minimax_h3_identity", "_validate_h3_source_quote_boundaries",
         "llm_plan_h3_windows", "llm_plan_h3_sequence",
-        "_prepare_generation_submission",
+        "_prepare_generation_submission", "_pop_editor_submission",
     }
     nodes = [ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)]
     for node in ast.parse(path.read_text(encoding="utf-8")).body:
@@ -52,6 +53,7 @@ def load_routes():
             nodes.append(node)
     namespace = {
         "HTTPException": HTTPError,
+        "principal_context": principal_context,
         "_stamp_live_generation_settings_version": Mock(),
         "wgp": SimpleNamespace(
             get_model_def=Mock(return_value={"architecture": "minimax_h3_ref2va"}),

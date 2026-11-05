@@ -15,7 +15,13 @@ Environment variables:
 
 import gc
 import sys
-import torch
+
+# Native Pinokio starts this file as __main__. Director's callbacks import
+# launch, so publish that same module before bootstrap creates job/auth state.
+# Importing a second copy would re-register the live Agent Access backend.
+if __name__ == "__main__":
+    sys.modules["launch"] = sys.modules[__name__]
+
 import os
 import glob
 import json
@@ -35,10 +41,23 @@ from urllib.parse import quote
 # --- Bootstrap: CWD must be app/ and sys.argv must be patched before importing wgp ---
 _app_dir = os.path.dirname(os.path.abspath(__file__))
 os.chdir(_app_dir)
+if _app_dir not in sys.path:
+    sys.path.insert(0, _app_dir)
+from services.memory_runtime import read_saved_runtime, select_runtime, startup_config_path
+
+# Resolve the exact config WGP's argparse store action will use and select its
+# MMGP package before Torch or allocator modules can import either backend.
+_memory_runtime_config_path = startup_config_path(sys.argv, cwd=_app_dir)
+_memory_runtime_selection = select_runtime(
+    _app_dir,
+    read_saved_runtime(_memory_runtime_config_path),
+)
+
 from shared.cuda_memory import apply_startup_settings
 # The allocator must precede hardware detection, model imports and profiling.
 # wgp also calls this for the classic entry point; the helper is idempotent.
 apply_startup_settings(sys.argv, os.path.join(_app_dir, "wgp_config.json"))
+import torch
 
 # Preserve original argv, patch for wgp's argparse
 _original_argv = sys.argv[:]
@@ -93,6 +112,7 @@ from services.web_push import WebPushService, WebPushUnavailable
 from services.editor_projects import (
     build_editor_media_preview,
     EditorProjectError,
+    EditorProjectRevisionConflict,
     EditorRenderCancelled,
     create_editor_project,
     delete_editor_project,
@@ -101,12 +121,38 @@ from services.editor_projects import (
     editor_project_duration,
     inspect_editor_assets,
     list_editor_projects,
+    list_editor_project_revisions,
     load_editor_project,
+    normalize_editor_project,
+    prepare_editor_overlay_project,
     probe_media,
     render_editor_project,
     resolve_editor_asset,
     resolve_editor_media_cache_file,
     save_editor_project,
+    restore_editor_project_revision,
+    workspace_directory,
+)
+from services.editor_operations import (
+    EditorOperationError,
+    attach_job as attach_editor_operation_job,
+    create_operation as create_editor_operation_record,
+    get_operation as get_editor_operation_record,
+    reconcile_operation as reconcile_editor_operation_record,
+    transition_operation as transition_editor_operation_record,
+    validate_submission as validate_editor_operation_submission,
+)
+from services.editor_audio import (
+    analyze_editor_audio,
+    editor_audio_capabilities,
+    transcribe_editor_audio,
+)
+from services.editor_archives import (
+    EDITOR_ARCHIVE_UNPACKED_MAX_BYTES,
+    EditorProjectArchiveCancelled,
+    EditorProjectArchiveError,
+    export_editor_project_archive,
+    import_editor_project_archive,
 )
 
 # Protect upgraded installations before WanGP builds its model registry.  Old
@@ -286,7 +332,6 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
 from services.access_log_filter import install_quiet_access_filter
 from services.http_runtime import configure_http_runtime
 from services import checkpoint_health, chat_api, director_review_gate, llm_writer_supervision, prompt_audit_api, prompt_revision_api
@@ -371,6 +416,8 @@ from services.job_lifecycle import (
     update_job,
 )
 
+from services.generation_details import is_terminal_studio_failure, public_generation_details
+from services.lora_acceleration import is_acceleration_lora
 from services.studio_enhancement import (
     StudioJobArchive, current_settings as enhancement_settings,
     captured_settings, enhancement_context, enhancement_warnings, record_review_warning,
@@ -399,11 +446,180 @@ def _consume_generation_preview(job_id: str, payload: dict, model_type: str) -> 
             job_id, "Live previews are unavailable for this render. Generation will continue.",
         )
 
+from services.agent_access.backend import (
+    AgentAccessBackend,
+    create_router as _create_agent_access_router,
+    is_restricted_agent as _is_restricted_agent,
+    strip_private_director_fields as _strip_private_director_fields,
+)
+from services.agent_access.boundary import AccessBoundary
+from services.agent_access.context import principal_context
+from services.agent_access.state import RuntimeState
+
+_AGENT_QUEUE_PENDING_STATUSES = frozenset({"held", "queued", "running"})
+_AGENT_QUEUE_TERMINAL_STATUSES = frozenset({"cancelled", "canceled", "complete", "completed", "done", "error", "failed", "finished", "interrupted", "stopped", "success", "succeeded"})
+
+_agent_access_runtime = RuntimeState(
+    Path(_app_dir) / "settings" / "agent-access",
+    app_root=Path(_app_dir),
+)
+
+
+def _agent_configured_media_roots():
+    configured = Path(str(wgp.server_config.get("save_path") or "outputs")).expanduser()
+    return [(configured if configured.is_absolute() else Path(_app_dir) / configured).resolve()]
+
+
+_agent_access_backend = AgentAccessBackend(
+    _agent_access_runtime,
+    _app_dir,
+    additional_media_roots=_agent_configured_media_roots,
+)
+
 _studio_job_archive = StudioJobArchive(Path(_app_dir) / "settings" / "studio_queue")
-_jobs: dict = _studio_job_archive.recover()
+_jobs: dict = _agent_access_backend.registry(_studio_job_archive.recover())
+
+
+def _agent_require_job_access(job_id: str) -> None:
+    _agent_access_backend.require_job_access(job_id)
+
+
+def _agent_access_idle_probe() -> dict:
+    try:
+        _init_pipeline()
+        import services.director_pipeline as _director_state
+
+        with _director_state._pipeline_lock:
+            pipeline_snapshot = [
+                {"status": record.get("status")} if isinstance(record, dict) else record
+                for record in _director_state._pipelines.values()
+            ]
+        if _director_state.any_pipeline_active():
+            pipeline_snapshot.append({"status": "running"})
+        queue_snapshot = _director_state.list_director_queue(
+            wgp.server_config.get("save_path", "outputs")
+        )
+        return AgentAccessBackend.idle_evidence(
+            jobs=_jobs,
+            engine_lock=_gen_lock,
+            active_states=_active_gen_states,
+            director_pipelines=pipeline_snapshot,
+            director_queue=queue_snapshot,
+            active_pipeline_statuses=tuple(_director_state._ACTIVE_PIPELINE_STATUSES),
+        )
+    except Exception:
+        return {"idle": False, "certain": False, "reason": "Backend busy state could not be verified"}
+
+
+def _agent_require_director_pipeline(pid: str, record: dict | None = None) -> None:
+    principal = principal_context.get()
+    if not _is_restricted_agent(principal):
+        return
+    if _agent_access_backend.can_access_resource("pipeline", pid, principal):
+        return
+    _init_pipeline()
+    import services.director_pipeline as _director_state
+
+    source = record
+    if source is not None:
+        params = source.get("params") if isinstance(source.get("params"), dict) else {}
+        if not params and not source.get("queue_entry_id"):
+            source = None
+    if source is None:
+        source = _director_state.get_pipeline(pid)
+    if source is None:
+        source = _director_state.load_pipeline_state(
+            wgp.server_config.get("save_path", "outputs"), pid,
+        )
+    source = source if isinstance(source, dict) else {}
+    params = source.get("params") if isinstance(source.get("params"), dict) else {}
+    queue_id = params.get("_director_queue_entry_id") or source.get("queue_entry_id")
+    _agent_access_backend.inherit_pipeline_queue_owner(pid, queue_id)
+    _agent_access_backend.require_resource_access("pipeline", pid, principal)
+
+
+def _agent_require_queue_collection(queue_state: dict, statuses=None) -> None:
+    principal = principal_context.get()
+    if not _is_restricted_agent(principal):
+        return
+    entries = queue_state.get("entries") if isinstance(queue_state, dict) else None
+    if not isinstance(entries, list):
+        raise HTTPException(503, "Director queue ownership could not be verified")
+    status_set = set(statuses or ())
+    ids = []
+    known_statuses = _AGENT_QUEUE_PENDING_STATUSES | _AGENT_QUEUE_TERMINAL_STATUSES
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise HTTPException(503, "Director queue ownership could not be verified")
+        entry_id = entry.get("id")
+        status = str(entry.get("status") or "").casefold()
+        if not isinstance(entry_id, str) or not entry_id or status not in known_statuses:
+            raise HTTPException(503, "Director queue ownership could not be verified")
+        if not status_set or status in status_set:
+            ids.append(entry_id)
+    _agent_access_backend.require_collection_access("queue", ids, principal)
+
+
+def _agent_filter_director_queue(queue_state: dict) -> dict:
+    result = dict(queue_state)
+    entries = result.get("entries")
+    principal = principal_context.get()
+    if _is_restricted_agent(principal) and isinstance(entries, list):
+        visible = []
+        hidden_busy = False
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_id = entry.get("id")
+            if isinstance(entry_id, str) and _agent_access_backend.can_access_resource("queue", entry_id, principal):
+                visible.append(entry)
+            elif str(entry.get("status") or "").casefold() in {"held", "queued", "running"}:
+                hidden_busy = True
+        result["entries"] = visible
+        result["other_work_pending"] = hidden_busy
+    return result
+
+
+from services.agent_access.native_creative import make_native_creative_service
+
+_agent_creative_service = make_native_creative_service(
+    _agent_access_backend,
+    models=lambda: _agent_creation_models(),
+    model_def=lambda model: _agent_creation_model_def(model),
+    defaults=lambda model: _agent_creation_model_defaults(model),
+    options=lambda model: _agent_creation_model_options(model),
+    preferences=lambda: _studio_preferences_response(),
+    hardware=lambda: _get_cached_hardware(),
+    lora_hint=lambda model, loras: _active_lora_hint(model, loras),
+    injected_keyframes=lambda params: _h3_injected_keyframes_from_body(params),
+    mature_mode=lambda: bool(wgp.server_config.get("services", {}).get("nsfw_mode")),
+    probe_audio=lambda path: _probe_audio_duration(path),
+)
+
+api.include_router(_create_agent_access_router(
+    _agent_access_backend,
+    prepare_generation=lambda body, **kwargs: _prepare_generation_submission(body, **kwargs),
+    native_upload=lambda request, file, **kwargs: upload_image(request, file, **kwargs),
+    idle_probe=lambda: _agent_access_idle_probe(),
+    creative=_agent_creative_service,
+    native_director=lambda body: _start_director_pipeline_payload(body),
+))
+
+
 register_terminal_listener(_studio_job_archive.save)
 register_terminal_listener(lambda job, status: _generation_previews.clear(str(job.get("id") or "")))
+
+
+def _persist_agent_terminal_job(job: dict, _status: str) -> None:
+    try:
+        _agent_access_backend.snapshot_job(str(job.get("id") or ""))
+    except Exception:
+        pass
+
+
+register_terminal_listener(_persist_agent_terminal_job)
 _studio_submission_lock = threading.RLock()
+_agent_queue_submission_lock = asyncio.Lock()
 _gen_lock = threading.Lock()
 configure_generation_probe_lock(_gen_lock)
 
@@ -584,7 +800,8 @@ _pipeline_initialized = False
 def _init_pipeline():
     global _pipeline_initialized
     if not _pipeline_initialized:
-        from services.director_pipeline import init as pipeline_init
+        import services.director_pipeline as _director_state
+        pipeline_init = _director_state.init
         pipeline_init(
             _jobs,
             _run_generation,
@@ -593,7 +810,75 @@ def _init_pipeline():
             _active_gen_states,
             terminal_callback=_on_director_pipeline_terminal,
             queue_terminal_callback=_on_director_queue_terminal,
+            prepare_generation_engine=lambda params: _comfy_adapter.capture_engine(params),
         )
+        original_start_worker = _director_state._start_pipeline_worker
+        if not getattr(original_start_worker, "_agent_access_owner_hook", False):
+            def _start_pipeline_worker_with_agent_owner(pid, *args, **kwargs):
+                principal_id = None
+                session_id = None
+                queue_id = None
+                changed = False
+                with _director_state._pipeline_lock:
+                    pipeline = _director_state._pipelines.get(pid)
+                    params = pipeline.get("params") if isinstance(pipeline, dict) else None
+                    if isinstance(params, dict):
+                        principal_id = params.pop("_agent_access_owner_id", None)
+                        session_id = params.pop("_agent_access_session_id", None)
+                        queue_id = params.get("_director_queue_entry_id")
+                        changed = principal_id is not None or session_id is not None
+                owner = None
+                try:
+                    if isinstance(principal_id, str) and principal_id:
+                        queue_session_id = session_id or _agent_access_backend.session_id
+                        if isinstance(queue_id, str) and queue_id:
+                            _agent_access_backend.journal.register_resource_owner(
+                                "queue", queue_id, principal_id, queue_session_id,
+                            )
+                        owner = {
+                            "principal_id": principal_id,
+                            "session_id": _agent_access_backend.session_id,
+                        }
+                    elif isinstance(queue_id, str) and queue_id:
+                        existing_pipeline_owner = _agent_access_backend.journal.resource_owner("pipeline", pid)
+                        if existing_pipeline_owner is not None:
+                            # Resuming a durable pipeline keeps its original immutable
+                            # owner/session; child jobs still belong to this process run.
+                            owner = existing_pipeline_owner
+                        else:
+                            queue_owner = _agent_access_backend.journal.resource_owner("queue", queue_id)
+                            if queue_owner is not None:
+                                owner = {
+                                    "principal_id": queue_owner["principal_id"],
+                                    "session_id": _agent_access_backend.session_id,
+                                }
+                    if owner is not None:
+                        _agent_access_backend.journal.register_resource_owner(
+                            "pipeline", pid, owner["principal_id"], owner.get("session_id"),
+                        )
+                except Exception:
+                    if (
+                        owner is not None
+                        or (isinstance(principal_id, str) and principal_id)
+                        or (isinstance(queue_id, str) and queue_id)
+                    ):
+                        with _director_state._pipeline_lock:
+                            pipeline = _director_state._pipelines.get(pid)
+                            if isinstance(pipeline, dict):
+                                pipeline.update(
+                                    status="failed",
+                                    phase="failed",
+                                    error="Could not persist Director ownership",
+                                    _completed_at=time.time(),
+                                )
+                        _director_state._save_pipeline_state(pid)
+                    raise
+                if changed:
+                    _director_state._save_pipeline_state(pid)
+                return original_start_worker(pid, *args, **kwargs)
+
+            _start_pipeline_worker_with_agent_owner._agent_access_owner_hook = True
+            _director_state._start_pipeline_worker = _start_pipeline_worker_with_agent_owner
         _pipeline_initialized = True
 
 
@@ -744,6 +1029,38 @@ def _check_model_downloaded(model_type: str) -> bool:
         return False
 
 
+def _requires_image_reference(model_def: dict) -> bool:
+    """Expose both exact-one and minimum-one native image-ref requirements."""
+    return bool(
+        model_def.get("one_image_ref_needed", False)
+        or model_def.get("at_least_one_image_ref_needed", False)
+        or model_def.get("image_reference_required_for_generate", False)
+    )
+
+
+_MANAGED_MOSS_EDIT_LORAS = {
+    "moss_image_edit_lora_bf16.safetensors",
+    "armv5.safetensors",
+}
+
+
+def _is_managed_moss_edit_lora(model_def: dict, filename: str) -> bool:
+    """Keep the MOSS edit adapters out of the optional user-LoRA picker."""
+    return (
+        (model_def or {}).get("architecture") == "moss_image"
+        and os.path.basename(str(filename or "").replace("\\", "/")).casefold() in _MANAGED_MOSS_EDIT_LORAS
+    )
+
+
+def _managed_pika_flex_lora_names(model_def: dict) -> set[str]:
+    """Keep both model-owned Pika adapters out of the optional H3 LoRA picker."""
+    if not (model_def or {}).get("minimax_h3_pika_flex"):
+        return set()
+    from models.minimax_h3.pika_flex_assets import pika_flex_managed_lora_filenames
+
+    return {name.casefold() for name in pika_flex_managed_lora_filenames()}
+
+
 @api.get("/api/v1/models")
 def list_models():
     """List available model families and model types."""
@@ -780,6 +1097,7 @@ def list_models():
             "lora_compatibility_note": md.get("lora_compatibility_note", ""),
             "family": family,
             "architecture": architecture,
+            "world_model": bool(md.get("world_model", False)),
             "preview_support": model_preview_support(
                 architecture, md, wgp.model_types_handlers.get(architecture),
             ),
@@ -800,7 +1118,8 @@ def list_models():
             # Studio's Image workflow selector uses the model definition's
             # native capabilities instead of name/architecture heuristics.
             "supports_image_edit": bool(md.get("image_ref_choices")),
-            "requires_image_reference": bool(md.get("one_image_ref_needed", False)),
+            "supports_instruction_image_edit": bool(md.get("instruction_image_edit") or md.get("moss_edit")),
+            "requires_image_reference": _requires_image_reference(md),
             "supports_image_inpaint": bool(md.get("inpaint_support", False)),
             "supports_image_outpaint": bool(
                 md.get("inpaint_support", False)
@@ -815,6 +1134,7 @@ def list_models():
             # nsfw_mode toggle can show/hide without reloading models.
             "nsfw_only": bool(md.get("nsfw_only", False)),
             "loras_disabled": bool(md.get("loras_disabled", False)),
+            "experimental_loras_available": bool(md.get("experimental_loras_available", False)),
         })
 
     return {"families": families, "models": models}
@@ -891,6 +1211,7 @@ def _normalize_studio_preferences(values, current=None):
         "generation_mode": {"image", "video", "audio", "avatar"},
         "studio_video_workflow": {
             "frames", "references", "extend", "blend", "retake",
+            "titles",
             "prompt_edit", "outpaint", "repaint", "recast", "upscale",
             "film_grain", "animate", "avatar",
         },
@@ -963,7 +1284,7 @@ def _normalize_studio_preferences(values, current=None):
             raise ValueError("h3_optimizations must be an object.")
         override_attention = raw_h3.get("override_attention", "")
         cache_type = raw_h3.get("skip_steps_cache_type", "")
-        if override_attention not in ("", "sol", "sla", "veda", "sdpa"):
+        if override_attention not in ("", "sol", "sla", "veda", "sdpa", "sage2"):
             raise ValueError("override_attention is invalid.")
         if cache_type not in ("", "first_block"):
             raise ValueError("skip_steps_cache_type is invalid.")
@@ -1486,7 +1807,7 @@ def get_defaults(model_type: str):
     """Get default settings for a model type."""
     if wgp.get_model_def(model_type) is None:
         raise HTTPException(status_code=404, detail=f"Unknown model: {model_type}")
-    defaults = wgp.get_default_settings(model_type)
+    defaults = wgp.get_default_settings(model_type, persist_missing=False)
     return defaults
 
 
@@ -1494,6 +1815,40 @@ def get_defaults(model_type: str):
 def get_primary_settings():
     """Get the base primary_settings (all parameter defaults)."""
     return wgp.primary_settings
+
+
+def _agent_creation_models():
+    """Include Studio's virtual SFX model without inventing registry models."""
+    result = list_models()
+    if not wgp.server_config.get("services", {}).get("nsfw_mode"):
+        result["models"] = [model for model in result["models"] if not model.get("nsfw_only")]
+    required = [
+        "mmaudio/" + wgp.MMAUDIO_STANDARD,
+        "mmaudio/synchformer_state_dict.pth", "mmaudio/v1-44.pth",
+        "DFN5B-CLIP-ViT-H-14-378/open_clip_config.json",
+        "DFN5B-CLIP-ViT-H-14-378/open_clip_pytorch_model.bin",
+        "bigvgan_v2_44khz_128band_512x/config.json",
+        "bigvgan_v2_44khz_128band_512x/bigvgan_generator.pt",
+    ]
+    downloaded = all(wgp.fl.locate_file(path, error_if_none=False) for path in required)
+    result["models"].append({"model_type": "mmaudio_v2", "name": "MMAudio v2", "family": "tts", "architecture": "mmaudio", "is_downloaded": bool(downloaded)})
+    return result
+
+
+def _agent_creation_model_def(model):
+    if model == "mmaudio_v2":
+        return {"architecture": "mmaudio", "audio_only": True, "duration_slider": {"min": 1, "max": 20, "default": 10}, "prompt_infos": "Write sound effects, ambience and their audible timing; no lyrics or spoken narration unless explicitly requested."}
+    return wgp.get_model_def(model)
+
+
+def _agent_creation_model_defaults(model):
+    if model == "mmaudio_v2":
+        return {"sfx_mode": True, "duration_seconds": 10, "num_inference_steps": 25, "guidance_scale": 4.5, "batch_size": 1, "repeat_generation": 1}
+    return wgp.get_default_settings(model, persist_missing=False)
+
+
+def _agent_creation_model_options(model):
+    return _agent_creation_model_def(model) if model == "mmaudio_v2" else get_model_options(model)
 
 
 @api.get("/api/v1/loras/scan-status/{scan_id}")
@@ -2159,6 +2514,7 @@ def list_all_installed_loras():
                 except Exception:
                     pass
             info.update(lora_date_fields(full_path, meta))
+            info["is_acceleration"] = is_acceleration_lora(f, meta)
             # Check for local preview files (downloaded from HF)
             if not info.get("preview_url"):
                 for _b in _bases:
@@ -2315,10 +2671,18 @@ def _lora_is_compatible_with_model(model_def: dict, path: str) -> bool:
     # adapter is tied to one checkpoint shape.
     architecture = str((model_def or {}).get("architecture") or "")
     if architecture.startswith("minimax_h3"):
-        if (model_def or {}).get("minimax_h3_fused_turbo", False):
-            from models.minimax_h3.fused_turbo import fused_h3_lora_incompatibility
+        if (model_def or {}).get("minimax_h3_fasth3"):
+            from models.minimax_h3.lora_compatibility import fasth3_lora_incompatibility
 
-            return fused_h3_lora_incompatibility(path) is None
+            return fasth3_lora_incompatibility(
+                path, omni_reference=bool(model_def.get("minimax_h3_fasth3_omniref")),
+            ) is None
+        from models.minimax_h3.lora_compatibility import minimax_h3_lora_incompatibility
+
+        if minimax_h3_lora_incompatibility(model_def, path) is not None:
+            return False
+        if (model_def or {}).get("minimax_h3_fused_turbo", False):
+            return True
         from models.minimax_h3.turbo import (
             minimax_h3_adapter_workflow,
             minimax_h3_turbo_preset_for_path,
@@ -2339,6 +2703,23 @@ def _lora_is_compatible_with_model(model_def: dict, path: str) -> bool:
     return True
 
 
+def _validate_h3_lora_selection(model_def: dict, params: dict) -> None:
+    """Catch known adapter/model mismatches before starting expensive loading."""
+    from models.minimax_h3.lora_compatibility import validate_fasth3_loras, validate_minimax_h3_loras
+
+    paths = [
+        wgp.resolve_lora_path(params["model_type"], name) or name
+        for name in params.get("activated_loras") or []
+    ]
+    if model_def.get("minimax_h3_fasth3"):
+        validate_fasth3_loras(
+            paths, enabled=params.get("minimax_h3_experimental_loras"),
+            omni_reference=bool(model_def.get("minimax_h3_fasth3_omniref")),
+        )
+    else:
+        validate_minimax_h3_loras(paths, model_def)
+
+
 def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
     """Return the managed Turbo preset exposed by a compatible H3 model."""
 
@@ -2348,6 +2729,7 @@ def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
         or (model_def or {}).get("minimax_h3_fused_turbo", False)
         or (model_def or {}).get("minimax_h3_baked_turbo", False)
         or (model_def or {}).get("minimax_h3_fasth3", False)
+        or (model_def or {}).get("minimax_h3_pika_flex", False)
         or (model_def or {}).get("audio_only", False)
         or (model_def or {}).get("vdn", False)
     ):
@@ -2439,6 +2821,7 @@ def list_loras(model_type: str):
         return {"loras": [], "guidance_max_phases": md.get("guidance_max_phases", 1)}
 
     turbo_option = _minimax_h3_turbo_option(md)
+    managed_pika_loras = _managed_pika_flex_lora_names(md)
     if lora_dir is None:
         return {"loras": [], "guidance_max_phases": md.get("guidance_max_phases", 1)}
 
@@ -2450,6 +2833,10 @@ def list_loras(model_type: str):
     if os.path.isdir(lora_dir):
         for search_dir in wgp.get_lora_search_dirs(model_type):
             for f in glob.glob(os.path.join(search_dir, "*.safetensors")) + glob.glob(os.path.join(search_dir, "*.sft")):
+                if _is_managed_moss_edit_lora(md, f):
+                    continue
+                if os.path.basename(f).casefold() in managed_pika_loras:
+                    continue
                 if not _lora_is_compatible_with_model(md, f):
                     continue
                 names.add(os.path.basename(f))
@@ -2486,6 +2873,7 @@ def list_loras_details(model_type: str):
     except Exception:
         return {"loras": [], "guidance_max_phases": md.get("guidance_max_phases", 1)}
     turbo_option = _minimax_h3_turbo_option(md)
+    managed_pika_loras = _managed_pika_flex_lora_names(md)
     if lora_dir is None:
         return {"loras": [], "guidance_max_phases": md.get("guidance_max_phases", 1)}
 
@@ -2499,6 +2887,10 @@ def list_loras_details(model_type: str):
                 glob.glob(os.path.join(_search_dir, "*.safetensors"))
                 + glob.glob(os.path.join(_search_dir, "*.sft"))
             ):
+                if _is_managed_moss_edit_lora(md, f):
+                    continue
+                if os.path.basename(f).casefold() in managed_pika_loras:
+                    continue
                 if not _lora_is_compatible_with_model(md, f):
                     continue
                 _b = os.path.basename(f)
@@ -2577,6 +2969,7 @@ def list_loras_details(model_type: str):
             except Exception:
                 meta = None
         info.update(lora_date_fields(f, meta))
+        info["is_acceleration"] = is_acceleration_lora(basename, meta)
         # Fallback: infer NSFW from filename + tags + description + guide
         # only when no authoritative signal exists.
         has_override = isinstance(meta, dict) and isinstance(meta.get("nsfw_override"), bool)
@@ -2637,6 +3030,7 @@ def list_loras_details(model_type: str):
                 loras.append(info)
             info.update({
                 "managed": True,
+                "is_acceleration": True,
                 "managed_channel": preset["status"],
                 "recommended_weights": {
                     "source": "default",
@@ -6482,7 +6876,7 @@ def get_model_options(model_type: str):
 
     # Get ui_defaults for fallback values (model handlers set these for their UIs)
     try:
-        _ui_defaults = wgp.get_default_settings(model_type) or {}
+        _ui_defaults = wgp.get_default_settings(model_type, persist_missing=False) or {}
     except Exception:
         _ui_defaults = {}
 
@@ -6700,10 +7094,12 @@ def get_model_options(model_type: str):
             "minimax_h3_fused_turbo", False
         ),
         "minimax_h3_baked_turbo": md.get("minimax_h3_baked_turbo", False),
+        "minimax_h3_pika_flex": md.get("minimax_h3_pika_flex", False),
         "minimax_h3_fasth3": md.get("minimax_h3_fasth3", False),
         "minimax_h3_fasth3_omniref": md.get("minimax_h3_fasth3_omniref", False),
         "minimax_h3_full_checkpoint": md.get("minimax_h3_full_checkpoint", False),
         "loras_disabled": md.get("loras_disabled", False),
+        "experimental_loras_available": md.get("experimental_loras_available", False),
         "minimax_h3_runtime_advisory": _minimax_h3_runtime_advisory(md),
         "minimax_h3_media_sources": md.get(
             "minimax_h3_media_sources", False
@@ -6940,10 +7336,15 @@ def get_system_config():
     """Return system-level settings for the UI System tab."""
     cfg = wgp.server_config
     from services.memory_settings import memory_settings_snapshot
+    from services.memory_runtime import active_runtime_selection, runtime_snapshot
     from shared.cuda_memory import allocator_status
+    runtime_selection = active_runtime_selection(
+        _app_dir, getattr(wgp, "memory_runtime_selection", None)
+    )
     return {
         **memory_settings_snapshot(cfg),
         **allocator_status(cfg),
+        **runtime_snapshot(runtime_selection, cfg),
         "app_version": _APP_VERSION,
         "attention_mode": cfg.get("attention_mode", "auto"),
         "transformer_quantization": cfg.get("transformer_quantization", "int8"),
@@ -6987,14 +7388,8 @@ def _get_linked_model_folders():
     return [p for p in paths[1:] if isinstance(p, str) and is_external_root(p)]
 
 
-def _apply_linked_model_folders(folders):
-    """Validate and apply a list of linked model folders.
-
-    Rebuilds checkpoints_paths as [primary] + [linked] + ["."], preserving
-    whatever primary download root the config already had (default
-    "ckpts"). Applies live via the files locator — no restart needed for
-    lookups. Raises (400) BEFORE any state is mutated.
-    """
+def _validate_linked_model_folders(folders):
+    """Validate linked folders without changing server or locator state."""
     from shared.utils.files_locator import is_external_root
     if not isinstance(folders, list):
         raise HTTPException(status_code=400, detail="model_folders must be a list of folder paths")
@@ -7006,7 +7401,6 @@ def _apply_linked_model_folders(folders):
     for p in folders:
         if not isinstance(p, str) or not p.strip():
             raise HTTPException(status_code=400, detail=f"Invalid folder entry: {p!r}")
-        # Tolerate Windows Explorer "Copy as path" quoting.
         cleaned = p.strip().strip('"').strip("'").strip()
         ap = os.path.normpath(os.path.abspath(cleaned))
         if not os.path.isdir(ap):
@@ -7019,7 +7413,18 @@ def _apply_linked_model_folders(folders):
         if ap_n not in seen:
             seen.add(ap_n)
             normalized.append(ap)
-    new_paths = [primary] + normalized + ["."]
+    return normalized, [primary] + normalized + ["."]
+
+
+def _apply_linked_model_folders(folders, prepared=None):
+    """Apply a previously validated linked-folder update.
+
+    Rebuilds checkpoints_paths as [primary] + [linked] + ["."], preserving
+    whatever primary download root the config already had (default
+    "ckpts"). Applies live via the files locator — no restart needed for
+    lookups. Validation is performed before other settings are changed.
+    """
+    normalized, new_paths = prepared or _validate_linked_model_folders(folders)
     wgp.server_config["checkpoints_paths"] = new_paths
     wgp.fl.set_checkpoints_paths(new_paths)
     return normalized
@@ -7031,16 +7436,70 @@ async def update_system_config(request: Request):
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Settings must be a JSON object")
-    from services.memory_settings import MEMORY_KEYS, MODEL_LOAD_KEYS, validate_memory_updates
-    try:
-        memory_updates = validate_memory_updates(body)
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error))
+    from services.memory_runtime import (
+        active_runtime_selection,
+        runtime_snapshot,
+        validate_system_memory_updates,
+    )
+    cfg = wgp.server_config
+    runtime_selection = active_runtime_selection(
+        _app_dir, getattr(wgp, "memory_runtime_selection", None)
+    )
+    from services.memory_settings import MEMORY_KEYS, MODEL_LOAD_KEYS
+    runtime_bound_keys = MEMORY_KEYS | {
+        "memory_runtime", "video_profile", "image_profile", "audio_profile",
+    }
+    if runtime_selection is None and runtime_bound_keys.intersection(body):
+        raise HTTPException(
+            status_code=503,
+            detail="The active MMGP source is not verified; restart Maestro before changing memory runtime settings.",
+        )
+    if runtime_selection is None:
+        memory_updates = {}
+    else:
+        try:
+            memory_updates, _runtime_updates = validate_system_memory_updates(
+                body, cfg, runtime_selection
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error))
     if "generation_preview" in body and (
         not isinstance(body["generation_preview"], str)
         or body["generation_preview"] not in PREVIEW_MODES
     ):
         raise HTTPException(status_code=400, detail="Invalid generation preview mode")
+
+    if "attention_mode" in body and body["attention_mode"] not in wgp.attention_modes_supported:
+        raise HTTPException(status_code=400, detail="Invalid attention mode")
+    if "transformer_quantization" in body and body["transformer_quantization"] not in ("int8", "fp8", "bf16"):
+        raise HTTPException(status_code=400, detail="Invalid transformer quantization")
+    if "vae_config" in body and (
+        type(body["vae_config"]) is not int or body["vae_config"] not in (0, 1, 2, 3)
+    ):
+        raise HTTPException(status_code=400, detail="Invalid VAE tiling setting")
+    if "compile" in body and body["compile"] not in ("", "transformer"):
+        raise HTTPException(status_code=400, detail="Invalid compile setting")
+    if "video_output_codec" in body and body["video_output_codec"] not in (
+        "libx264_8", "libx264_10", "libx264_lossless", "libx265_8", "libx265_28",
+    ):
+        raise HTTPException(status_code=400, detail="Invalid video output codec")
+    if "image_output_codec" in body and body["image_output_codec"] not in (
+        "jpeg_95", "jpeg_85", "jpeg_70", "png", "webp_95", "webp_85", "webp_lossless",
+    ):
+        raise HTTPException(status_code=400, detail="Invalid image output codec")
+    if "enhancer_enabled" in body and (
+        type(body["enhancer_enabled"]) is not int or body["enhancer_enabled"] not in range(5)
+    ):
+        raise HTTPException(status_code=400, detail="Invalid prompt enhancer setting")
+    if "prompt_enhancer_quantization" in body and not isinstance(body["prompt_enhancer_quantization"], str):
+        raise HTTPException(status_code=400, detail="Invalid prompt enhancer quantization")
+    if "vram_safety_coefficient" in body:
+        try:
+            coefficient = float(body["vram_safety_coefficient"])
+        except (TypeError, ValueError, OverflowError):
+            raise HTTPException(status_code=400, detail="Invalid VRAM safety coefficient")
+        if not math.isfinite(coefficient) or not 0.5 <= coefficient <= 0.95:
+            raise HTTPException(status_code=400, detail="VRAM safety coefficient must be from 0.50 to 0.95")
 
     ALLOWED_KEYS = {
         "attention_mode", "transformer_quantization", "vae_config",
@@ -7048,55 +7507,72 @@ async def update_system_config(request: Request):
         "video_output_codec", "image_output_codec",
         "enhancer_enabled", "prompt_enhancer_quantization",
         "vram_safety_coefficient", "generation_preview",
-    } | MEMORY_KEYS
+    } | MEMORY_KEYS | {"memory_runtime"}
 
-    updated = {}
-    # Linked model folders map onto checkpoints_paths (validated + applied
-    # live); the raw key is deliberately NOT in ALLOWED_KEYS so clients
-    # can't bypass the validation and write-pinning invariants. Processed
-    # FIRST because its validation raises 400 before mutating anything —
-    # a mixed body must not leave other keys half-applied.
+    # Preflight every field that can reject this request before changing
+    # server_config or the live model-folder locator. In particular this
+    # keeps mixed memory/runtime requests atomic when any later field is bad.
+    prepared_folders = None
     if "model_folders" in body:
-        updated["model_folders"] = _apply_linked_model_folders(body["model_folders"])
-
-    # These public API names intentionally do not reuse WanGP's legacy
-    # notification keys. WanGP rings those keys at every low-level clip and
-    # sliding-window boundary; Maestro rings once at the top-level Studio or
-    # Director lifecycle boundary instead.
+        try:
+            prepared_folders = _validate_linked_model_folders(body["model_folders"])
+        except HTTPException:
+            raise
+    host_enabled = None
     if "host_notification_sound_enabled" in body:
-        raw_enabled = body["host_notification_sound_enabled"]
-        if not isinstance(raw_enabled, bool):
+        host_enabled = body["host_notification_sound_enabled"]
+        if not isinstance(host_enabled, bool):
             raise HTTPException(
                 status_code=400,
                 detail="host_notification_sound_enabled must be true or false",
             )
-        enabled = raw_enabled
-        wgp.server_config["maestro_host_notification_sound_enabled"] = enabled
-        updated["host_notification_sound_enabled"] = enabled
+    host_volume = None
     if "host_notification_sound_volume" in body:
         try:
-            volume = max(0, min(100, int(body["host_notification_sound_volume"])))
+            host_volume = max(0, min(100, int(body["host_notification_sound_volume"])))
         except (TypeError, ValueError):
             raise HTTPException(
                 status_code=400,
                 detail="host_notification_sound_volume must be between 0 and 100",
             )
-        wgp.server_config["maestro_host_notification_sound_volume"] = volume
-        updated["host_notification_sound_volume"] = volume
+
+    config_updates = {key: body[key] for key in body if key in ALLOWED_KEYS}
+    if "vram_safety_coefficient" in config_updates:
+        config_updates["vram_safety_coefficient"] = coefficient
+    if not (prepared_folders is not None or host_enabled is not None or host_volume is not None or config_updates):
+        raise HTTPException(status_code=400, detail="No valid fields to update")
 
     from services.perf_recommend import applied_keys
+    auto_managed_keys = applied_keys()
 
-    for key, value in body.items():
-        if key in ALLOWED_KEYS:
-            if key in applied_keys() and wgp.server_config.get(key) != value:
-                # Protect manual API clients too; the settings UI also turns
-                # Auto off, but a separate frontend request is not sufficient.
-                wgp.server_config.setdefault("services", {})["auto_performance"] = False
-            wgp.server_config[key] = value
-            updated[key] = value
+    updated = {}
+    # Linked model folders map onto checkpoints_paths and apply live; the raw
+    # key is deliberately NOT in ALLOWED_KEYS so clients can't bypass the
+    # validation and write-pinning invariants. Every validation has completed
+    # before any setting or locator state is changed.
+    if "model_folders" in body:
+        updated["model_folders"] = _apply_linked_model_folders(
+            body["model_folders"], prepared=prepared_folders
+        )
 
-    if not updated:
-        raise HTTPException(status_code=400, detail="No valid fields to update")
+    # These public API names intentionally do not reuse WanGP's legacy
+    # notification keys. WanGP rings those keys at every low-level clip and
+    # sliding-window boundary; Maestro rings once at the top-level Studio or
+    # Director lifecycle boundary instead.
+    if host_enabled is not None:
+        wgp.server_config["maestro_host_notification_sound_enabled"] = host_enabled
+        updated["host_notification_sound_enabled"] = host_enabled
+    if host_volume is not None:
+        wgp.server_config["maestro_host_notification_sound_volume"] = host_volume
+        updated["host_notification_sound_volume"] = host_volume
+
+    for key, value in config_updates.items():
+        if key in auto_managed_keys and wgp.server_config.get(key) != value:
+            # Protect manual API clients too; the settings UI also turns
+            # Auto off, but a separate frontend request is not sufficient.
+            wgp.server_config.setdefault("services", {})["auto_performance"] = False
+        wgp.server_config[key] = value
+        updated[key] = value
 
     # Persist to disk
     with open(wgp.server_config_filename, "w", encoding="utf-8") as f:
@@ -7124,7 +7600,12 @@ async def update_system_config(request: Request):
         wgp.reload_needed = True
 
     from shared.cuda_memory import allocator_status
-    return {"status": "ok", "updated": updated, **allocator_status(wgp.server_config)}
+    return {
+        "status": "ok",
+        "updated": updated,
+        **allocator_status(wgp.server_config),
+        **runtime_snapshot(runtime_selection, wgp.server_config),
+    }
 
 
 @api.post("/api/v1/notification-sound/test")
@@ -7316,6 +7797,111 @@ def scan_model_folders():
 
 from services.active_downloads_api import create_router as _active_downloads_router
 api.include_router(_active_downloads_router())
+
+
+# ComfyUI is an optional external executor. Its requests use the same durable,
+# owned jobs and GPU admission slot as native generation; it is never imported
+# into the model environment or enabled during startup.
+from services.comfyui_api import create_router as _create_comfyui_router
+from services.comfyui_integration import ComfyJobAdapter, resolve_workflow_media
+from services.comfyui_runtime import ServiceError as _ComfyServiceError
+
+
+def _comfy_workspace_dir(workspace):
+    base = Path(_workspace_dir("default")).resolve()
+    candidate = base if workspace == "default" else (base / workspace).resolve()
+    if candidate != base and base not in candidate.parents:
+        raise _ComfyServiceError(422, "The ComfyUI workspace is outside Maestro's output library.")
+    return _workspace_dir(workspace)
+
+
+def _comfy_link_folders(paths):
+    current = _get_linked_model_folders()
+    merged = list(dict.fromkeys([*current, *paths]))
+    prepared = _validate_linked_model_folders(merged)
+    result = _apply_linked_model_folders(merged, prepared=prepared)
+    with open(wgp.server_config_filename, "w", encoding="utf-8") as file:
+        json.dump(wgp.server_config, file, indent=4)
+    return result
+
+
+def _comfy_known_assets():
+    # Names are only hints, not compatibility proof. Only explicit size+SHA
+    # metadata can authorize a verified-native result in the model scanner.
+    from urllib.parse import unquote, urlsplit
+    found = {}
+    budget = [20000]
+    def walk(value, depth=0):
+        budget[0] -= 1
+        if depth > 12 or budget[0] < 0:
+            return
+        if isinstance(value, dict):
+            filename = value.get("filename") or value.get("file_name")
+            if isinstance(filename, str) and filename.lower().endswith((".safetensors", ".gguf")):
+                record = {"filename": os.path.basename(filename)}
+                hashes = value.get("hashes") or {}
+                digest = value.get("sha256") or (hashes.get("SHA256") if isinstance(hashes, dict) else None)
+                size = value.get("size_bytes") or value.get("file_size")
+                if isinstance(digest, str) and len(digest) == 64 and type(size) is int:
+                    record.update(expected_sha256=digest.lower(), expected_size=size)
+                found[(record["filename"], record.get("expected_sha256"))] = record
+            for item in value.values():
+                walk(item, depth + 1)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item, depth + 1)
+        elif isinstance(value, str) and value.startswith("https://"):
+            filename = os.path.basename(unquote(urlsplit(value).path))
+            if filename.lower().endswith((".safetensors", ".gguf")):
+                found.setdefault((filename, None), {"filename": filename})
+    walk(getattr(wgp, "models_def", {}))
+    return list(found.values())
+
+
+def _comfy_authorize_media(value):
+    principal = principal_context.get()
+    if principal is None or getattr(principal, "owner", False):
+        return value
+    try:
+        return str(_agent_access_backend.asset_store.resolve(principal.id, value))
+    except Exception:
+        reference = _agent_access_backend.asset_store.reference_for_path(principal.id, value)
+        if reference is None:
+            raise _ComfyServiceError(403, "Use a media asset imported by this agent; another client's local paths cannot be used.") from None
+        return str(_agent_access_backend.asset_store.resolve(principal.id, reference))
+
+
+def _comfy_release_native_models():
+    # Called only by a worker that already owns _gen_lock.
+    if getattr(wgp, "wan_model", None) is not None or getattr(wgp, "offloadobj", None) is not None:
+        wgp.release_model()
+    from services.generation_memory import release_auxiliary_models
+    release_auxiliary_models()
+    try:
+        from services import llm_service
+        if llm_service.is_loaded():
+            llm_service.unload_model()
+    except Exception as error:
+        print(f"[ComfyUI] Auxiliary writer cleanup: {type(error).__name__}")
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+_comfy_adapter = ComfyJobAdapter(
+    _app_dir, jobs=_jobs, workspace_dir=_comfy_workspace_dir,
+    start_worker=lambda job_id: threading.Thread(target=_run_generation, args=(job_id,), daemon=False, name="maestro_comfyui").start(),
+    require_job_access=_agent_require_job_access,
+    principal_id=lambda: getattr(principal_context.get(), "id", None),
+    link_folders=_comfy_link_folders, known_assets=_comfy_known_assets,
+    resolve_media=lambda raw, workspace: resolve_workflow_media(_app_dir, wgp.server_config.get("save_path", "outputs"), raw, workspace),
+    authorize_media=_comfy_authorize_media,
+    is_owner=lambda: principal_context.get() is None or getattr(principal_context.get(), "owner", False),
+    finish_job=finish_job, update_job=update_job, is_cancelled=is_cancel_requested,
+    unload_native=_comfy_release_native_models,
+)
+api.include_router(_create_comfyui_router(_comfy_adapter.service))
 
 
 @api.post("/api/v1/downloads/cancel")
@@ -7861,6 +8447,9 @@ def get_services_config():
         # config; the Edit mode picker hides Inpaint. Voice Reference is
         # intentionally independent of this gate.
         "show_experimental": services.get("show_experimental", False),
+        # Controls whether the Worlds entry is shown in the UI. This is a
+        # persisted visibility preference only; it does not gate routes/jobs.
+        "worlds_enabled": services.get("worlds_enabled", False) is True,
         # Storage Manager: opt-in gate for removing duplicate files FROM
         # linked installs (the inverse of Reclaim). Default off — deleting
         # from another install is informed-consent territory.
@@ -7897,6 +8486,7 @@ def get_services_config():
         # 3=tiny-long (tiny for long videos). topk_ratio 0..4 controls sparse-
         # attention density (higher = more motion fidelity, slower). backend:
         # auto / triton_sparse (bundled) / sparge (optional install, best motion).
+        "flashvsr_model": services.get("flashvsr_model", "v1_1"),
         "flashvsr_mode": services.get("flashvsr_mode", 1),
         "flashvsr_topk_ratio": services.get("flashvsr_topk_ratio", 0.0),
         "flashvsr_backend": services.get("flashvsr_backend", "auto"),
@@ -7909,6 +8499,10 @@ async def update_services_config(request: Request):
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Settings must be an object.")
+    # Validate this preference before preparing any updates so values such as
+    # the string "false" can never be treated as truthy or partially applied.
+    if "worlds_enabled" in body and type(body["worlds_enabled"]) is not bool:
+        raise HTTPException(status_code=400, detail="Worlds visibility must be true or false.")
 
     ALLOWED_KEYS = {
         "llm_model_id", "llm_device", "llm_provider", "llm_remote_url",
@@ -7920,8 +8514,9 @@ async def update_services_config(request: Request):
         "use_director_v2", "nsfw_mode", "nsfw_accepted_at", "director_prompt_polish",
         "civitai_api_key", "voice_reference_enabled", "ltx_progressive_pipeline",
         "show_experimental", "auto_performance", "storage_allow_linked_removal",
+        "worlds_enabled",
         "director_multishot_lora_mode",
-        "flashvsr_mode", "flashvsr_topk_ratio", "flashvsr_backend",
+        "flashvsr_model", "flashvsr_mode", "flashvsr_topk_ratio", "flashvsr_backend",
     }
 
     previous_services = wgp.server_config.get("services", {})
@@ -7936,6 +8531,8 @@ async def update_services_config(request: Request):
             raise HTTPException(status_code=400, detail="Fidelity retries must be a whole number from 0 to 5.")
         if key == "enhance_fidelity_auto_continue" and type(value) is not bool:
             raise HTTPException(status_code=400, detail="Continue after fidelity warnings must be true or false.")
+        if key == "flashvsr_model" and value not in ("v1_1", "plus_turbo"):
+            raise HTTPException(status_code=400, detail="FlashVSR model must be v1_1 or plus_turbo.")
         if key == "llm_mtp_acceleration" and type(value) is not bool:
             raise HTTPException(status_code=400, detail="MTP acceleration must be true or false.")
         if key.endswith("_api_key"):
@@ -9216,6 +9813,68 @@ def _interactive_enhancement_slot(function):
     return wrapped
 
 
+@api.post("/api/v1/llm/plan-title")
+@_interactive_enhancement_slot
+async def llm_plan_animated_title(request: Request):
+    """Plan an animated title card with the configured prompt enhancement writer."""
+    from services import llm_service
+    from services.animated_title_planner import (
+        TITLE_PLAN_JSON_SCHEMA,
+        plan_animated_title,
+        validate_title_request,
+    )
+    from services.enhancement_diagnostics import record_advisory, record_rejection
+
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="The request body must be a JSON object.")
+    brief = body.get("brief")
+    style_hint = body.get("style_hint", "")
+    frames = body.get("frames")
+    background = body.get("background")
+    fps = body.get("fps", 24)
+    native_h3 = body.get("native_h3", True)
+    try:
+        validate_title_request(
+            brief,
+            style_hint,
+            frames,
+            background,
+            fps=fps,
+            native_h3=native_h3,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    services = enhancement_settings(wgp.server_config.get("services", {}))
+    enhance_model = services.get("enhance_llm_model_id", "")
+    enhance_device = services.get("enhance_llm_device", "cuda")
+    if enhance_model:
+        _ensure_llm_loaded(model_id=enhance_model, device=enhance_device)
+    else:
+        _ensure_llm_loaded()
+
+    provider = services.get("llm_provider", "local")
+    result = plan_animated_title(
+        brief,
+        style_hint,
+        frames,
+        background,
+        llm_service.generate,
+        json_schema=TITLE_PLAN_JSON_SCHEMA if provider == "local" else None,
+        fps=fps,
+        native_h3=native_h3,
+    )
+    if result["plan"] is None:
+        record_rejection(result["warnings"], stage="Animated title planning")
+    elif result["review_required"] or result["warnings"]:
+        record_advisory(
+            "animated_title_review",
+            {"review_required": result["review_required"], "warnings": result["warnings"]},
+        )
+    return result
+
+
 @api.get("/api/v1/llm/drafts/{history_id}")
 def get_interactive_writer_drafts(history_id: str):
     from services.enhancement_diagnostics import DraftHistoryArchive
@@ -9513,12 +10172,25 @@ async def _llm_enhance_prompt_payload(body: dict):
         model_type.lower().startswith("minimax_h3")
         and generation_mode in ("video", "avatar")
     )
+    if needs_h3_context_ir and "minimax_h3_references" in body:
+        model = wgp.get_model_def(model_type) or {}
+        if model.get("omni_reference"):
+            from services.studio_enhancement import canonical_h3_enhancement_inputs
+            try:
+                native_inputs = canonical_h3_enhancement_inputs(
+                    prompt, body.get("minimax_h3_references"),
+                )
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
+            body = {**body, **native_inputs}
+            prompt = body["prompt"]
     needs_flux3_image_guide = (
         model_type.lower().startswith("flux3") and generation_mode == "image"
     )
-    needs_moss_image_guide = (
-        model_type.lower().startswith("moss_image") and generation_mode == "image"
-    )
+    from services.enhance_guides import moss_image_enhancement_kind
+    moss_enhancement_kind = moss_image_enhancement_kind(model_type, generation_mode)
+    needs_moss_image_guide = moss_enhancement_kind == "layout"
+    needs_moss_image_edit_guide = moss_enhancement_kind == "edit"
     needs_speech_writer = generation_mode == "audio" and bool(body.get("tts_enhance_mode"))
     try:
         requested_window_count = max(1, int(body.get("window_count") or 1))
@@ -9543,6 +10215,7 @@ async def _llm_enhance_prompt_payload(body: dict):
         and not needs_ltx_window_plan
         and not needs_flux3_image_guide
         and not needs_moss_image_guide
+        and not needs_moss_image_edit_guide
         and not needs_speech_writer
     ):
         try:
@@ -9566,6 +10239,8 @@ async def _llm_enhance_prompt_payload(body: dict):
             print("[Enhance] FLUX 3 uses native image captions and reference bindings; using Maestro's model-specific LLM guide")
         elif needs_moss_image_guide:
             print("[Enhance] MOSS Image uses native captions and centered-pixel layouts; using Maestro's model-specific LLM guide")
+        elif needs_moss_image_edit_guide:
+            print("[Enhance] MOSS Image Edit uses ordered visual references and concise edit instructions; using its model-specific guide")
         elif needs_speech_writer:
             print("[Enhance] Speech writing uses its native model guide and saved writing instructions")
 
@@ -11222,24 +11897,47 @@ def director_queue_list():
     _init_pipeline()
     from services.director_pipeline import list_director_queue
     base = wgp.server_config.get("save_path", "outputs")
-    return list_director_queue(base)
+    return _agent_filter_director_queue(list_director_queue(base))
 
 
 @api.post("/api/v1/director/queue")
 async def director_queue_add(request: Request):
     """Freeze a Director project revision in the held queue."""
     _init_pipeline()
-    from services.director_pipeline import enqueue_director_pipeline
+    from services.director_pipeline import enqueue_director_pipeline, list_director_queue
     body = await request.json()
     params = body.get("params") if isinstance(body, dict) else None
     if not isinstance(params, dict):
         raise HTTPException(status_code=400, detail="Director queue params are required")
+    params = _strip_private_director_fields(params)
+    principal = principal_context.get()
+    if isinstance(getattr(principal, "id", None), str):
+        params["_agent_access_owner_id"] = principal.id
+        params["_agent_access_session_id"] = _agent_access_backend.session_id
     base = wgp.server_config.get("save_path", "outputs")
     try:
         # Freezing a project can copy a full music track and many references.
         # Keep that durable snapshot work off FastAPI's event loop so status,
         # cancel, and system-stat requests remain responsive.
-        return await asyncio.to_thread(enqueue_director_pipeline, base, params)
+        async with _agent_queue_submission_lock:
+            before = list_director_queue(base)
+            previous_ids = {
+                str(entry.get("id")) for entry in before.get("entries", [])
+                if isinstance(entry, dict) and entry.get("id")
+            }
+            result = await asyncio.to_thread(enqueue_director_pipeline, base, params)
+            new_ids = [
+                str(entry.get("id")) for entry in result.get("entries", [])
+                if isinstance(entry, dict) and entry.get("id") and str(entry.get("id")) not in previous_ids
+            ]
+            principal = principal_context.get()
+            if len(new_ids) == 1:
+                _agent_access_backend.bind_queue_owner(
+                    new_ids[0], getattr(principal, "id", None),
+                )
+            elif _is_restricted_agent(principal):
+                raise HTTPException(503, "Director queue ownership could not be recorded")
+            return _agent_filter_director_queue(result)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -11247,39 +11945,48 @@ async def director_queue_add(request: Request):
 @api.post("/api/v1/director/queue/start")
 def director_queue_start():
     _init_pipeline()
-    from services.director_pipeline import start_director_queue
+    from services.director_pipeline import list_director_queue, start_director_queue
     base = wgp.server_config.get("save_path", "outputs")
-    return start_director_queue(base)
+    current = list_director_queue(base)
+    _agent_require_queue_collection(current, {"held", "queued", "running"})
+    return _agent_filter_director_queue(start_director_queue(base))
 
 
 @api.post("/api/v1/director/queue/pause")
 def director_queue_pause():
     _init_pipeline()
-    from services.director_pipeline import pause_director_queue
+    from services.director_pipeline import list_director_queue, pause_director_queue
     base = wgp.server_config.get("save_path", "outputs")
-    return pause_director_queue(base)
+    current = list_director_queue(base)
+    _agent_require_queue_collection(current, {"queued", "running"})
+    return _agent_filter_director_queue(pause_director_queue(base))
 
 
 @api.post("/api/v1/director/queue/reorder")
 async def director_queue_reorder(request: Request):
     _init_pipeline()
-    from services.director_pipeline import reorder_director_queue
+    from services.director_pipeline import list_director_queue, reorder_director_queue
     body = await request.json()
     entry_ids = body.get("entry_ids") if isinstance(body, dict) else None
     if not isinstance(entry_ids, list) or not all(isinstance(item, str) for item in entry_ids):
         raise HTTPException(status_code=400, detail="entry_ids must be a list of queue IDs")
     base = wgp.server_config.get("save_path", "outputs")
-    return reorder_director_queue(base, entry_ids)
+    current = list_director_queue(base)
+    _agent_require_queue_collection(current)
+    return _agent_filter_director_queue(reorder_director_queue(base, entry_ids))
 
 
 @api.get("/api/v1/director/queue/{entry_id}")
 def director_queue_get(entry_id: str):
     _init_pipeline()
     from services.director_pipeline import get_director_queue_entry
+    _agent_access_backend.require_resource_access("queue", entry_id)
     base = wgp.server_config.get("save_path", "outputs")
     entry = get_director_queue_entry(base, entry_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Director queue entry not found")
+    if isinstance(entry.get("params"), dict):
+        entry["params"] = _strip_private_director_fields(entry["params"])
     return entry
 
 
@@ -11295,11 +12002,18 @@ async def director_queue_update(entry_id: str, request: Request):
     params = body.get("params") if isinstance(body, dict) else None
     if not isinstance(params, dict):
         raise HTTPException(status_code=400, detail="Director queue params are required")
+    params = _strip_private_director_fields(params)
+    _agent_access_backend.require_resource_access("queue", entry_id)
+    old_owner = _agent_access_backend.resource_owner("queue", entry_id)
+    if old_owner is not None:
+        params["_agent_access_owner_id"] = old_owner["principal_id"]
+        params["_agent_access_session_id"] = old_owner.get("session_id")
     base = wgp.server_config.get("save_path", "outputs")
     try:
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             update_director_queue_entry, base, entry_id, params,
         )
+        return _agent_filter_director_queue(result)
     except PipelineBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
@@ -11313,6 +12027,7 @@ def director_queue_delete(entry_id: str, completed_only: bool = False):
         PipelineBusyError,
         remove_director_queue_entry,
     )
+    _agent_access_backend.require_resource_access("queue", entry_id)
     base = wgp.server_config.get("save_path", "outputs")
     try:
         removed = remove_director_queue_entry(base, entry_id, completed_only=completed_only)
@@ -11328,19 +12043,30 @@ async def director_pipeline_start(request: Request):
 
     Runs entirely server-side so the browser can be closed.
     """
+    return await _start_director_pipeline_payload(await request.json())
+
+
+async def _start_director_pipeline_payload(body: dict):
+    """Shared submission path for browser and reviewed external authoring."""
     _init_pipeline()
     from services.director_pipeline import start_pipeline
-    body = await request.json()
+    body = _strip_private_director_fields(body)
+    principal = principal_context.get()
+    if isinstance(getattr(principal, "id", None), str):
+        body["_agent_access_owner_id"] = principal.id
+        body["_agent_access_session_id"] = _agent_access_backend.session_id
     try:
         pid = await asyncio.to_thread(start_pipeline, body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _agent_access_backend.bind_pipeline_owner(pid, getattr(principal, "id", None))
     return {"pipeline_id": pid}
 
 
 @api.get("/api/v1/director/pipeline/{pid}")
 def director_pipeline_status(pid: str):
     """Get current pipeline status with rich progress info."""
+    _agent_require_director_pipeline(pid)
     from services.director_pipeline import get_pipeline_status
     base = wgp.server_config.get("save_path", "outputs")
     p = get_pipeline_status(pid, base)
@@ -11361,6 +12087,7 @@ def director_pipeline_status(pid: str):
 @api.get("/api/v1/director/pipeline/{pid}/llm-drafts")
 def director_pipeline_drafts(pid: str):
     """Load full writer evidence only when requested, not on each status poll."""
+    _agent_require_director_pipeline(pid)
     from services.director_pipeline import get_pipeline_drafts
     drafts = get_pipeline_drafts(pid, wgp.server_config.get("save_path", "outputs"))
     if drafts is None:
@@ -11371,6 +12098,7 @@ def director_pipeline_drafts(pid: str):
 @api.post("/api/v1/director/pipeline/{pid}/continue")
 async def director_pipeline_continue(pid: str, request: Request):
     """Resume a paused pipeline, optionally with updated clip plans."""
+    _agent_require_director_pipeline(pid)
     _init_pipeline()
     from services.director_pipeline import continue_pipeline
     body = await request.json() if request.headers.get("content-length", "0") != "0" else {}
@@ -11383,6 +12111,7 @@ async def director_pipeline_continue(pid: str, request: Request):
 @api.post("/api/v1/director/pipeline/{pid}/stop")
 def director_pipeline_stop(pid: str):
     """Cancel a running pipeline."""
+    _agent_require_director_pipeline(pid)
     from services.director_pipeline import get_pipeline, stop_pipeline
     if stop_pipeline(pid):
         current = get_pipeline(pid) or {}
@@ -11405,6 +12134,7 @@ def director_pipeline_resume(pid: str):
     before the crash, then re-runs video generation — so a mid-run backend
     crash doesn't throw away completed LLM work.
     """
+    _agent_require_director_pipeline(pid)
     _init_pipeline()
     from services.director_pipeline import resume_pipeline
     base = wgp.server_config.get("save_path", "outputs")
@@ -11520,6 +12250,20 @@ def list_saved_pipelines():
     from services.director_pipeline import list_pipeline_states
     base = wgp.server_config.get("save_path", "outputs")
     pipelines = list_pipeline_states(base)
+    principal = principal_context.get()
+    if _is_restricted_agent(principal):
+        visible = []
+        for pipeline in pipelines:
+            pipeline_id = str(pipeline.get("id") or "")
+            try:
+                _agent_require_director_pipeline(pipeline_id)
+            except HTTPException as error:
+                if error.status_code == 404:
+                    continue
+                raise
+            if _agent_access_backend.can_access_resource("pipeline", pipeline_id, principal):
+                visible.append(pipeline)
+        pipelines = visible
     for pipeline in pipelines:
         if pipeline.get("output_count") or pipeline.get("clip_count"):
             pipeline["thumbnail_url"] = (
@@ -11531,6 +12275,7 @@ def list_saved_pipelines():
 @api.get("/api/v1/director/pipelines/{pid}/thumbnail")
 def get_saved_pipeline_thumbnail(pid: str):
     """Serve a cached first frame for the Editor's Director-run gallery."""
+    _agent_require_director_pipeline(pid)
     from services.director_pipeline import build_pipeline_first_frame_thumbnail
     base = wgp.server_config.get("save_path", "outputs")
     thumbnail = build_pipeline_first_frame_thumbnail(base, pid)
@@ -11547,12 +12292,14 @@ def get_saved_pipeline(pid: str):
     state = load_pipeline_state(base, pid)
     if not state:
         return JSONResponse({"error": "Pipeline not found"}, status_code=404)
+    _agent_require_director_pipeline(pid, state)
     return state
 
 
 @api.put("/api/v1/director/pipelines/{pid}/clips/{clip_index}/tag")
 async def tag_pipeline_clip(pid: str, clip_index: int, request: Request):
     """Tag a clip as 'good', 'needs_work', or null."""
+    _agent_require_director_pipeline(pid)
     from services.director_pipeline import PipelineBusyError, update_clip_tag
     body = await request.json()
     tag = body.get("tag")
@@ -11569,6 +12316,7 @@ async def tag_pipeline_clip(pid: str, clip_index: int, request: Request):
 @api.put("/api/v1/director/pipelines/{pid}/clips/{clip_index}/prompt")
 async def save_pipeline_clip_prompt(pid: str, clip_index: int, request: Request):
     """Persist reviewed clip prompts without starting generation."""
+    _agent_require_director_pipeline(pid)
     from services.director_pipeline import PipelineBusyError, update_clip_prompt
     try:
         body = await request.json()
@@ -11593,6 +12341,7 @@ async def save_pipeline_clip_prompt(pid: str, clip_index: int, request: Request)
 @api.post("/api/v1/director/pipelines/{pid}/repair")
 def repair_saved_pipeline(pid: str):
     """Start a browser-independent missing-media repair and final rejoin."""
+    _agent_require_director_pipeline(pid)
     _init_pipeline()
     from services.director_pipeline import (
         PipelineBusyError,
@@ -11614,6 +12363,7 @@ def repair_saved_pipeline(pid: str):
 @api.post("/api/v1/director/pipelines/{pid}/repair/cancel")
 def cancel_saved_pipeline_repair(pid: str):
     """Cancel a server-owned repair and its current generation child."""
+    _agent_require_director_pipeline(pid)
     _init_pipeline()
     from services.director_pipeline import cancel_pipeline_repair
     base = wgp.server_config.get("save_path", "outputs")
@@ -11628,6 +12378,7 @@ def cancel_saved_pipeline_repair(pid: str):
 @api.post("/api/v1/director/pipelines/{pid}/clips/{clip_index}/rerun-image")
 async def rerun_pipeline_clip_image(pid: str, clip_index: int, request: Request):
     """Re-generate the start image for a specific clip in a saved pipeline."""
+    _agent_require_director_pipeline(pid)
     _init_pipeline()
     from services.director_pipeline import (
         GenerationCancelledError,
@@ -11667,6 +12418,7 @@ async def rerun_pipeline_clip_image(pid: str, clip_index: int, request: Request)
 @api.post("/api/v1/director/pipelines/{pid}/clips/{clip_index}/rerun-video")
 async def rerun_pipeline_clip_video(pid: str, clip_index: int, request: Request):
     """Re-generate the video for a specific clip in a saved pipeline."""
+    _agent_require_director_pipeline(pid)
     _init_pipeline()
     from services.director_pipeline import (
         GenerationCancelledError,
@@ -11702,6 +12454,7 @@ async def rerun_pipeline_clip_video(pid: str, clip_index: int, request: Request)
 @api.post("/api/v1/director/pipelines/{pid}/rejoin")
 async def rejoin_pipeline_clips(pid: str):
     """Re-join all clips from a saved pipeline using current best versions."""
+    _agent_require_director_pipeline(pid)
     _init_pipeline()
     from services.director_pipeline import PipelineBusyError, rejoin_clips
     base = wgp.server_config.get("save_path", "outputs")
@@ -11719,6 +12472,7 @@ async def rejoin_pipeline_clips(pid: str):
 @api.delete("/api/v1/director/pipelines/{pid}")
 def delete_pipeline_endpoint(pid: str):
     """Delete a saved pipeline and all media it produced (any workspace)."""
+    _agent_require_director_pipeline(pid)
     _init_pipeline()
     from services.director_pipeline import delete_pipeline
     base = wgp.server_config.get("save_path", "outputs")
@@ -11964,9 +12718,14 @@ def _enqueue_deferred_generation_preparation(body: dict) -> dict:
     """Create a visible job before any automatic sequence planning begins."""
 
     body = deepcopy(body)
-    client_submission_id = str(
-        body.pop("_client_submission_id", "") or ""
-    ).strip()
+    body.pop("_comfyui_submission", None)
+    try:
+        engine_snapshot = _comfy_adapter.capture_engine(body)
+    except _ComfyServiceError as error:
+        raise HTTPException(error.status, str(error)) from error
+    correlation = _pop_editor_submission(body)
+    client_submission_id = str((correlation or {}).get("client_submission_id") or "").strip()
+    editor_operation_id = (correlation or {}).get("editor_operation_id")
     queue_mode = str(body.get("_queue_mode", "now") or "now").strip().lower()
     if queue_mode not in {"now", "held"}:
         raise HTTPException(
@@ -12004,6 +12763,7 @@ def _enqueue_deferred_generation_preparation(body: dict) -> dict:
         "step": 0,
         "total_steps": 0,
         "phase": "",
+        "generation_engine_snapshot": engine_snapshot,
         "message": (
             "Ready - AI planning will run when queue starts"
             if hold_for_queue
@@ -12011,6 +12771,7 @@ def _enqueue_deferred_generation_preparation(body: dict) -> dict:
         ),
         "created_at": time.time(),
         "client_submission_id": client_submission_id or None,
+        "editor_operation_id": editor_operation_id,
         "params": body,
         "output_files": [],
         "error": None,
@@ -12020,6 +12781,8 @@ def _enqueue_deferred_generation_preparation(body: dict) -> dict:
     if body.pop("_enhance_on_generation", False) is True:
         job["enhancement"] = new_enhancement(body, _enhancement_settings_snapshot())
         job["message"] = "Ready — enhance when queue starts" if hold_for_queue else "Waiting — enhance before generation"
+    _bind_editor_operation_job(correlation, job_id, "generation")
+    if job.get("enhancement"):
         _studio_job_archive.save(job)
     _jobs[job_id] = job
 
@@ -12033,6 +12796,7 @@ def _enqueue_deferred_generation_preparation(body: dict) -> dict:
         "job_id": job_id,
         "status": initial_status,
         "client_submission_id": client_submission_id or None,
+        "editor_operation_id": editor_operation_id,
     }
 
 
@@ -12069,6 +12833,14 @@ def _model_download_confirmation(body: dict):
 async def generate(request: Request):
     """Submit a generation job. Returns immediately with a job_id."""
     body = await request.json()
+    existing_editor_job = _existing_editor_operation_job(body)
+    if existing_editor_job:
+        return {
+            "job_id": existing_editor_job["id"],
+            "status": existing_editor_job["status"],
+            "client_submission_id": existing_editor_job.get("client_submission_id"),
+            "editor_operation_id": existing_editor_job.get("editor_operation_id"),
+        }
     confirmation = _model_download_confirmation(body)
     if confirmation is not None:
         return JSONResponse(status_code=409, content=confirmation)
@@ -12283,6 +13055,17 @@ async def _prepare_generation_submission(
     """Normalize/plan a request, then submit it or return prepared params."""
 
     body = dict(body)
+    # Only the trusted provider adapter may attach an existing durable intent.
+    body.pop("_comfyui_submission", None)
+    principal = principal_context.get()
+    if principal is not None and not getattr(principal, "owner", False):
+        # These IDs are written only by trusted Director route code. A grant
+        # must not claim an existing pipeline or queue entry through JSON.
+        body = _strip_private_director_fields(body)
+    correlation = _pop_editor_submission(body)
+    editor_operation_id = (correlation or {}).get("editor_operation_id")
+    if prepare_only and editor_operation_id:
+        raise HTTPException(400, "An Editor operation cannot be attached to a preparation-only request.")
     h3_retry_plan = body.pop("_h3_retry_plan", None)
     _stamp_live_generation_settings_version(body)
     if (
@@ -12303,9 +13086,7 @@ async def _prepare_generation_submission(
                 raise ValueError("Face refinement is available for video generation only")
         except (ValueError, TypeError) as error:
             raise HTTPException(400, str(error)) from error
-    client_submission_id = str(
-        body.pop("_client_submission_id", "") or ""
-    ).strip()
+    client_submission_id = str((correlation or {}).get("client_submission_id") or "").strip()
     queue_mode = str(body.pop("_queue_mode", "now") or "now").strip().lower()
     if queue_mode not in {"now", "held"}:
         raise HTTPException(
@@ -12343,6 +13124,12 @@ async def _prepare_generation_submission(
     except Exception:
         _base_model_type = body.get("model_type")
     _generation_model_def = wgp.get_model_def(body["model_type"]) or {}
+    if _generation_model_def.get("world_model"):
+        from services.worlds_runtime import world_runtime_context
+        try:
+            world_runtime_context(_generation_model_def, body.get("custom_settings"))
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
     if _generation_model_def.get("minimax_h3_fasth3"):
         if _generation_model_def.get("minimax_h3_fasth3_omniref"):
             from models.minimax_h3.fasth3_omniref import validate_request as validate_fasth3_request
@@ -12403,9 +13190,18 @@ async def _prepare_generation_submission(
                 f"Audio-to-Video mode for {body['model_type']}."
             )
     if _generation_model_def.get("omni_reference"):
-        from models.minimax_h3.ref2va import validate_reference_manifest
+        from models.minimax_h3.ref2va import (
+            normalize_reference_detail,
+            validate_reference_manifest,
+        )
 
         try:
+            body["minimax_h3_reference_detail"] = normalize_reference_detail(
+                body.get("minimax_h3_reference_detail"),
+                ptd_refasymopd=bool(
+                    _generation_model_def.get("minimax_h3_ptd_refasymopd")
+                ),
+            )
             per_clip_references = body.get("per_clip_minimax_h3_references")
             if per_clip_references is not None:
                 if not isinstance(per_clip_references, list) or not per_clip_references:
@@ -12431,10 +13227,6 @@ async def _prepare_generation_submission(
                 body["minimax_h3_references"] = await asyncio.to_thread(
                     measure_video_audio_metadata, body["minimax_h3_references"]
                 )
-            detail = str(body.get("minimax_h3_reference_detail") or "match").strip().lower()
-            if detail not in {"match", "max"}:
-                raise ValueError("Reference detail must be 'match' or 'max'.")
-            body["minimax_h3_reference_detail"] = detail
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
     if str(_generation_model_def.get("architecture") or "").startswith("minimax_h3"):
@@ -12484,6 +13276,7 @@ async def _prepare_generation_submission(
                 ),
                 workflow=minimax_h3_adapter_workflow(_generation_model_def),
             )
+            _validate_h3_lora_selection(_generation_model_def, body)
             if _generation_model_def.get("omni_reference"):
                 from models.minimax_h3.turbo import find_minimax_h3_pdd_loras
 
@@ -12516,7 +13309,15 @@ async def _prepare_generation_submission(
             normalize_h3_clip_frame_schedule,
             normalize_h3_window_geometry,
             resolve_h3_long_sequence_discard_frames,
+            validate_pika_flex_single_pass_request,
         )
+
+        try:
+            # Reject unsupported explicit continuation requests before the
+            # generic multi-clip schedule path can reinterpret them.
+            validate_pika_flex_single_pass_request(body, _generation_model_def)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
         raw_h3_clip_frames = body.get("per_clip_frames")
         if (
@@ -12574,10 +13375,11 @@ async def _prepare_generation_submission(
                 f"{h3_window_adjustment['resolution']}, "
                 f"{h3_window_adjustment['requested_window_frames']} -> "
                 f"{h3_window_adjustment['effective_window_frames']} frames. "
+                f"{h3_window_adjustment.get('recommendation_note', '')} "
                 "Requested output duration is unchanged."
             )
 
-        if (
+        if _generation_model_def.get("minimax_h3_pika_flex") or (
             not _generation_model_def.get("omni_reference")
             and int(body.get("multi_prompts_gen_type") or 0) != 3
         ):
@@ -12674,6 +13476,7 @@ async def _prepare_generation_submission(
         h3_sequence_max_frames = int(
             _generation_model_def.get("frames_maximum") or 345
         )
+        h3_pika_flex = bool(_generation_model_def.get("minimax_h3_pika_flex"))
         if h3_sequence_enabled:
             from models.minimax_h3.minimax_h3_handler import (
                 apply_h3_omni_sequence_memory_policy,
@@ -12695,14 +13498,23 @@ async def _prepare_generation_submission(
                 )
             h3_sequence_max_frames = int(
                 body.get("minimax_h3_sequence_clip_frames")
+                or (
+                    body.get("sliding_window_size")
+                    if h3_pika_flex
+                    else None
+                )
                 or h3_sequence_max_frames
             )
             # The job-level VRAM estimator runs before multi-clip dispatch.
             # Give it the actual native pass ceiling so it budgets one Omni
             # clip rather than the entire joined sequence timeline.
-            body["sliding_window_size"] = min(
-                h3_sequence_total_frames or h3_sequence_max_frames,
-                h3_sequence_max_frames,
+            body["sliding_window_size"] = (
+                h3_sequence_max_frames
+                if h3_pika_flex
+                else min(
+                    h3_sequence_total_frames or h3_sequence_max_frames,
+                    h3_sequence_max_frames,
+                )
             )
             if h3_native_sequence:
                 body["sliding_window_overlap"] = normalize_h3_overlap_frames(
@@ -12722,12 +13534,14 @@ async def _prepare_generation_submission(
                     else "Auto"
                 )
                 print(
-                    f"[MiniMax H3 Omni] {override_label} native window: "
+                    f"[{'Pika H3 Flex References' if h3_pika_flex else 'MiniMax H3 Omni'}] "
+                    f"{override_label} native window: "
                     f"{h3_sequence_adjustment['checkpoint'].title()} "
                     f"checkpoint, "
                     f"{h3_sequence_adjustment['gpu_vram_gb']:.1f} GB, "
                     f"{h3_sequence_adjustment['resolution']}, "
                     f"{h3_sequence_max_frames} frames maximum. "
+                    f"{h3_sequence_adjustment.get('recommendation_note', '')} "
                     "Requested sequence duration is unchanged."
                 )
         if h3_sequence_enabled and (
@@ -12979,9 +13793,13 @@ async def _prepare_generation_submission(
             body["h3_window_plan"] = h3_window_plan_response
             if len(cached_prompts) == 1:
                 body["multi_prompts_gen_type"] = 0
-                body["sliding_window_size"] = min(
-                    h3_sequence_total_frames,
-                    h3_sequence_max_frames,
+                body["sliding_window_size"] = (
+                    h3_sequence_max_frames
+                    if h3_pika_flex
+                    else min(
+                        h3_sequence_total_frames,
+                        h3_sequence_max_frames,
+                    )
                 )
                 body.pop("per_clip_frames", None)
                 body.pop("per_clip_minimax_h3_references", None)
@@ -13712,6 +14530,13 @@ async def _prepare_generation_submission(
 
     job_id = uuid.uuid4().hex[:8]
     initial_status = "held" if hold_for_queue else "queued"
+    try:
+        engine_snapshot = _comfy_adapter.capture_engine(body)
+        existing_comfy = _comfy_adapter.attach_native(body, workspace, job_id, client_submission_id, engine_snapshot=engine_snapshot)
+    except _ComfyServiceError as error:
+        raise HTTPException(error.status, str(error)) from error
+    if existing_comfy is not None:
+        return existing_comfy
     job = {
         "id": job_id,
         "show_in_gallery": not hold_for_queue and not body.get("_viggle_prepare_only"),
@@ -13720,6 +14545,7 @@ async def _prepare_generation_submission(
         "step": 0,
         "total_steps": 0,
         "phase": "",
+        "generation_engine_snapshot": engine_snapshot,
         "message": (
             "Ready - waiting for Start Queue"
             if hold_for_queue
@@ -13727,12 +14553,14 @@ async def _prepare_generation_submission(
         ),
         "created_at": time.time(),
         "client_submission_id": client_submission_id or None,
+        "editor_operation_id": editor_operation_id,
         "params": body,
         "output_files": [],
         "error": None,
         "workspace": workspace,
         "out_dir": job_out_dir,
     }
+    _bind_editor_operation_job(correlation, job_id, "generation")
     _jobs[job_id] = job
 
     if not hold_for_queue:
@@ -13750,6 +14578,7 @@ async def _prepare_generation_submission(
         "job_id": job_id,
         "status": initial_status,
         "client_submission_id": client_submission_id or None,
+        "editor_operation_id": editor_operation_id,
     }
     if h3_window_plan_response is not None:
         response["h3_window_plan"] = h3_window_plan_response
@@ -13771,6 +14600,10 @@ async def retake_video_endpoint(request: Request):
     }
     """
     body = await request.json()
+    existing_editor_job = _existing_editor_operation_job(body, expected_tool="retake")
+    if existing_editor_job:
+        return {"job_id": existing_editor_job["id"], "status": existing_editor_job["status"], "retake_frames": ""}
+    correlation = _pop_editor_submission(body, expected_tool="retake")
 
     video_path = body.get("video_path")
     if not video_path:
@@ -13847,15 +14680,20 @@ async def retake_video_endpoint(request: Request):
     job = {
         "id": job_id, "status": "queued", "progress": 0, "step": 0, "total_steps": 0,
         "phase": "", "message": "Queued (retake)", "created_at": time.time(),
+        "client_submission_id": (correlation or {}).get("client_submission_id"),
+        "editor_operation_id": (correlation or {}).get("editor_operation_id"),
         "params": gen_params, "output_files": [], "error": None,
         "workspace": workspace, "out_dir": job_out_dir,
     }
+    _bind_editor_operation_job(correlation, job_id, "retake")
     _jobs[job_id] = job
 
     thread = threading.Thread(target=_run_generation, args=(job_id,), daemon=False)
     thread.start()
 
-    return {"job_id": job_id, "status": "queued", "retake_frames": f"{start_frame}-{end_frame}/{total_frames}"}
+    return {"job_id": job_id, "status": "queued", "retake_frames": f"{start_frame}-{end_frame}/{total_frames}",
+            "client_submission_id": (correlation or {}).get("client_submission_id"),
+            "editor_operation_id": (correlation or {}).get("editor_operation_id")}
 
 
 @api.post("/api/v1/extract-frames")
@@ -14315,6 +15153,11 @@ async def edit_anything_endpoint(request: Request):
     }
     """
     body = await request.json()
+    existing_editor_job = _existing_editor_operation_job(body, expected_tool="edit_anything")
+    if existing_editor_job:
+        return {"job_id": existing_editor_job["id"], "status": existing_editor_job["status"],
+                "editor_operation_id": existing_editor_job.get("editor_operation_id")}
+    correlation = _pop_editor_submission(body, expected_tool="edit_anything")
 
     video_path = body.get("video_path")
     if not video_path:
@@ -14464,9 +15307,12 @@ async def edit_anything_endpoint(request: Request):
     job = {
         "id": job_id, "status": "queued", "progress": 0, "step": 0, "total_steps": 0,
         "phase": "", "message": "Queued (edit anything)", "created_at": time.time(),
+        "client_submission_id": (correlation or {}).get("client_submission_id"),
+        "editor_operation_id": (correlation or {}).get("editor_operation_id"),
         "params": gen_params, "output_files": [], "error": None,
         "workspace": workspace, "out_dir": job_out_dir,
     }
+    _bind_editor_operation_job(correlation, job_id, "edit_anything")
     _jobs[job_id] = job
 
     thread = threading.Thread(target=_run_generation, args=(job_id,), daemon=False)
@@ -14476,6 +15322,8 @@ async def edit_anything_endpoint(request: Request):
         "job_id": job_id, "status": "queued",
         "edit_range": f"{start_frame}-{end_frame}/{total_frames}",
         "lora_filename": EDIT_ANYTHING_LORA_FILENAME,
+        "client_submission_id": (correlation or {}).get("client_submission_id"),
+        "editor_operation_id": (correlation or {}).get("editor_operation_id"),
     }
 
 
@@ -19896,6 +20744,11 @@ async def repaint_endpoint(request: Request):
     underlying motion-conditioning recipe.
     """
     body = await request.json()
+    existing_editor_job = _existing_editor_operation_job(body, expected_tool="repaint")
+    if existing_editor_job:
+        return {"job_id": existing_editor_job["id"], "status": existing_editor_job["status"],
+                "editor_operation_id": existing_editor_job.get("editor_operation_id")}
+    correlation = _pop_editor_submission(body, expected_tool="repaint")
     workspace = body.get("workspace")
     original_video_path = _resolve_recast_media(
         body.get("video_path"),
@@ -20175,12 +21028,15 @@ async def repaint_endpoint(request: Request):
         "phase": "",
         "message": "Queued (repaint)",
         "created_at": time.time(),
+        "client_submission_id": (correlation or {}).get("client_submission_id"),
+        "editor_operation_id": (correlation or {}).get("editor_operation_id"),
         "params": gen_params,
         "output_files": [],
         "error": None,
         "workspace": workspace_name,
         "out_dir": _workspace_dir(workspace_name),
     }
+    _bind_editor_operation_job(correlation, job_id, "repaint")
     _jobs[job_id] = job
 
     if not mappings:
@@ -20199,6 +21055,8 @@ async def repaint_endpoint(request: Request):
             "sliding_window_size": repaint_window_size,
             "num_inference_steps": inference_steps,
             "guidance_scale": guidance_scale,
+            "client_submission_id": (correlation or {}).get("client_submission_id"),
+            "editor_operation_id": (correlation or {}).get("editor_operation_id"),
         }
 
     def _run_repaint():
@@ -20447,6 +21305,8 @@ async def repaint_endpoint(request: Request):
         "sliding_window_size": repaint_window_size,
         "num_inference_steps": inference_steps,
         "guidance_scale": guidance_scale,
+        "client_submission_id": (correlation or {}).get("client_submission_id"),
+        "editor_operation_id": (correlation or {}).get("editor_operation_id"),
     }
 
 
@@ -20822,6 +21682,11 @@ async def recast_endpoint(request: Request):
     }
     """
     body = await request.json()
+    existing_editor_job = _existing_editor_operation_job(body, expected_tool="recast")
+    if existing_editor_job:
+        return {"job_id": existing_editor_job["id"], "status": existing_editor_job["status"],
+                "editor_operation_id": existing_editor_job.get("editor_operation_id")}
+    correlation = _pop_editor_submission(body, expected_tool="recast")
     workspace = body.get("workspace")
 
     video_path = _resolve_recast_media(body.get("video_path"), workspace)
@@ -21136,9 +22001,12 @@ async def recast_endpoint(request: Request):
     job = {
         "id": job_id, "status": "queued", "progress": 0, "step": 0, "total_steps": 0,
         "phase": "", "message": "Queued (recast)", "created_at": time.time(),
+        "client_submission_id": (correlation or {}).get("client_submission_id"),
+        "editor_operation_id": (correlation or {}).get("editor_operation_id"),
         "params": gen_params, "output_files": [], "error": None,
         "workspace": workspace_name, "out_dir": job_out_dir,
     }
+    _bind_editor_operation_job(correlation, job_id, "recast")
     _jobs[job_id] = job
     initial_probe_frame = probe_frame
 
@@ -22747,6 +23615,11 @@ async def outpaint_endpoint(request: Request):
     }
     """
     body = await request.json()
+    existing_editor_job = _existing_editor_operation_job(body, expected_tool="outpaint")
+    if existing_editor_job:
+        return {"job_id": existing_editor_job["id"], "status": existing_editor_job["status"],
+                "editor_operation_id": existing_editor_job.get("editor_operation_id")}
+    correlation = _pop_editor_submission(body, expected_tool="outpaint")
 
     video_path = body.get("video_path")
     if not video_path:
@@ -23254,9 +24127,12 @@ async def outpaint_endpoint(request: Request):
     job = {
         "id": job_id, "status": "queued", "progress": 0, "step": 0, "total_steps": 0,
         "phase": "", "message": "Queued (outpaint)", "created_at": time.time(),
+        "client_submission_id": (correlation or {}).get("client_submission_id"),
+        "editor_operation_id": (correlation or {}).get("editor_operation_id"),
         "params": gen_params, "output_files": [], "error": None,
         "workspace": workspace, "out_dir": job_out_dir,
     }
+    _bind_editor_operation_job(correlation, job_id, "outpaint")
     _jobs[job_id] = job
 
     worker = (
@@ -23279,6 +24155,8 @@ async def outpaint_endpoint(request: Request):
     return {
         "job_id": job_id,
         "status": "queued",
+        "client_submission_id": (correlation or {}).get("client_submission_id"),
+        "editor_operation_id": (correlation or {}).get("editor_operation_id"),
         "source_size": f"{src_w}x{src_h}",
         "output_size": f"{final_w}x{final_h}",
         "outpainting_dims": video_guide_outpainting,
@@ -25565,7 +26443,7 @@ def _chunked_flashvsr_upscale(video_path: str, method: str, *, job: dict = None,
     import torch
 
     from shared.utils.utils import get_video_info
-    from postprocessing.flashvsr.runtime import FLASHVSR_CONTINUE_CACHE_FRAMES
+    from postprocessing.flashvsr.runtime import continue_cache_frames
 
     fps, width, height, total_frames = get_video_info(video_path)
     scale = wgp.flashvsr.scale_for_upsampling(method) or 2.0
@@ -25576,7 +26454,7 @@ def _chunked_flashvsr_upscale(video_path: str, method: str, *, job: dict = None,
     # the top-level keys the bridge reads — BEFORE the variant-dependent
     # chunk sizing below.
     _svc = wgp.server_config.get("services", {})
-    for _k in ("flashvsr_mode", "flashvsr_topk_ratio", "flashvsr_backend"):
+    for _k in ("flashvsr_model", "flashvsr_mode", "flashvsr_topk_ratio", "flashvsr_backend"):
         if _k in _svc:
             wgp.server_config[_k] = _svc[_k]
 
@@ -25588,7 +26466,7 @@ def _chunked_flashvsr_upscale(video_path: str, method: str, *, job: dict = None,
     bytes_per_out_frame = 3 * out_h * out_w * (1 if _variant in ("tiny-long", "full") else 4)
     chunk_frames = int(8e9 // max(1, bytes_per_out_frame))
     chunk_frames = max(49, min(chunk_frames, 1200))
-    overlap = FLASHVSR_CONTINUE_CACHE_FRAMES
+    overlap = continue_cache_frames(wgp.flashvsr.model_for_upsampling(method))
     n_chunks = max(1, math.ceil(max(1, int(total_frames)) / chunk_frames))
 
     # Free generation-model cache before loading FlashVSR.
@@ -25857,12 +26735,147 @@ def _write_tool_sidecar(
         pass
 
 
+def _editor_operation_ffmpeg_binary() -> str | None:
+    from shared.utils.video_decode import _resolve_media_binary
+    return _resolve_media_binary("ffmpeg")
+
+
+def _stage_editor_operation_tool_source(job: dict, expected_tool: str, source_path: str, abort_check):
+    """Trim the exact Editor-owned source range before a clip tool runs.
+
+    Regular Studio tool requests keep their existing whole-file behavior. An
+    Editor round trip must name the exact operation, client submission, job,
+    tool, and source asset before this helper stages a range.
+    """
+    operation_id = str(job.get("editor_operation_id") or "").strip()
+    if not operation_id:
+        return None, source_path
+    import subprocess
+    import tempfile
+
+    client_submission_id = str(job.get("client_submission_id") or "").strip()
+    if not client_submission_id:
+        raise EditorOperationError("Editor tool job is missing its client submission id.")
+    try:
+        operation = get_editor_operation_record(_editor_operations_root(), operation_id)
+    except FileNotFoundError as error:
+        raise EditorOperationError("Editor tool operation could not be recovered.") from error
+    if (
+        operation.get("operation_id") != operation_id
+        or operation.get("client_submission_id") != client_submission_id
+        or operation.get("job_id") != str(job.get("id") or "")
+        or operation.get("job_kind") != expected_tool
+        or operation.get("tool") != expected_tool
+        or operation.get("status") not in {"queued", "running"}
+    ):
+        raise EditorOperationError("Editor tool job does not own the requested operation.")
+
+    workspace = str(job.get("workspace") or operation.get("workspace") or "")
+    snapshot = operation.get("source_snapshot")
+    source_range = operation.get("source_range")
+    expected_path = snapshot.get("asset_path") if isinstance(snapshot, dict) else None
+    expected_source = _resolve_tool_clip_path(expected_path, workspace) if expected_path else None
+    resolved_source = _resolve_tool_clip_path(source_path, workspace)
+    canonical = lambda value: os.path.normcase(os.path.realpath(os.path.abspath(value)))
+    if (
+        not expected_source
+        or not resolved_source
+        or canonical(expected_source) != canonical(resolved_source)
+    ):
+        raise EditorOperationError("Editor tool source no longer matches the selected clip.")
+    try:
+        start = float(source_range["start"])
+        end = float(source_range["end"])
+    except (TypeError, ValueError, KeyError) as error:
+        raise EditorOperationError("Editor tool source range is invalid.") from error
+    if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start:
+        raise EditorOperationError("Editor tool source range is invalid.")
+
+    media_info = probe_media(resolved_source)
+    try:
+        duration = float(media_info.get("duration"))
+    except (TypeError, ValueError) as error:
+        raise EditorOperationError("Editor source duration could not be read.") from error
+    if not math.isfinite(duration) or duration <= 0 or start >= duration or end > duration + 0.05:
+        raise EditorOperationError("Editor source range is outside the selected media.")
+    end = min(end, duration)
+    cut_duration = end - start
+    ffmpeg = _editor_operation_ffmpeg_binary()
+    if not ffmpeg or not os.path.isfile(ffmpeg):
+        raise EditorOperationError("FFmpeg is unavailable for Editor clip staging.")
+
+    temporary = tempfile.TemporaryDirectory(prefix=f"maestro-editor-{str(job.get('id') or 'job')}-")
+    staged_path = os.path.join(temporary.name, "selected-range.mp4")
+    command = [
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+        "-filter_threads", "2", "-threads", "2",
+        "-ss", f"{start:.9f}".rstrip("0").rstrip("."),
+        "-i", resolved_source,
+        "-t", f"{cut_duration:.9f}".rstrip("0").rstrip("."),
+        "-map", "0:v:0", "-vf", "setpts=PTS-STARTPTS",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "16",
+        "-pix_fmt", "yuv420p", "-fps_mode", "passthrough", "-threads", "2",
+        "-map", "0:a?", "-af", "atrim=duration=" + f"{cut_duration:.9f}".rstrip("0").rstrip(".") ,
+        "-c:a", "aac", "-b:a", "192k", "-avoid_negative_ts", "make_zero",
+        "-movflags", "+faststart", staged_path,
+    ]
+    process = None
+    try:
+        update_job(
+            job,
+            progress=max(1, int(job.get("progress") or 0)),
+            phase="Preparing clip range",
+            message="Preparing the selected Editor clip range...",
+        )
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        deadline = time.monotonic() + 900
+        while process.poll() is None:
+            if abort_check():
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=3)
+                raise EditorRenderCancelled("Editor clip staging was cancelled.")
+            if time.monotonic() >= deadline:
+                process.kill()
+                process.wait(timeout=3)
+                raise EditorOperationError("Editor clip staging exceeded the 15-minute limit.")
+            time.sleep(0.1)
+        if process.returncode != 0 or not os.path.isfile(staged_path) or os.path.getsize(staged_path) <= 0:
+            raise EditorOperationError("FFmpeg could not stage the selected Editor clip range.")
+        if abort_check():
+            raise EditorRenderCancelled("Editor clip staging was cancelled.")
+        return temporary, staged_path
+    except Exception:
+        temporary.cleanup()
+        raise
+
+
+def _cleanup_editor_operation_tool_source(temporary) -> None:
+    if temporary is not None:
+        try:
+            temporary.cleanup()
+        except Exception:
+            pass
+
+
 def _run_tool_upscale(job_id: str):
     """Upscale an existing image or clip with FlashVSR/Lanczos."""
     job = _jobs[job_id]
     start_time = time.time()
     abort_state = {"abort": False}
     audio_tracks = []
+    editor_source_stage = None
+    original_media_source = None
+    source_name = ""
     with generation_slot(_gen_lock, job) as acquired:
         if not acquired:
             return False
@@ -25895,6 +26908,16 @@ def _run_tool_upscale(job_id: str):
                 )
                 return False
 
+            original_media_source = media_source
+            source_name = os.path.basename(media_source)
+            if job.get("editor_operation_id"):
+                if media_type != "video":
+                    raise EditorOperationError("Editor upscale operations require a video clip.")
+                editor_source_stage, media_source = _stage_editor_operation_tool_source(
+                    job, "upscale", media_source,
+                    abort_check=lambda: bool(abort_state.get("abort")) or is_cancel_requested(job),
+                )
+
             before = set(os.listdir(out_dir)) if os.path.isdir(out_dir) else set()
 
             def _abort():
@@ -25914,13 +26937,13 @@ def _run_tool_upscale(job_id: str):
                 source_image = PILImage.open(media_source).convert("RGB")
                 final_path = wgp.get_available_filename(
                     out_dir,
-                    os.path.basename(media_source),
+                    source_name,
                     "_upscaled",
                     force_extension=".png",
                 )
                 if wgp.flashvsr.is_upsampling(method):
                     services = wgp.server_config.get("services", {})
-                    for key in ("flashvsr_mode", "flashvsr_topk_ratio", "flashvsr_backend"):
+                    for key in ("flashvsr_model", "flashvsr_mode", "flashvsr_topk_ratio", "flashvsr_backend"):
                         if key in services:
                             wgp.server_config[key] = services[key]
 
@@ -25990,9 +27013,9 @@ def _run_tool_upscale(job_id: str):
                     _write_tool_sidecar(
                         out_dir,
                         filename,
-                        source_name=os.path.basename(media_source),
+                        source_name=source_name,
                         tool="upscale",
-                        source_path=media_source,
+                        source_path=original_media_source,
                         params={
                             "method": method,
                             "model_type": "post_processing",
@@ -26006,7 +27029,7 @@ def _run_tool_upscale(job_id: str):
                     job, "completed", progress=100, phase="", message="Done",
                 )
                 print(
-                    f"[Tools/upscale] {os.path.basename(media_source)} -> "
+                    f"[Tools/upscale] {source_name} -> "
                     f"{new_files} ({wgp.format_time(time.time() - start_time)})"
                 )
                 return completed
@@ -26049,7 +27072,7 @@ def _run_tool_upscale(job_id: str):
 
             container = wgp.server_config.get("video_container", "mp4")
             codec = wgp.server_config.get("video_output_codec", None)
-            final_path = wgp.get_available_filename(out_dir, os.path.basename(video_source), "_upscaled", force_extension=f".{container}")
+            final_path = wgp.get_available_filename(out_dir, source_name, "_upscaled", force_extension=f".{container}")
 
             if wgp.flashvsr.is_upsampling(method):
                 # Chunked engine (shared with the post-generation pass) —
@@ -26089,7 +27112,7 @@ def _run_tool_upscale(job_id: str):
 
                 output_fps = round(fps)
                 if has_audio:
-                    tmp_path = wgp.get_available_filename(out_dir, os.path.basename(video_source), "_uptmp", force_extension=f".{container}")
+                    tmp_path = wgp.get_available_filename(out_dir, source_name, "_uptmp", force_extension=f".{container}")
                     wgp.save_video(tensor=sample[None], save_file=tmp_path, fps=output_fps, nrow=1, normalize=True, value_range=(-1, 1), codec_type=codec, container=container)
                     wgp.combine_video_with_audio_tracks(tmp_path, audio_tracks, final_path, audio_metadata=audio_metadata)
                     try:
@@ -26109,9 +27132,9 @@ def _run_tool_upscale(job_id: str):
             for fname in new_files:
                 _write_tool_sidecar(
                     out_dir, fname,
-                    source_name=os.path.basename(video_source),
+                    source_name=source_name,
                     tool="upscale",
-                    source_path=video_source,
+                    source_path=original_media_source,
                     params={"method": method, "model_type": "post_processing"},
                     elapsed=time.time() - start_time,
                     job_id=job_id,
@@ -26125,8 +27148,10 @@ def _run_tool_upscale(job_id: str):
                 phase="",
                 message="Done",
             )
-            print(f"[Tools/upscale] {os.path.basename(video_source)} -> {new_files} ({wgp.format_time(time.time() - start_time)})")
+            print(f"[Tools/upscale] {source_name} -> {new_files} ({wgp.format_time(time.time() - start_time)})")
             return completed
+        except EditorRenderCancelled:
+            return False
         except Exception as e:
             traceback.print_exc()
             finish_job(job, "failed", error=str(e), message=f"Error: {e}")
@@ -26141,6 +27166,7 @@ def _run_tool_upscale(job_id: str):
                 wgp.release_flashvsr_vram()
             except Exception:
                 pass
+            _cleanup_editor_operation_tool_source(editor_source_stage)
 
 
 def _run_tool_film_grain(job_id: str):
@@ -26151,6 +27177,9 @@ def _run_tool_film_grain(job_id: str):
     start_time = time.time()
     abort_state = {"abort": False}
     final_path = None
+    editor_source_stage = None
+    original_video_source = None
+    source_name = ""
     with generation_slot(_gen_lock, job) as acquired:
         if not acquired:
             return False
@@ -26179,6 +27208,14 @@ def _run_tool_film_grain(job_id: str):
                 )
                 return False
 
+            original_video_source = video_source
+            source_name = os.path.basename(video_source)
+            if job.get("editor_operation_id"):
+                editor_source_stage, video_source = _stage_editor_operation_tool_source(
+                    job, "film_grain", video_source,
+                    abort_check=lambda: bool(abort_state.get("abort")) or is_cancel_requested(job),
+                )
+
             intensity = max(0.0, min(1.0, float(params.get("intensity", 0))))
             saturation = max(
                 0.0, min(1.0, float(params.get("saturation", 0.5)))
@@ -26193,7 +27230,7 @@ def _run_tool_film_grain(job_id: str):
             container = str(wgp.server_config.get("video_container", "mp4"))
             final_path = wgp.get_available_filename(
                 out_dir,
-                os.path.basename(video_source),
+                source_name,
                 "_film_grain",
                 force_extension=f".{container}",
             )
@@ -26222,7 +27259,7 @@ def _run_tool_film_grain(job_id: str):
             _write_tool_sidecar(
                 out_dir,
                 filename,
-                source_name=os.path.basename(video_source),
+                source_name=source_name,
                 tool="film_grain",
                 params={
                     "intensity": intensity,
@@ -26237,10 +27274,12 @@ def _run_tool_film_grain(job_id: str):
                 job, "completed", progress=100, phase="", message="Done",
             )
             print(
-                f"[Tools/film-grain] {os.path.basename(video_source)} -> "
+                f"[Tools/film-grain] {source_name} -> "
                 f"{filename} ({wgp.format_time(time.time() - start_time)})"
             )
             return completed
+        except EditorRenderCancelled:
+            return False
         except Exception as error:
             traceback.print_exc()
             if final_path and os.path.isfile(final_path):
@@ -26254,6 +27293,7 @@ def _run_tool_film_grain(job_id: str):
             return False
         finally:
             unregister_abort_state(job_id, _active_gen_states, abort_state)
+            _cleanup_editor_operation_tool_source(editor_source_stage)
 
 
 def _run_tool_revoice(job_id: str):
@@ -26265,6 +27305,9 @@ def _run_tool_revoice(job_id: str):
     start_time = time.time()
     abort_state = {"abort": False}
     final_path = None
+    editor_source_stage = None
+    original_video_source = None
+    source_name = ""
     with generation_slot(_gen_lock, job) as acquired:
         if not acquired:
             return False
@@ -26291,6 +27334,14 @@ def _run_tool_revoice(job_id: str):
                 )
                 return False
 
+            original_video_source = video_source
+            source_name = os.path.basename(video_source)
+            if job.get("editor_operation_id"):
+                editor_source_stage, video_source = _stage_editor_operation_tool_source(
+                    job, "revoice", video_source,
+                    abort_check=lambda: bool(abort_state.get("abort")) or is_cancel_requested(job),
+                )
+
             mode = params.get("mode", "single")
             voice_refs = []
             for ref in (params.get("voice_ref_paths") or []):
@@ -26306,8 +27357,8 @@ def _run_tool_revoice(job_id: str):
 
             # Copy source -> new output, then revoice the copy in place so the
             # original gallery clip is never modified.
-            src_ext = os.path.splitext(video_source)[1] or ".mp4"
-            final_path = wgp.get_available_filename(out_dir, os.path.basename(video_source), "_revoiced", force_extension=src_ext)
+            src_ext = os.path.splitext(original_video_source or video_source)[1] or ".mp4"
+            final_path = wgp.get_available_filename(out_dir, source_name, "_revoiced", force_extension=src_ext)
             if is_cancel_requested(job):
                 return False
             shutil.copyfile(video_source, final_path)
@@ -26365,7 +27416,7 @@ def _run_tool_revoice(job_id: str):
             _write_tool_sidecar(
                 out_dir,
                 fname,
-                source_name=os.path.basename(video_source),
+                source_name=source_name,
                 tool="revoice",
                 params={
                     "mode": mode,
@@ -26386,14 +27437,17 @@ def _run_tool_revoice(job_id: str):
                 phase="",
                 message="Done",
             )
-            print(f"[Tools/revoice] {os.path.basename(video_source)} -> {fname} ({wgp.format_time(time.time() - start_time)})")
+            print(f"[Tools/revoice] {source_name} -> {fname} ({wgp.format_time(time.time() - start_time)})")
             return completed
+        except EditorRenderCancelled:
+            return False
         except Exception as e:
             traceback.print_exc()
             finish_job(job, "failed", error=str(e), message=f"Error: {e}")
             return False
         finally:
             unregister_abort_state(job_id, _active_gen_states, abort_state)
+            _cleanup_editor_operation_tool_source(editor_source_stage)
 
 
 def _run_face_refiner(job_id):
@@ -26525,6 +27579,9 @@ def _run_media_flow(job_id):
     job = _jobs[job_id]
     abort_state = {"abort": False}
     final_path = None
+    editor_source_stage = None
+    original_source = None
+    source_name = ""
     with generation_slot(_gen_lock, job) as acquired:
         if not acquired:
             return False
@@ -26538,10 +27595,19 @@ def _run_media_flow(job_id):
             source = _resolve_tool_clip_path(params["media_path"], job["workspace"])
             if not source:
                 raise ValueError("Source media is no longer available")
+            original_source = source
+            source_name = os.path.basename(source)
+            is_image = params["media_type"] == "image"
+            if job.get("editor_operation_id"):
+                if is_image:
+                    raise EditorOperationError("Editor upscale operations require a video clip.")
+                editor_source_stage, source = _stage_editor_operation_tool_source(
+                    job, "upscale", source,
+                    abort_check=lambda: bool(abort_state.get("abort")) or is_cancel_requested(job),
+                )
             out_dir = job["out_dir"]
             os.makedirs(out_dir, exist_ok=True)
-            is_image = params["media_type"] == "image"
-            final_path = wgp.get_available_filename(out_dir, os.path.basename(source),
+            final_path = wgp.get_available_filename(out_dir, source_name,
                 "_media_flow", force_extension=".png" if is_image else ".mp4")
             def abort():
                 return bool(abort_state.get("abort")) or is_cancel_requested(job)
@@ -26571,7 +27637,7 @@ def _run_media_flow(job_id):
             if abort():
                 return False
             filename = os.path.basename(final_path)
-            _write_tool_sidecar(out_dir, filename, source_name=os.path.basename(source),
+            _write_tool_sidecar(out_dir, filename, source_name=source_name,
                 tool="media_flow", params={**params, "model_type": "post_processing"},
                 elapsed=time.time() - started, job_id=job_id,
                 media_type="image" if is_image else "video")
@@ -26584,6 +27650,7 @@ def _run_media_flow(job_id):
             return False
         finally:
             unregister_abort_state(job_id, _active_gen_states, abort_state)
+            _cleanup_editor_operation_tool_source(editor_source_stage)
             if job.get("status") != "completed" and final_path:
                 for path in (final_path, os.path.splitext(final_path)[0] + ".meta.json"):
                     if os.path.isfile(path):
@@ -26597,9 +27664,12 @@ def _run_media_flow(job_id):
 
 def _enqueue_media_flow(body):
     from services.media_processing import validate_methods
+    correlation = _pop_editor_submission(body, expected_tool="upscale")
     files = body.get("files")
     if not isinstance(files, list) or not 1 <= len(files) <= 256:
         raise HTTPException(400, "Choose between 1 and 256 media files")
+    if correlation and correlation.get("editor_operation_id") and len(files) != 1:
+        raise HTTPException(400, "An Editor operation can own only one media-flow job.")
     workspace = body.get("workspace") or _get_active_workspace()
     spatial = str(body.get("spatial_upsampling") or "")
     temporal = str(body.get("temporal_upsampling") or "")
@@ -26625,9 +27695,11 @@ def _enqueue_media_flow(body):
     ids = []
     for index, (path, is_image) in enumerate(resolved_files):
         job_id = uuid.uuid4().hex[:8]
-        _jobs[job_id] = {
+        job = {
             "id": job_id, "status": "queued", "progress": 0, "step": 0, "total_steps": 0,
             "phase": "", "message": f"Media Flow {index + 1}/{len(resolved_files)}: {os.path.basename(path)}",
+            "client_submission_id": (correlation or {}).get("client_submission_id"),
+            "editor_operation_id": (correlation or {}).get("editor_operation_id"),
             "created_at": time.time(), "params": {
                 "media_path": path, "media_type": "image" if is_image else "video",
                 "spatial_upsampling": spatial, "temporal_upsampling": temporal,
@@ -26635,6 +27707,9 @@ def _enqueue_media_flow(body):
             "output_files": [], "error": None, "workspace": workspace,
             "out_dir": _workspace_dir(workspace),
         }
+        if correlation and index == 0:
+            _bind_editor_operation_job(correlation, job_id, "upscale")
+        _jobs[job_id] = job
         ids.append(job_id)
     # All inputs are validated before any job starts. Each job acquires the
     # same generation slot used by Studio, Director and the other media tools.
@@ -26714,10 +27789,14 @@ async def tools_upscale(request: Request):
     `video_path` remains accepted for older Maestro clients.
     """
     body = await request.json()
+    existing_editor_job = _existing_editor_operation_job(body, expected_tool="upscale")
+    if existing_editor_job:
+        return {"job_id": existing_editor_job["id"], "status": existing_editor_job["status"]}
     if str(body.get("method", "")).startswith("dlss5*") or body.get("temporal_upsampling"):
         return _enqueue_media_flow({**body,
             "files": [body.get("media_path") or body.get("video_path")],
             "spatial_upsampling": body.get("method") or ""})
+    correlation = _pop_editor_submission(body, expected_tool="upscale")
     media_path = body.get("media_path") or body.get("video_path")
     if not media_path:
         raise HTTPException(status_code=400, detail="media_path is required")
@@ -26728,9 +27807,11 @@ async def tools_upscale(request: Request):
     media_type = "image" if body.get("media_type") == "image" else "video"
 
     job_id = uuid.uuid4().hex[:8]
-    _jobs[job_id] = {
+    job = {
         "id": job_id, "status": "queued", "progress": 0, "step": 0, "total_steps": 0,
         "phase": "", "message": "Queued (upscale)", "created_at": time.time(),
+        "client_submission_id": (correlation or {}).get("client_submission_id"),
+        "editor_operation_id": (correlation or {}).get("editor_operation_id"),
         "params": {
             "media_path": resolved,
             "video_path": resolved if media_type == "video" else None,
@@ -26741,6 +27822,8 @@ async def tools_upscale(request: Request):
         "output_files": [], "error": None,
         "workspace": workspace, "out_dir": _workspace_dir(workspace),
     }
+    _bind_editor_operation_job(correlation, job_id, "upscale")
+    _jobs[job_id] = job
     threading.Thread(target=_run_tool_upscale, args=(job_id,), daemon=False).start()
     return {"job_id": job_id, "status": "queued"}
 
@@ -26753,6 +27836,10 @@ async def tools_film_grain(request: Request):
             workspace?: str }
     """
     body = await request.json()
+    existing_editor_job = _existing_editor_operation_job(body, expected_tool="film_grain")
+    if existing_editor_job:
+        return {"job_id": existing_editor_job["id"], "status": existing_editor_job["status"]}
+    correlation = _pop_editor_submission(body, expected_tool="film_grain")
     video_path = body.get("video_path")
     if not video_path:
         raise HTTPException(status_code=400, detail="video_path is required")
@@ -26783,7 +27870,7 @@ async def tools_film_grain(request: Request):
         )
 
     job_id = uuid.uuid4().hex[:8]
-    _jobs[job_id] = {
+    job = {
         "id": job_id,
         "status": "queued",
         "progress": 0,
@@ -26792,6 +27879,8 @@ async def tools_film_grain(request: Request):
         "phase": "",
         "message": "Queued (film grain)",
         "created_at": time.time(),
+        "client_submission_id": (correlation or {}).get("client_submission_id"),
+        "editor_operation_id": (correlation or {}).get("editor_operation_id"),
         "params": {
             "video_path": resolved,
             "intensity": intensity,
@@ -26802,6 +27891,8 @@ async def tools_film_grain(request: Request):
         "workspace": workspace,
         "out_dir": _workspace_dir(workspace),
     }
+    _bind_editor_operation_job(correlation, job_id, "film_grain")
+    _jobs[job_id] = job
     threading.Thread(
         target=_run_tool_film_grain,
         args=(job_id,),
@@ -26819,6 +27910,10 @@ async def tools_revoice(request: Request):
             workspace?: str }
     """
     body = await request.json()
+    existing_editor_job = _existing_editor_operation_job(body, expected_tool="revoice")
+    if existing_editor_job:
+        return {"job_id": existing_editor_job["id"], "status": existing_editor_job["status"]}
+    correlation = _pop_editor_submission(body, expected_tool="revoice")
     video_path = body.get("video_path")
     if not video_path:
         raise HTTPException(status_code=400, detail="video_path is required")
@@ -26838,9 +27933,11 @@ async def tools_revoice(request: Request):
         mode = "single"
 
     job_id = uuid.uuid4().hex[:8]
-    _jobs[job_id] = {
+    job = {
         "id": job_id, "status": "queued", "progress": 0, "step": 0, "total_steps": 0,
         "phase": "", "message": "Queued (revoice)", "created_at": time.time(),
+        "client_submission_id": (correlation or {}).get("client_submission_id"),
+        "editor_operation_id": (correlation or {}).get("editor_operation_id"),
         "params": {
             "video_path": resolved,
             "voice_ref_paths": voice_refs,
@@ -26851,6 +27948,8 @@ async def tools_revoice(request: Request):
         "output_files": [], "error": None,
         "workspace": workspace, "out_dir": _workspace_dir(workspace),
     }
+    _bind_editor_operation_job(correlation, job_id, "revoice")
+    _jobs[job_id] = job
     threading.Thread(target=_run_tool_revoice, args=(job_id,), daemon=False).start()
     return {"job_id": job_id, "status": "queued"}
 
@@ -27178,10 +28277,15 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
             elif not try_start(job, message="Preparing..."):
                 return False
 
+            if job["params"].get("model_type") == "comfyui_workflow":
+                return _comfy_adapter.execute(job, finalize=finalize)
+            _comfy_adapter.service.assert_native_idle()
+
             # Automatic H3/LTX window planners are intentionally part of the
             # queued job. They must never load before this worker owns the
             # generation lock, otherwise a second submission can place the
             # prompt LLM beside an active diffusion model and freeze the host.
+            comfy_submission_before_planning = job["params"].get("_comfyui_submission")
             try:
                 _prepare_job_enhancement(job)
                 if is_cancel_requested(job):
@@ -27195,6 +28299,19 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 detail = getattr(error, "detail", None) or str(error)
                 finish_job(job, "failed", error=str(detail), message=str(detail))
                 return False
+
+            if comfy_submission_before_planning:
+                job["params"]["_comfyui_submission"] = comfy_submission_before_planning
+            elif (job.get("generation_engine_snapshot") or {}).get("engine") == "comfyui":
+                existing_comfy = _comfy_adapter.attach_native(
+                    job["params"], job.get("workspace") or "default", job_id,
+                    job.get("client_submission_id"),
+                    engine_snapshot=job["generation_engine_snapshot"],
+                )
+                if existing_comfy is not None and existing_comfy["job_id"] != job_id:
+                    raise _ComfyServiceError(409, "This workflow already has an owned submission receipt: " + existing_comfy["job_id"])
+            if job["params"].get("_comfyui_submission"):
+                return _comfy_adapter.execute(job, finalize=finalize)
 
             if (not _slot_owned and job["params"].get("viggle_character")
                     and (wgp.get_model_def(job["params"].get("model_type")) or {}).get("minimax_h3_viggle")):
@@ -27570,6 +28687,15 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
 
             # Multi-clip mode: split single request into per-clip tasks
             elif raw_params.get("multi_prompts_gen_type") == 3:
+                from services.director_video_strategy import (
+                    apply_h3_clip_drive_audio,
+                    advance_director_multiclip_audio_offset,
+                    should_continue_multi_clip_task,
+                )
+                from services.director_music_timing import (
+                    music_output_frame_total,
+                )
+
                 prompt_text = raw_params.get("prompt", "")
                 # One prompt per clip. Upstream's splitter settles it from the frame metadata;
                 # h3_clip_prompt_lines settles the resume a newline split refused, when the
@@ -27596,6 +28722,11 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     not isinstance(per_clip_output_frames, list) or len(per_clip_output_frames) != len(prompt_lines)
                 ):
                     raise ValueError("Music output durations must match the clip count.")
+                music_output_total_frames = (
+                    music_output_frame_total(per_clip_output_frames)
+                    if per_clip_output_frames is not None
+                    else 0
+                )
                 per_clip_prompt_modes = raw_params.pop(
                     "per_clip_prompt_modes", None,
                 )
@@ -27621,6 +28752,11 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     )
                 except (TypeError, ValueError):
                     omni_sequence_target_frames = 0
+                multi_clip_target_frames = (
+                    music_output_total_frames
+                    if music_output_total_frames > 0
+                    else omni_sequence_target_frames
+                )
                 group_id = f"mc_{int(time.time())}_{raw_params.get('seed', 0)}"
                 clip_count = max(
                     len(prompt_lines),
@@ -27731,10 +28867,11 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                             per_clip_h3_references[i]
                         )
                         clip_params["minimax_h3_runtime_references"] = clip_runtime_refs
-                        if clip_drive_audio:
-                            clip_params["audio_prompt_type"] = "AD"
-                            clip_params["audio_guide"] = clip_drive_audio
-                            clip_params["minimax_h3_exact_drive_audio_ordinal"] = clip_drive_ordinal
+                        apply_h3_clip_drive_audio(
+                            clip_params,
+                            clip_drive_audio,
+                            clip_drive_ordinal,
+                        )
                     # Set per-clip image_prompt_type based on which images are present
                     has_start = bool(clip_params.get("image_start"))
                     has_end = bool(clip_end)
@@ -27749,16 +28886,20 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                     # uses this for duration-split FL2VA segments or an
                     # explicitly planned literal continuation, never across
                     # an ordinary editorial cut.
-                    if not has_start and i > 0:
-                        bounded_continuation = bool(
-                            per_clip_continuations
-                            and i < len(per_clip_continuations)
-                            and per_clip_continuations[i]
-                        )
-                        if not _mc_bounded_director or bounded_continuation:
-                            clip_params["_continuation"] = True
-                            if bounded_continuation:
-                                clip_params["_continuation_tail_skip"] = 0
+                    bounded_continuation = bool(
+                        per_clip_continuations
+                        and i < len(per_clip_continuations)
+                        and per_clip_continuations[i]
+                    )
+                    if should_continue_multi_clip_task(
+                        clip_index=i,
+                        has_start=has_start,
+                        bounded_director=_mc_bounded_director,
+                        per_clip_continuations=per_clip_continuations,
+                    ):
+                        clip_params["_continuation"] = True
+                        if bounded_continuation:
+                            clip_params["_continuation_tail_skip"] = 0
                     clip_frames = per_clip_frames[i] if per_clip_frames and i < len(per_clip_frames) else sw_size
                     if _mc_bounded_director:
                         clip_frames = int(clip_frames)
@@ -27789,13 +28930,18 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                         trim_tail = music_output_trim(clip_frames, per_clip_output_frames[i])
                     clip_params["video_length"] = clip_frames
                     clip_params["trim_tail_frames"] = trim_tail
-                    clip_params["audio_frame_offset"] = cumulative_offset
+                    clip_audio_frame_offset = cumulative_offset
+                    clip_params["audio_frame_offset"] = clip_audio_frame_offset
                     if clip_params.get("video_guide"):
                         clip_params["video_frame_offset"] = (
                             multi_clip_video_origin_frame
                             + cumulative_offset - multi_clip_audio_origin_frame
                         )
-                    cumulative_offset += clip_frames - trim_tail  # advance by post-trim frames for audio sync
+                    cumulative_offset = advance_director_multiclip_audio_offset(
+                        clip_audio_frame_offset,
+                        clip_frames,
+                        trim_tail,
+                    )  # advance by post-trim frames for source-audio sync
                     total_trimmed_frames += trim_tail
                     clip_params["multi_clip_info"] = {
                         "group_id": group_id,
@@ -27810,7 +28956,7 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                         "carry_from": omni_sequence_carry_from[i]
                         if isinstance(omni_sequence_carry_from, (list, tuple))
                         and i < len(omni_sequence_carry_from) else None,
-                        "target_total_frames": omni_sequence_target_frames,
+                        "target_total_frames": multi_clip_target_frames,
                         "defer_concat": multi_clip_defer_concat,
                     }
                     # Director supplies the prompt mode explicitly so normal
@@ -29903,6 +31049,9 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 "error": str(e),
                 "message": f"Error: {e}",
             }
+            comfy_submission = (job.get("params") or {}).get("_comfyui_submission")
+            if comfy_submission:
+                _comfy_adapter.service.fail_prepared(comfy_submission, str(e))
             # Tag with OOM info — see _run_sfx_generation for rationale.
             try:
                 from services.oom_detect import detect_oom
@@ -30072,7 +31221,10 @@ def _run_recast_shot_generation(job_id):
         os.makedirs(final_out_dir, exist_ok=True)
         seed = int(shot_bundle["resolved_seed"])
         timestamp = time.strftime("%Y-%m-%d-%Hh%Mm%Ss")
-        extension = os.path.splitext(ordered_paths[0])[1] or ".mp4"
+        codec_type = wgp.server_config.get("video_output_codec", "libx264_8")
+        container = wgp.server_config.get("video_container", "mp4")
+        video_encoding = wgp.get_video_encoding(codec_type, container)
+        extension = video_encoding["extension"]
         final_path = wgp.get_available_filename(
             final_out_dir,
             f"{timestamp}_seed{seed}_recast_shot_aware{extension}",
@@ -30100,6 +31252,8 @@ def _run_recast_shot_generation(job_id):
                 float(shot_bundle["frame_count"])
                 / float(shot_bundle["fps"])
             ),
+            codec_type=video_encoding["codec_type"],
+            container=video_encoding["container"],
         )
         if is_cancel_requested(job):
             if final_path and os.path.isfile(final_path):
@@ -30323,7 +31477,10 @@ def _run_repaint_shot_generation(job_id):
         os.makedirs(final_out_dir, exist_ok=True)
         seed = int(shot_bundle["resolved_seed"])
         timestamp = time.strftime("%Y-%m-%d-%Hh%Mm%Ss")
-        extension = os.path.splitext(ordered_paths[0])[1] or ".mp4"
+        codec_type = wgp.server_config.get("video_output_codec", "libx264_8")
+        container = wgp.server_config.get("video_container", "mp4")
+        video_encoding = wgp.get_video_encoding(codec_type, container)
+        extension = video_encoding["extension"]
         final_path = wgp.get_available_filename(
             final_out_dir,
             f"{timestamp}_seed{seed}_repaint_shot_aware{extension}",
@@ -30351,6 +31508,8 @@ def _run_repaint_shot_generation(job_id):
                 float(shot_bundle["frame_count"])
                 / float(shot_bundle["fps"])
             ),
+            codec_type=video_encoding["codec_type"],
+            container=video_encoding["container"],
         )
         if is_cancel_requested(job):
             if final_path and os.path.isfile(final_path):
@@ -30602,7 +31761,10 @@ def _run_outpaint_shot_generation(job_id):
         os.makedirs(final_out_dir, exist_ok=True)
         seed = int(shot_bundle["resolved_seed"])
         timestamp = time.strftime("%Y-%m-%d-%Hh%Mm%Ss")
-        extension = os.path.splitext(ordered_paths[0])[1] or ".mp4"
+        codec_type = wgp.server_config.get("video_output_codec", "libx264_8")
+        container = wgp.server_config.get("video_container", "mp4")
+        video_encoding = wgp.get_video_encoding(codec_type, container)
+        extension = video_encoding["extension"]
         final_path = wgp.get_available_filename(
             final_out_dir,
             f"{timestamp}_seed{seed}_outpaint_shot_aware{extension}",
@@ -30633,6 +31795,8 @@ def _run_outpaint_shot_generation(job_id):
             abort_callback=lambda: is_cancel_requested(job),
             pad_audio=bool(source_audio),
             audio_duration_sec=float(expected_frames) / fps,
+            codec_type=video_encoding["codec_type"],
+            container=video_encoding["container"],
         )
         if is_cancel_requested(job):
             if final_path and os.path.isfile(final_path):
@@ -30801,6 +31965,7 @@ def _director_job_response_fields(job_snapshot: dict) -> dict:
 @api.get("/api/v1/status/{job_id}")
 def get_status(job_id: str):
     """Get generation job status."""
+    _agent_require_job_access(job_id)
     if job_id not in _jobs:
         raise HTTPException(status_code=404, detail="Job not found")
     j = snapshot_job(_jobs[job_id])
@@ -30808,6 +31973,7 @@ def get_status(job_id: str):
     return {
         "job_id": j["id"],
         "client_submission_id": j.get("client_submission_id"),
+        "editor_operation_id": j.get("editor_operation_id"),
         "show_in_gallery": bool(j.get("show_in_gallery", False)),
         "kind": j.get("kind", "generation"),
         "status": j["status"],
@@ -30820,6 +31986,7 @@ def get_status(job_id: str):
         "finishing_warnings": j.get("finishing_warnings", []),
         "reconstruction_report": j.get("reconstruction_report"),
         "error": j["error"],
+        "generation_details": public_generation_details(j),
         "viggle_preparation": j.get("viggle_preparation"),
         "enhancement": public_enhancement(j.get("enhancement"), summary=True),
         # Present only on failed jobs that look like CUDA OOMs. UI
@@ -30840,6 +32007,7 @@ def get_status(job_id: str):
 
 @api.get("/api/v1/jobs/{job_id}/preview/{revision}")
 def get_generation_preview(job_id: str, revision: int, request: Request):
+    _agent_require_job_access(job_id)
     job = _jobs.get(job_id)
     if not job or job.get("status") != "running" or is_cancel_requested(job):
         raise HTTPException(status_code=404, detail="Preview is no longer available")
@@ -30851,6 +32019,7 @@ def get_generation_preview(job_id: str, revision: int, request: Request):
 
 @api.get("/api/v1/jobs/{job_id}/enhancement")
 def get_job_enhancement(job_id: str):
+    _agent_require_job_access(job_id)
     job = _jobs.get(job_id)
     if not job or not job.get("enhancement"):
         raise HTTPException(404, "Enhanced job not found")
@@ -30862,6 +32031,7 @@ def get_job_enhancement(job_id: str):
 
 @api.post("/api/v1/jobs/{job_id}/retry")
 async def retry_enhanced_job(job_id: str, request: Request):
+    _agent_require_job_access(job_id)
     body = await request.json()
     action = body.get("action", "retry")
     if action not in {"retry", "refresh", "as_written", "accept_draft"}:
@@ -30925,10 +32095,14 @@ async def retry_enhanced_job(job_id: str, request: Request):
 @api.post("/api/v1/cancel/{job_id}")
 def cancel_job(job_id: str):
     """Cancel a held, queued, or running generation job."""
+    _agent_require_job_access(job_id)
     if job_id not in _jobs:
         raise HTTPException(status_code=404, detail="Job not found")
 
     job = _jobs[job_id]
+    comfy_submission = (job.get("params") or {}).get("_comfyui_submission")
+    if comfy_submission:
+        _comfy_adapter.service.cancel_prepared(comfy_submission)
     result = request_cancel(
         job,
         job_id=job_id,
@@ -30940,8 +32114,83 @@ def cancel_job(job_id: str):
     return {"status": job["status"], "was_running": result.was_running}
 
 
+def _worlds_storage():
+    """Create the small Worlds library lazily, away from UI startup scans."""
+    from services.worlds_storage import WorldsStorage
+    with _worlds_storage_lock:
+        global _worlds_storage_instance
+        if _worlds_storage_instance is None:
+            _worlds_storage_instance = WorldsStorage(_worlds_output_root)
+        return _worlds_storage_instance
+
+
+async def _worlds_submit_generation(body):
+    request = dict(body)
+    request.update(
+        workspace="Worlds",
+        generation_mode="video",
+        image_mode=0,
+        multi_prompts_gen_type=2,
+        _enhance_on_generation=False,
+        spatial_upsampling="",
+        temporal_upsampling="",
+        activated_loras=[],
+        loras_multipliers="",
+    )
+    try:
+        return await _prepare_generation_submission(request)
+    except HTTPException as error:
+        if not 400 <= error.status_code < 500:
+            raise
+        # A known preflight rejection cannot become an endlessly pending
+        # receipt. Reconcile any job already carrying this UUID first.
+        client_id = request.get("_client_submission_id")
+        matches = [snapshot_job(job) for job in _jobs.values()
+                   if job.get("client_submission_id") == client_id]
+        if len(matches) == 1:
+            return {"job_id": matches[0]["id"], "status": matches[0]["status"], "client_submission_id": client_id}
+        if matches:
+            raise
+        return {"rejected": True, "client_submission_id": client_id, "detail": str(error.detail)[:1000]}
+
+
+def _worlds_job_status(job_id):
+    status = get_status(job_id)
+    # These fields remain server-owned; no path is accepted from the Worlds
+    # client. Publication verifies outputs against this captured directory.
+    captured = snapshot_job(_jobs[job_id])
+    return {**status, "out_dir": captured.get("out_dir"), "params": captured.get("params")}
+
+
+async def _worlds_storage_call(method, *args):
+    return await asyncio.to_thread(lambda: getattr(_worlds_storage(), method)(*args))
+
+
+_worlds_storage_instance = None
+_worlds_storage_lock = threading.Lock()
+_worlds_output_root = Path(wgp.server_config.get("save_path", "outputs")).resolve()
+from services.worlds_workflow import create_worlds_router
+api.include_router(create_worlds_router(
+    workspace_root=_worlds_output_root / "Worlds",
+    submit_generation=_worlds_submit_generation,
+    lookup_jobs=lambda: {"jobs": [snapshot_job(job) for job in _jobs.values()]},
+    get_job_status=_worlds_job_status,
+    cancel_generation=cancel_job,
+    list_worlds=lambda: _worlds_storage_call("list_worlds"),
+    get_world=lambda world_id: _worlds_storage_call("get_world", world_id),
+    resolve_world_file=lambda world_id: _worlds_storage_call("resolve_world_file", world_id),
+    publish_completed_generation=lambda job, receipt: _worlds_storage_call("publish_completed_generation", job, receipt),
+    save_world=lambda world_id: _worlds_storage_call("save_world", world_id),
+    record_world=lambda world_id: _worlds_storage().record_world(world_id),
+    capture_world=lambda world_id: _worlds_storage_call("capture_world", world_id),
+    read_receipt=lambda request_id: _worlds_storage_call("read_receipt", request_id),
+    write_receipt=lambda request_id, receipt: _worlds_storage_call("write_receipt", request_id, receipt),
+))
+
+
 @api.delete("/api/v1/jobs/{job_id}")
 def dismiss_studio_job(job_id: str):
+    _agent_require_job_access(job_id)
     job = _jobs.get(job_id)
     if not job:
         return {"dismissed": True}
@@ -31012,6 +32261,16 @@ def _start_held_studio_queue() -> list[str]:
 @api.post("/api/v1/jobs/queue/start")
 def start_studio_queue():
     """Release held Studio jobs without disturbing an active generation."""
+    principal = principal_context.get()
+    if _is_restricted_agent(principal):
+        foreign_held = [
+            job_id for job_id, job in list(_jobs.items())
+            if isinstance(job, dict)
+            and str(job.get("status") or "").casefold() == "held"
+            and not _agent_access_backend.can_access_job(job_id, principal)
+        ]
+        if foreign_held:
+            raise HTTPException(403, "The Studio queue also contains work owned by another client")
     released = _start_held_studio_queue()
     return {
         "status": "started" if released else "idle",
@@ -31020,18 +32279,41 @@ def start_studio_queue():
     }
 
 
+@api.get("/api/v1/jobs/by-submission/{client_submission_id}")
+def job_by_submission(client_submission_id: str):
+    """Recover an exact receipt even after a job left the active queue."""
+    if not client_submission_id or len(client_submission_id) > 160:
+        raise HTTPException(400, "Invalid client submission identity")
+    principal = principal_context.get()
+    matches = [
+        job for job_id, job in list(_jobs.items())
+        if job.get("client_submission_id") == client_submission_id
+        and _agent_access_backend.can_access_job(job_id, principal)
+    ]
+    if not matches:
+        raise HTTPException(404, "Submission receipt not found")
+    if len(matches) != 1:
+        raise HTTPException(409, "Multiple jobs share this submission identity; review the queue")
+    return get_status(matches[0]["id"])
+
+
 @api.get("/api/v1/jobs")
 def list_jobs():
     """List all active/recent jobs for reconnection after browser refresh."""
+    principal = principal_context.get()
+    restricted = _is_restricted_agent(principal)
     active = []
-    for job in list(_jobs.values()):
+    for job_id, job in list(_jobs.items()):
+        if restricted and not _agent_access_backend.can_access_job(job_id, principal):
+            continue
         j = snapshot_job(job)
         if j.get("dismissed"):
             continue
-        if j["status"] in ("held", "queued", "running") or j.get("enhancement") or j.get("finishing_warnings"):
+        if j["status"] in ("held", "queued", "running") or is_terminal_studio_failure(j) or j.get("enhancement") or j.get("finishing_warnings"):
             active.append({
                 "job_id": j["id"],
                 "client_submission_id": j.get("client_submission_id"),
+                "editor_operation_id": j.get("editor_operation_id"),
                 "show_in_gallery": j["status"] != "completed" and bool(j.get("show_in_gallery", False)),
                 "kind": j.get("kind", "generation"),
                 "status": j["status"],
@@ -31043,6 +32325,7 @@ def list_jobs():
                 "output_files": j["output_files"],
                 "finishing_warnings": j.get("finishing_warnings", []),
                 "error": j["error"],
+                "generation_details": public_generation_details(j),
                 "enhancement": public_enhancement(j.get("enhancement"), summary=True),
                 "oom_info": j.get("oom_info"),
                 "performance_plan": j.get("performance_plan"),
@@ -31064,7 +32347,12 @@ def list_jobs():
                 "ltx_window_plan": j.get("ltx_window_plan"),
             })
     active.sort(key=lambda x: x["created_at"])
-    return {"jobs": active}
+    global_busy = bool(
+        _gen_lock.locked()
+        or _active_gen_states
+        or any(str(job.get("status", "")).casefold() in {"held", "queued", "running"} for job in _jobs.values())
+    )
+    return {"jobs": active, "busy": global_busy}
 
 
 # ============================================================================
@@ -31378,10 +32666,11 @@ def get_output_metadata(name: str, workspace: str = ""):
 def rejoin_clips(body: dict):
     """Re-concatenate clips from a multi-clip group.
 
-    Body: { group_id: str, audio_file?: str }
+    Body: { group_id: str, audio_file?: str, video_output_codec?: str,
+            video_container?: str }
     Finds all clip files matching the group_id and re-concatenates them.
     """
-    from wgp import concatenate_multi_clip_videos
+    from wgp import concatenate_multi_clip_videos, get_video_encoding
     group_id = body.get("group_id")
     if not group_id:
         raise HTTPException(status_code=400, detail="group_id is required")
@@ -31453,7 +32742,19 @@ def rejoin_clips(body: dict):
     # Generate output path
     import time
     timestamp = time.strftime("%Y-%m-%d_%H%M%S")
-    concat_name = f"{timestamp}_rejoin_multiclip.mp4"
+    codec_type = body.get(
+        "video_output_codec",
+        wgp.server_config.get("video_output_codec", "libx264_8"),
+    )
+    container = body.get(
+        "video_container",
+        wgp.server_config.get("video_container", "mp4"),
+    )
+    try:
+        video_encoding = get_video_encoding(codec_type, container)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    concat_name = f"{timestamp}_rejoin_multiclip{video_encoding['extension']}"
     concat_path = os.path.join(out_dir, concat_name)
 
     success = concatenate_multi_clip_videos(
@@ -31461,6 +32762,8 @@ def rejoin_clips(body: dict):
         concat_path,
         audio_path,
         audio_start_sec=audio_start_sec,
+        codec_type=video_encoding["codec_type"],
+        container=video_encoding["container"],
     )
     if not success or not os.path.isfile(concat_path):
         raise HTTPException(status_code=500, detail="Concatenation failed")
@@ -31827,12 +33130,304 @@ def serve_upload(filename: str):
 # Maestro Editor — non-destructive project persistence and queued export
 # ============================================================================
 
+@api.post("/api/v1/editor/operations")
+async def editor_operation_create(request: Request):
+    try:
+        body = await request.json()
+        return create_editor_operation_record(_editor_operations_root(), body)
+    except EditorOperationError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@api.get("/api/v1/editor/operations/{operation_id}")
+def editor_operation_get(operation_id: str):
+    try:
+        return reconcile_editor_operation_record(
+            _editor_operations_root(),
+            operation_id,
+            _jobs,
+        )
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Editor AI operation not found.") from error
+    except EditorOperationError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@api.patch("/api/v1/editor/operations/{operation_id}")
+async def editor_operation_transition(operation_id: str, request: Request):
+    body = await request.json()
+    try:
+        return transition_editor_operation_record(
+            _editor_operations_root(),
+            operation_id,
+            body.get("client_submission_id"),
+            body.get("status"),
+            job_id=body.get("job_id"),
+            output_file=body.get("output_file"),
+            error=body.get("error"),
+            review_reason=body.get("review_reason"),
+        )
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Editor AI operation not found.") from error
+    except EditorOperationError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@api.get("/api/v1/editor/audio/capabilities")
+def editor_audio_capabilities_route():
+    return editor_audio_capabilities(_app_dir)
+
+
+def _load_editor_audio_request(body: dict):
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Audio analysis request must be an object.")
+    workspace = body.get("workspace") or _get_active_workspace()
+    project_id = str(body.get("project_id") or "").strip()
+    item_id = str(body.get("item_id") or "").strip()
+    if not project_id or not item_id:
+        raise HTTPException(400, "project_id and item_id are required.")
+    try:
+        project = load_editor_project(_editor_save_root(), workspace, project_id)
+    except FileNotFoundError as error:
+        raise HTTPException(404, detail="Editor project not found.") from error
+    except EditorProjectError as error:
+        raise HTTPException(400, detail=str(error)) from error
+    if body.get("revision") is not None:
+        try:
+            requested_revision = int(body.get("revision"))
+        except (TypeError, ValueError) as error:
+            raise HTTPException(400, "revision must be an integer.") from error
+        current_revision = int(project.get("revision") or 0)
+        if requested_revision != current_revision:
+            raise HTTPException(
+                409,
+                detail="The Editor project changed before audio analysis started. Reopen the project and try again.",
+            )
+    return project, item_id
+
+
+@api.post("/api/v1/editor/audio/transcribe")
+async def editor_audio_transcribe_route(request: Request):
+    try:
+        body = await request.json()
+        project, item_id = _load_editor_audio_request(body)
+        return await asyncio.to_thread(
+            transcribe_editor_audio,
+            project,
+            item_id,
+            save_root=_editor_save_root(),
+            uploads_root=_editor_uploads_root(),
+            app_root=_app_dir,
+        )
+    except EditorProjectError as error:
+        raise HTTPException(400, detail=str(error)) from error
+
+
+@api.post("/api/v1/editor/audio/analyze")
+async def editor_audio_analyze_route(request: Request):
+    try:
+        body = await request.json()
+        project, item_id = _load_editor_audio_request(body)
+        return await asyncio.to_thread(
+            analyze_editor_audio,
+            project,
+            item_id,
+            save_root=_editor_save_root(),
+            uploads_root=_editor_uploads_root(),
+        )
+    except EditorProjectError as error:
+        raise HTTPException(400, detail=str(error)) from error
+
+
 def _editor_save_root() -> str:
     return wgp.server_config.get("save_path", "outputs")
 
 
+def _editor_workspace_package_root(workspace: str) -> str:
+    """Resolve a workspace below the configured output root for package files."""
+    save_root = os.path.realpath(os.path.abspath(_editor_save_root()))
+    workspace_path = os.path.abspath(workspace_directory(save_root, workspace))
+    os.makedirs(workspace_path, exist_ok=True)
+    resolved = os.path.realpath(workspace_path)
+    try:
+        common = os.path.commonpath((resolved, save_root))
+    except (OSError, ValueError) as error:
+        raise EditorProjectError("Editor package workspace is outside the output root") from error
+    if os.path.normcase(common) != os.path.normcase(save_root):
+        raise EditorProjectError("Editor package workspace is outside the output root")
+    return resolved
+
+
+def _editor_operations_root() -> Path:
+    return Path(_app_dir) / "settings" / "editor_operations"
+
+
+def _existing_editor_operation_job(body: dict, *, expected_tool: str | None = None):
+    """Resolve retries only through this route's exact Editor action and job."""
+    operation_id = str(body.get("_editor_operation_id") or "").strip()
+    client_submission_id = str(body.get("_client_submission_id") or "").strip()
+    if not operation_id:
+        return None
+    if not client_submission_id:
+        raise HTTPException(400, "Editor operation and client submission ids must be provided together.")
+    if not expected_tool:
+        raise HTTPException(409, "Editor operations cannot be submitted through this generic action route.")
+    try:
+        operation = validate_editor_operation_submission(
+            _editor_operations_root(),
+            operation_id,
+            client_submission_id,
+            allow_linked=True,
+            expected_tool=expected_tool,
+        )
+    except FileNotFoundError as error:
+        raise HTTPException(404, "Editor AI operation not found.") from error
+    except EditorOperationError as error:
+        raise HTTPException(409, str(error)) from error
+    job_id = operation.get("job_id")
+    if not job_id:
+        return None
+    job = _jobs.get(str(job_id))
+    if not job:
+        raise HTTPException(409, "This Editor operation already owns a job that is not available in the queue.")
+    if operation.get("job_kind") != expected_tool:
+        raise HTTPException(409, "The linked job kind does not match this Editor operation's requested tool.")
+    if (
+        str(job.get("id") or "") != str(job_id)
+        or job.get("editor_operation_id") != operation_id
+        or job.get("client_submission_id") != client_submission_id
+    ):
+        raise HTTPException(409, "The linked job does not match this Editor operation.")
+    return job
+
+
+def _pop_editor_submission(body: dict, *, expected_tool: str | None = None):
+    """Strip private tokens and bind only a matching final Editor action."""
+    operation_id = str(body.pop("_editor_operation_id", "") or "").strip()
+    client_submission_id = str(body.pop("_client_submission_id", "") or "").strip()
+    if not operation_id:
+        return ({"client_submission_id": client_submission_id} if client_submission_id else None)
+    if not client_submission_id:
+        raise HTTPException(400, "Editor operation and client submission ids must be provided together.")
+    if not expected_tool:
+        raise HTTPException(409, "Editor operations cannot be submitted through this generic action route.")
+    try:
+        operation = validate_editor_operation_submission(
+            _editor_operations_root(),
+            operation_id,
+            client_submission_id,
+            expected_tool=expected_tool,
+        )
+    except FileNotFoundError as error:
+        raise HTTPException(404, "Editor AI operation not found.") from error
+    except EditorOperationError as error:
+        raise HTTPException(409, str(error)) from error
+    return {
+        "editor_operation_id": operation_id,
+        "client_submission_id": client_submission_id,
+        "tool": operation["tool"],
+    }
+
+
+def _bind_editor_operation_job(correlation: dict | None, job_id: str, job_kind: str) -> None:
+    if not correlation or not correlation.get("editor_operation_id"):
+        return
+    try:
+        attach_editor_operation_job(
+            _editor_operations_root(),
+            correlation["editor_operation_id"],
+            correlation["client_submission_id"],
+            job_id,
+            job_kind,
+        )
+    except FileNotFoundError as error:
+        raise HTTPException(404, "Editor AI operation not found.") from error
+    except EditorOperationError as error:
+        raise HTTPException(409, str(error)) from error
+
+
 def _editor_uploads_root() -> str:
     return os.path.join(os.getcwd(), "uploads")
+
+
+def _run_editor_package(job_id: str) -> bool:
+    """Build a portable Editor ZIP as a cancellable, CPU-only job."""
+    job = _jobs.get(job_id)
+    if job is None:
+        return False
+    abort_state = {"abort": False}
+    try:
+        if not try_start(
+            job,
+            message="Preparing Editor project package...",
+            phase="Preparing",
+        ):
+            return False
+        if not register_abort_state(job, job_id, _active_gen_states, abort_state):
+            return False
+
+        project = job["params"].get("project")
+        workspace = job.get("workspace") or _get_active_workspace()
+        package_root = _editor_workspace_package_root(workspace)
+        requested_root = os.path.realpath(os.path.abspath(job.get("package_root") or ""))
+        if os.path.normcase(package_root) != os.path.normcase(requested_root):
+            raise EditorProjectError("Editor package destination changed after submission")
+        filename = str(job.get("package_filename") or "")
+        if not filename or os.path.basename(filename.replace("\\", "/")) != filename or filename in {".", ".."}:
+            raise EditorProjectError("Editor package filename is invalid")
+        output_path = os.path.join(package_root, filename)
+        if os.path.normcase(os.path.realpath(os.path.dirname(output_path))) != os.path.normcase(package_root):
+            raise EditorProjectError("Editor package destination escaped its workspace")
+
+        def _cancelled() -> bool:
+            return bool(abort_state.get("abort")) or is_cancel_requested(job)
+
+        def _progress(percent: int, phase: str) -> None:
+            update_job(
+                job,
+                progress=max(0, min(100, int(percent))),
+                phase=str(phase or "Preparing package"),
+                message=str(phase or "Preparing package"),
+            )
+
+        result_path = export_editor_project_archive(
+            project,
+            save_root=_editor_save_root(),
+            workspace=workspace,
+            uploads_root=_editor_uploads_root(),
+            output_path=output_path,
+            progress_callback=_progress,
+            cancel_check=_cancelled,
+        )
+        if _cancelled():
+            return False
+        resolved_output = os.path.realpath(os.path.abspath(result_path))
+        if (
+            os.path.normcase(os.path.dirname(resolved_output)) != os.path.normcase(package_root)
+            or os.path.basename(resolved_output) != filename
+        ):
+            raise EditorProjectError("Editor package output escaped its requested workspace")
+        record_job_outputs(job, [filename])
+        return finish_job(
+            job,
+            "completed",
+            progress=100,
+            phase="",
+            message="Editor project package ready",
+        )
+    except EditorProjectArchiveCancelled:
+        return False
+    except Exception as error:
+        traceback.print_exc()
+        finish_job(
+            job,
+            "failed",
+            error=str(error),
+            message=f"Editor project package failed: {error}",
+        )
+        return False
+    finally:
+        unregister_abort_state(job_id, _active_gen_states, abort_state)
 
 
 def _run_editor_export(job_id: str) -> bool:
@@ -31999,7 +33594,9 @@ def _run_editor_export(job_id: str) -> bool:
                 "width": int(round(export_width * upscale_factor)),
                 "height": int(round(export_height * upscale_factor)),
                 "fps": export_fps,
-                "codec": export_settings.get("codec") or "h264",
+                "codec": "prores4444" if export_settings.get("format") == "prores4444" else export_settings.get("codec") or "h264",
+                "format": export_settings.get("format") or "mp4",
+                **({"source_item_ids": job["params"]["source_item_ids"]} if job["params"].get("source_item_ids") else {}),
                 "quality": export_settings.get("quality") or "high",
                 "encoder": export_settings.get("encoder") or "auto",
                 "spatial_upsampling": spatial_upsampling,
@@ -32071,6 +33668,8 @@ async def editor_project_create(request: Request):
                 fps=float(canvas.get("fps") or 30),
             )
         return save_editor_project(_editor_save_root(), workspace, project)
+    except EditorProjectRevisionConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except (EditorProjectError, TypeError, ValueError) as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -32095,6 +33694,8 @@ async def editor_project_update(project_id: str, request: Request):
     project["id"] = project_id
     try:
         return save_editor_project(_editor_save_root(), workspace, project)
+    except EditorProjectRevisionConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except EditorProjectError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -32109,6 +33710,174 @@ def editor_project_delete(project_id: str, workspace: str = ""):
     if not deleted:
         raise HTTPException(status_code=404, detail="Editor project not found")
     return {"deleted": project_id}
+
+
+@api.get("/api/v1/editor/projects/{project_id}/revisions")
+def editor_project_revisions(project_id: str, workspace: str = ""):
+    workspace = workspace or _get_active_workspace()
+    try:
+        load_editor_project(_editor_save_root(), workspace, project_id)
+        return {
+            "revisions": list_editor_project_revisions(
+                _editor_save_root(), workspace, project_id
+            ),
+        }
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Editor project not found") from error
+    except EditorProjectError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@api.post("/api/v1/editor/projects/{project_id}/restore")
+async def editor_project_restore_revision(project_id: str, request: Request):
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeDecodeError) as error:
+        raise HTTPException(status_code=400, detail="Request body must be valid JSON") from error
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be an object")
+    workspace = body.get("workspace") or _get_active_workspace()
+    revision = body.get("revision")
+    expected_revision = body.get("expected_revision")
+    if (
+        isinstance(revision, bool) or not isinstance(revision, int)
+        or isinstance(expected_revision, bool) or not isinstance(expected_revision, int)
+    ):
+        raise HTTPException(status_code=400, detail="revision and expected_revision must be integers")
+    try:
+        return restore_editor_project_revision(
+            _editor_save_root(),
+            workspace,
+            project_id,
+            revision,
+            expected_revision=expected_revision,
+        )
+    except EditorProjectRevisionConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Editor project revision not found") from error
+    except EditorProjectError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@api.post("/api/v1/editor/projects/{project_id}/package")
+async def editor_project_package(project_id: str, request: Request):
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeDecodeError) as error:
+        raise HTTPException(status_code=400, detail="Request body must be valid JSON") from error
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be an object")
+    if "output_path" in body or "directory" in body:
+        raise HTTPException(status_code=400, detail="Package output paths are selected by the server")
+    workspace = body.get("workspace") or _get_active_workspace()
+    revision = body.get("revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        raise HTTPException(status_code=400, detail="A saved project revision is required")
+    try:
+        project = load_editor_project(_editor_save_root(), workspace, project_id)
+        current_revision = project.get("revision", 0)
+        if current_revision != revision:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Project revision changed from {revision} to {current_revision}; save and retry packaging.",
+            )
+        package_root = _editor_workspace_package_root(workspace)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Editor project not found") from error
+    except EditorProjectError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    job_id = uuid.uuid4().hex[:12]
+    filename = f"editor-project-{job_id}.maestro-project.zip"
+    job = {
+        "id": job_id,
+        "kind": "editor_package",
+        "status": "queued",
+        "show_in_gallery": False,
+        "progress": 0,
+        "step": 0,
+        "total_steps": 0,
+        "phase": "",
+        "message": "Editor project package queued",
+        "created_at": time.time(),
+        "params": {"project": project},
+        "workspace": workspace,
+        "out_dir": package_root,
+        "package_root": package_root,
+        "package_filename": filename,
+        "output_files": [],
+        "error": None,
+    }
+    _jobs[job_id] = job
+    threading.Thread(
+        target=_run_editor_package,
+        args=(job_id,),
+        daemon=False,
+        name=f"maestro_editor_package_{job_id}",
+    ).start()
+    return {"job_id": job_id, "status": "queued"}
+
+
+_MAX_EDITOR_ARCHIVE_UPLOAD_BYTES = EDITOR_ARCHIVE_UNPACKED_MAX_BYTES + 64 * 1024 * 1024
+
+
+@api.post("/api/v1/editor/projects/import")
+async def editor_project_import(request: Request):
+    upload = None
+    temporary_path = None
+    try:
+        content_length = request.headers.get("content-length", "")
+        if content_length.isdigit() and int(content_length) > _MAX_EDITOR_ARCHIVE_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="Project package exceeds the upload size limit")
+        form = await request.form()
+        upload = form.get("file")
+        if upload is None or not hasattr(upload, "read"):
+            raise HTTPException(status_code=400, detail="Choose a project ZIP file to import")
+        workspace = str(form.get("workspace") or _get_active_workspace())
+        package_root = _editor_workspace_package_root(workspace)
+        descriptor, temporary_path = tempfile.mkstemp(
+            prefix=".maestro-editor-import-",
+            suffix=".zip",
+            dir=package_root,
+        )
+        total_bytes = 0
+        with os.fdopen(descriptor, "wb") as target:
+            while True:
+                chunk = await upload.read(1024 * 1024)
+                if not chunk:
+                    break
+                total_bytes += len(chunk)
+                if total_bytes > _MAX_EDITOR_ARCHIVE_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="Project package exceeds the upload size limit",
+                    )
+                target.write(chunk)
+        return import_editor_project_archive(
+            temporary_path,
+            save_root=_editor_save_root(),
+            workspace=workspace,
+        )
+    except HTTPException:
+        raise
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Project package or imported media not found") from error
+    except EditorProjectArchiveError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except EditorProjectError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    finally:
+        if temporary_path and os.path.isfile(temporary_path) and not os.path.islink(temporary_path):
+            try:
+                os.remove(temporary_path)
+            except OSError:
+                pass
+        if upload is not None:
+            try:
+                await upload.close()
+            except Exception:
+                pass
 
 
 @api.post("/api/v1/media/trim")
@@ -32256,6 +34025,103 @@ def editor_media_cache(preview_id: str, kind: str, workspace: str = ""):
     )
 
 
+def _editor_auto_edit_directory():
+    return Path(_app_dir) / "settings" / "editor_auto_edit"
+
+
+@api.get("/api/v1/editor/auto-edit/capabilities")
+def editor_auto_edit_capability_list():
+    from services import llm_service
+    from services.editor_auto_edit_runtime import editor_auto_edit_capabilities
+    return editor_auto_edit_capabilities(llm_service)
+
+
+@api.get("/api/v1/editor/auto-edit/proposals")
+def editor_auto_edit_proposal_list(workspace: str, project_id: str):
+    from services.editor_auto_edit import list_editor_auto_edit_proposals
+    records = list_editor_auto_edit_proposals(
+        _editor_auto_edit_directory(), workspace=workspace, project_id=project_id, limit=20,
+    )
+    keys = ("proposal_id", "project_id", "workspace", "base_revision", "mode", "status", "summary", "created_at", "updated_at")
+    return {"proposals": [{key: record.get(key) for key in keys} for record in records]}
+
+
+@api.get("/api/v1/editor/auto-edit/proposals/{proposal_id}")
+def editor_auto_edit_proposal_get(proposal_id: str):
+    from services.editor_auto_edit import EditorAutoEditError, get_editor_auto_edit_proposal
+    try:
+        return get_editor_auto_edit_proposal(_editor_auto_edit_directory(), proposal_id)
+    except EditorAutoEditError as error:
+        raise HTTPException(404, str(error)) from error
+
+
+@api.post("/api/v1/editor/auto-edit/plan")
+async def editor_auto_edit_plan(request: Request):
+    from services import llm_service
+    from services.editor_auto_edit import (
+        EditorAutoEditError, create_editor_auto_edit_proposal, get_editor_auto_edit_proposal,
+    )
+    from services.editor_auto_edit_runtime import editor_auto_edit_capabilities, editor_auto_edit_writer
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeDecodeError) as error:
+        raise HTTPException(400, "Request body must be valid JSON") from error
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Request body must be an object")
+    workspace = body.get("workspace") or _get_active_workspace()
+    project_id = str(body.get("project_id") or "")
+    revision = body.get("revision")
+    if isinstance(revision, bool) or not isinstance(revision, int):
+        raise HTTPException(400, "Save this project before planning an edit")
+    proposal_id = str(body.get("proposal_id") or "")
+    try:
+        project = load_editor_project(_editor_save_root(), workspace, project_id)
+        options = dict(mode=body.get("mode"), workspace=workspace,
+                       brief=body.get("brief", ""), target_seconds=body.get("target_seconds"),
+                       client_intent_id=proposal_id, client_signature=body.get("client_signature", ""))
+        try:
+            previous = get_editor_auto_edit_proposal(_editor_auto_edit_directory(), proposal_id)
+        except EditorAutoEditError:
+            previous = None
+        if previous is not None:
+            # Durable intent is authoritative even if its writer is now unloaded.
+            # Creation validates identical request identity and never repeats it.
+            return create_editor_auto_edit_proposal(_editor_auto_edit_directory(), project, **options)
+        if project.get("revision", 0) != revision:
+            raise HTTPException(409, "This project changed. Reload or save a new version before planning.")
+        if body.get("mode") == "director":
+            return create_editor_auto_edit_proposal(_editor_auto_edit_directory(), project, **options)
+        capabilities = editor_auto_edit_capabilities(llm_service)
+        if not capabilities["writer_available"]:
+            raise HTTPException(409, capabilities["reason"])
+        _guard_interactive_llm_against_generation()
+        if not _gen_lock.acquire(blocking=False):
+            raise HTTPException(409, "Generation resources are busy. Auto-edit planning has not started.")
+        try:
+            def plan():
+                with llm_service.keep_loaded():
+                    return create_editor_auto_edit_proposal(
+                        _editor_auto_edit_directory(), project,
+                        writer=editor_auto_edit_writer(llm_service), writer_identity=llm_service.get_status(), **options,
+                    )
+            worker = asyncio.create_task(asyncio.to_thread(plan))
+            try:
+                return await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                # Keep the GPU lease until the writer has persisted its result.
+                # A lost browser receipt can be recovered with GET, never POST.
+                try:
+                    await worker
+                finally:
+                    raise
+        finally:
+            _gen_lock.release()
+    except FileNotFoundError as error:
+        raise HTTPException(404, "Editor project not found") from error
+    except EditorAutoEditError as error:
+        raise HTTPException(400, str(error)) from error
+
+
 @api.get("/api/v1/editor/export/capabilities")
 def editor_export_capability_list():
     return editor_export_capabilities()
@@ -32270,19 +34136,90 @@ async def editor_export(request: Request):
         raise HTTPException(status_code=400, detail="queue_mode must be 'now' or 'held'")
     hold_for_queue = queue_mode == "held"
     try:
-        project = body.get("project")
-        if not isinstance(project, dict):
+        project_payload = body.get("project")
+        if isinstance(project_payload, dict):
+            project = project_payload
+            payload_revision = project_payload.get("revision")
+            project_id = str(project_payload.get("id") or "")
+            has_explicit_revision = (
+                isinstance(payload_revision, int)
+                and not isinstance(payload_revision, bool)
+                and bool(project_id)
+            )
+            if has_explicit_revision:
+                try:
+                    current_project = load_editor_project(
+                        _editor_save_root(), workspace, project_id
+                    )
+                except FileNotFoundError:
+                    # A newly created project still needs its first persisted
+                    # revision. The expected revision also prevents a copied
+                    # or stale payload from silently recreating an old ID.
+                    project = save_editor_project(
+                        _editor_save_root(),
+                        workspace,
+                        project_payload,
+                        expected_revision=payload_revision,
+                    )
+                else:
+                    if payload_revision != current_project.get("revision", 0):
+                        raise EditorProjectRevisionConflict(
+                            payload_revision,
+                            current_project.get("revision", 0),
+                        )
+                    normalized_payload = normalize_editor_project(
+                        project_payload, workspace=workspace
+                    )
+                    if normalized_payload == current_project:
+                        # The Editor just saved this exact snapshot before
+                        # starting its export. Reuse that revision instead of
+                        # advancing the document a second time.
+                        project = current_project
+                    else:
+                        project = save_editor_project(
+                            _editor_save_root(),
+                            workspace,
+                            project_payload,
+                            expected_revision=payload_revision,
+                        )
+            else:
+                # Revisionless legacy callers keep their historical behavior:
+                # persist the supplied project before queueing the export.
+                project = save_editor_project(
+                    _editor_save_root(), workspace, project_payload
+                )
+        else:
             project_id = str(body.get("project_id") or "")
             project = load_editor_project(
                 _editor_save_root(),
                 workspace,
                 project_id,
             )
-        project = save_editor_project(_editor_save_root(), workspace, project)
     except FileNotFoundError as error:
         raise HTTPException(status_code=404, detail="Editor project not found") from error
+    except EditorProjectRevisionConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except EditorProjectError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+
+    source_item_ids = body.get("item_ids")
+    if source_item_ids is not None:
+        if body.get("format") != "prores4444":
+            raise HTTPException(400, "Selected overlay export requires format prores4444")
+        # Export an unsaved copy. Background footage and unrelated audio must
+        # never be baked into the standalone overlay or removed from the edit.
+        try:
+            overlay_source = deepcopy(project)
+            overlay_source["export"] = {
+                **overlay_source["export"], "format": "prores4444",
+                "encoder": "software", "spatial_upsampling": "",
+                "film_grain_intensity": 0,
+            }
+            project = prepare_editor_overlay_project(overlay_source, source_item_ids)
+        except EditorProjectError as error:
+            raise HTTPException(400, str(error)) from error
+    elif "format" in body:
+        raise HTTPException(400, "Set the full-project format in its export settings")
 
     job_id = uuid.uuid4().hex[:8]
     _jobs[job_id] = {
@@ -32295,7 +34232,7 @@ async def editor_export(request: Request):
         "phase": "",
         "message": "Editor export held" if hold_for_queue else "Editor export queued",
         "created_at": time.time(),
-        "params": {"project": project},
+        "params": {"project": project, **({"source_item_ids": list(source_item_ids)} if source_item_ids is not None else {})},
         "workspace": workspace,
         "out_dir": _workspace_dir(workspace),
         "output_files": [],
@@ -32308,7 +34245,11 @@ async def editor_export(request: Request):
             daemon=False,
             name=f"maestro_editor_export_{job_id}",
         ).start()
-    return {"job_id": job_id, "status": "held" if hold_for_queue else "queued"}
+    return {
+        "job_id": job_id,
+        "status": "held" if hold_for_queue else "queued",
+        "revision": project.get("revision", 0),
+    }
 
 
 # ============================================================================
@@ -32363,7 +34304,7 @@ _mimetypes.add_type("image/svg+xml", ".svg")
 # route is registered before the root StaticFiles mount so the manifest and
 # iOS apple-touch-icon link can both use the same stable URL.
 _maestro_web_icon = os.path.normpath(
-    os.path.join(_app_dir, "..", "maestro_simplified_icon_alpha.png")
+    os.path.join(_app_dir, "..", "docs", "images", "maestro-icon.png")
 )
 if os.path.isfile(_maestro_web_icon):
     @api.get("/maestro-icon.png", include_in_schema=False)
@@ -32427,31 +34368,14 @@ if __name__ == "__main__":
     else:
         host = os.environ.get("SERVER_NAME", "127.0.0.1")
 
-    # Port resolution: Pinokio hands us a free port via SERVER_PORT, but a
-    # stale prior instance or another app can still be holding it by the time
-    # we bind — and an uncaught bind failure makes the launcher report a
-    # blank "server failed to start" with no clue. Probe the requested port
-    # and fall forward to the next free one, printing what happened so the
-    # captured URL (below) matches the actual bind.
-    def _first_bindable_port(bind_host: str, preferred: int, span: int = 20):
-        import socket as _socket
-        probe_host = "127.0.0.1" if bind_host == "0.0.0.0" else bind_host
-        for candidate in [preferred] + [preferred + i for i in range(1, span + 1)]:
-            s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-            try:
-                # No SO_REUSEADDR — a plain bind fails iff the port is truly
-                # in use right now, which is exactly the check we want (and
-                # avoids the Windows REUSEADDR hijack-a-live-port behavior).
-                s.bind((probe_host, candidate))
-                return candidate
-            except OSError:
-                continue
-            finally:
-                s.close()
-        return None
+    # Reserve the actual bind interface, not only loopback when serving LAN.
+    # Keep ownership through Uvicorn startup so another service cannot take
+    # the selected port after a temporary availability probe closes.
+    from services.server_socket import reserve_server_socket
+    from services.server_startup import run_reserved_server
 
-    resolved_port = _first_bindable_port(host, port)
-    if resolved_port is None:
+    server_socket = reserve_server_socket(host, port)
+    if server_socket is None:
         print(
             f"\n[Maestro] ERROR: could not find a free port in "
             f"{port}-{port + 20}. Another app (or a stale Maestro instance) "
@@ -32463,6 +34387,7 @@ if __name__ == "__main__":
             flush=True,
         )
         sys.exit(1)
+    resolved_port = int(server_socket.getsockname()[1])
     if resolved_port != port:
         print(
             f"[Maestro] Port {port} was busy — using {resolved_port} instead.",
@@ -32470,12 +34395,23 @@ if __name__ == "__main__":
         )
         port = resolved_port
 
-    # Pinokio may assign a different port on every launch (and the fallback
-    # above can move it again). Recreate the manager with the actual port,
-    # then refresh an already-opted-in private Tailscale route in the
-    # background. Local startup never waits on or requires Tailscale.
+    _agent_backend_url = f"http://127.0.0.1:{port}"
+    _agent_launcher_script = os.environ.get("MAESTRO_LAUNCHER_SCRIPT", "").strip()
+    if _agent_launcher_script not in {"start.js", "start_sol.js", "start_classic.js"}:
+        _agent_launcher_script = (
+            "start_sol.js" if os.environ.get("MAESTRO_SOL_RUNTIME") == "1" else "start.js"
+        )
+    _agent_access_runtime.register_backend(
+        _agent_backend_url,
+        ready=False,
+        session_id=_agent_access_backend.session_id,
+        launcher_script=_agent_launcher_script,
+    )
+    _agent_access_backend.start_snapshotter()
+
+    # Recreate the manager with the reserved port. Refresh an existing opted-in
+    # route only after API startup succeeds; local startup never requires it.
     _tailscale = TailscaleManager(_maestro_settings_dir, port)
-    _tailscale.refresh_if_enabled()
 
     # Browsers can't navigate to 0.0.0.0 (it's a non-routable bind
     # address), so when binding wider we still SURFACE the loopback
@@ -32484,29 +34420,56 @@ if __name__ == "__main__":
     # LAN access works; only the displayed URL is loopback.
     display_host = "127.0.0.1" if host == "0.0.0.0" else host
 
-    print(f"\n{'='*50}")
-    print(f"  Maestro UI:    http://{display_host}:{port}/")
-    # Trailing slash required: the Gradio submount 404s the bare path.
-    print(f"  Classic UI:    http://{display_host}:{port}/classic/")
-    print(f"  API docs:      http://{display_host}:{port}/docs")
-    if host == "0.0.0.0":
-        print(f"  (Bound to {host} — LAN-accessible via this machine's IP)")
-    print(f"  Code loaded:   {_loaded_code_revision()}")
-    print(f"{'='*50}\n")
+    def _announce_ready(_server):
+        _tailscale.refresh_if_enabled()
+        _agent_access_runtime.register_backend(
+            _agent_backend_url,
+            ready=True,
+            session_id=_agent_access_backend.session_id,
+            launcher_script=_agent_launcher_script,
+            auth_boundary_version=3,
+        )
+        print(f"\n{'='*50}")
+        print(f"  Maestro UI:    http://{display_host}:{port}/")
+        # Trailing slash required: the Gradio submount 404s the bare path.
+        print(f"  Classic UI:    http://{display_host}:{port}/classic/")
+        print(f"  API docs:      http://{display_host}:{port}/docs")
+        if host == "0.0.0.0":
+            print(f"  (Bound to {host} — LAN-accessible via this machine's IP)")
+        print(f"  Code loaded:   {_loaded_code_revision()}")
+        print(f"{'='*50}\n", flush=True)
 
     # Confirm the polling filter immediately before Uvicorn configures logging.
     install_quiet_access_filter()
 
+    # Preserve the native browser/LAN workflow. Agent Access management and
+    # explicit agent credentials remain protected; MCP uses its strict HTTPS
+    # controller rather than changing how existing users open the web UI.
+    _authenticated_app = AccessBoundary(
+        api,
+        runtime=_agent_access_runtime,
+        allow_local_agent_tokens=True,
+        journal=_agent_access_backend.journal,
+        app_root=Path(_app_dir),
+        asset_resolver=_agent_access_backend.asset_store.resolve_tree,
+        additional_media_roots=_agent_configured_media_roots,
+        allow_local_ui=True,
+        allow_legacy_browser=True,
+    )
+    from services.agent_access.pinokio_proxy import PinokioNativeMcpProxy
+    _authenticated_app = PinokioNativeMcpProxy(_authenticated_app, _agent_access_runtime)
+
     try:
-        uvicorn.run(api, host=host, port=port)
+        run_reserved_server(_authenticated_app, host=host, server_socket=server_socket, on_ready=_announce_ready)
     except OSError as e:
-        # The probe above narrows this to a genuine race (port taken in the
-        # window between probe and uvicorn's own bind). Still fail loudly and
-        # actionably rather than dumping a bare traceback into the launcher.
         print(
-            f"\n[Maestro] ERROR: failed to bind {host}:{port} ({e}). "
-            f"The port was taken just after we checked it — Start again to "
-            f"pick a fresh port.\n",
+            f"\n[Maestro] ERROR: could not start the API on {host}:{port} ({e}). "
+            f"Stop this Maestro installation in Pinokio, then Start again.\n",
             flush=True,
         )
         sys.exit(1)
+    finally:
+        _agent_access_backend.shutdown(
+            _agent_backend_url,
+            launcher_script=_agent_launcher_script,
+        )

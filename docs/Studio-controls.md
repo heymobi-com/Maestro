@@ -48,6 +48,12 @@ Click a thumbnail on the right to bring that asset into the gallery and keep it
 selected while media details load or new results arrive. Scroll the main gallery
 to resume selecting the card being browsed.
 
+The gallery toolbar's **Show/Hide thumbnails** button opens or closes the right
+panel. Drag its left divider to enlarge the previews and narrow the main gallery;
+the width and desktop open/closed choice are remembered in this browser. The
+divider also supports Left/Right arrow keys and Home/End. On phones, thumbnails
+open as an overlay with a close button; selecting an item closes the overlay.
+
 Completed Director runs show **Show clips** beneath the latest joined video in
 **All**, **Video** and **Multi-clip**. The shots start collapsed; expand them to
 browse their individual cards and normal media actions, then **Hide clips** to
@@ -212,7 +218,7 @@ Enhance also distinguishes the source of movement and visual effects. A body thr
 
 The LLM stays loaded throughout H3 enhancement, including validation, repair, and individual camera-planning passes. Concurrent calls cannot start the idle-unload countdown while another call or planner is still working. Normal idle memory release resumes when the final active request finishes.
 
-All three theme families, their light/dark variants and Auto appearance remain available in Settings. On mobile, the sidebar follows both the height and vertical offset of the visible viewport, and the document behind the open drawer is held in place. Keyboard detection also handles browsers that reduce the window height along with the visible viewport. The workflow header, reference area and hardware status temporarily tuck away while the keyboard reduces the available height, leaving room to write without changing saved preferences. An input section containing the focused text field stays visible. Compact menus also follow their buttons when the keyboard moves the viewport.
+All four theme families, their light/dark variants and Auto appearance are available under **Settings → Performance → Appearance**. First opening v4 switches the browser to Graphite Studio in Dark mode once; any theme selected afterward remains saved. Golden Hour, Classic and Onyx remain available. On mobile, the sidebar follows both the height and vertical offset of the visible viewport, and the document behind the open drawer is held in place. Keyboard detection also handles browsers that reduce the window height along with the visible viewport. The workflow header, reference area and hardware status temporarily tuck away while the keyboard reduces the available height, leaving room to write without changing saved preferences. An input section containing the focused text field stays visible. Compact menus also follow their buttons when the keyboard moves the viewport.
 
 When editing a video frame in Image mode, the return banner keeps its title and actions while its help text tucks away during typing. On short desktop and mobile screens, the composer keeps a usable minimum height and the sidebar body scrolls above the fixed generation controls. Focusing a field or moving the keyboard reveals the active line inside the sidebar, including Animate's appearance controls, without scrolling the gallery behind it.
 

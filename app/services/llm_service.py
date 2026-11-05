@@ -3329,6 +3329,34 @@ def _generate_streaming_anthropic(messages: list, max_tokens: int, temperature: 
     return content.strip()
 
 
+def _enhance_dialogue_budget_instruction(prompt, budget, model_type="", window_count=1) -> str:
+    """Keep an automatic writing target from competing with an authored script."""
+    if not str(model_type or "").lower().startswith("minimax_h3"):
+        return budget.instruction()
+    lines = _extract_h3_quoted_dialogue(prompt)
+    if not lines:
+        return budget.instruction()
+    from services.dialogue_writing import spoken_word_count
+
+    count = sum(spoken_word_count(line) for line in lines)
+    duration_guidance = (
+        f"Distribute these lines chronologically across the {window_count} windows, never repeating "
+        f"a line in another window. Each window allows at most {budget.maximum} spoken words. "
+        if window_count and window_count > 1 else
+        f"The selected duration allows at most {budget.maximum} spoken words in total. "
+    )
+    return (
+        f"The user supplied {len(lines)} spoken lines containing {count} spoken words. "
+        "Preserve every supplied line verbatim, once, in its source order and beside its "
+        "requested action and speaker. Do not shorten, omit, or paraphrase a supplied line "
+        "to meet an automatic word-count target. "
+        + duration_guidance +
+        "Additional dialogue is allowed only where the brief explicitly requests an "
+        "unscripted turn and space remains after all supplied lines. Do not pad the script. "
+        "Preserve the requested action and pauses; do not invent faster delivery to make room."
+    )
+
+
 def _build_enhance_user_prompt(
     prompt,
     mode,
@@ -3346,6 +3374,8 @@ def _build_enhance_user_prompt(
     from services.adaptive_enhancement import normalize_writing_style
     planning_style = normalize_writing_style(planning_style)
     if mode == "image":
+        from services.image_prompt_style import IMAGE_STYLE_GUIDANCE
+
         # The Studio split button also applies to still images. Carry the
         # choice through both guided and dedicated raw-enhancer paths.
         style_instruction = (
@@ -3359,7 +3389,8 @@ def _build_enhance_user_prompt(
         return (
             f"[{style_instruction} Preserve all explicit facts, identities, "
             "requested text, reference constraints and edit boundaries. "
-            f"Describe one still image, not a sequence.]\n\n{prompt}"
+            "Describe one still image, not a sequence. "
+            f"{IMAGE_STYLE_GUIDANCE}]\n\n{prompt}"
         )
     if planning_style == "adaptive":
         from services.adaptive_enhancement import adaptive_dialogue_expected, adaptive_dialogue_expansion_requested
@@ -3376,7 +3407,7 @@ def _build_enhance_user_prompt(
         if adaptive_dialogue_expansion_requested(prompt):
             budget = creative_dialogue_budget(prompt, window_size_seconds if window_count and window_count > 1 else duration_seconds)
             if budget:
-                context.append(budget.instruction())
+                context.append(_enhance_dialogue_budget_instruction(prompt, budget, model_type, window_count))
         elif adaptive_dialogue_expected(prompt):
             context.append("Preserve the supplied spoken lines beside their requested actions. Do not add or pad speech to fill the selected duration; develop the visual scene.")
         else:
@@ -3403,7 +3434,7 @@ def _build_enhance_user_prompt(
                 "\n[CREATIVE WRITING: Develop the requested scene and character interaction. "
                 "Preserve all explicit facts and quoted lines. Supporting dialogue may surround "
                 "those exact lines unless the user requests only them. Keep silent requests silent."
-                + (" For each window: " + budget.instruction() if budget else "") + "]"
+                + (" For each window: " + _enhance_dialogue_budget_instruction(prompt, budget, model_type, window_count) if budget else "") + "]"
             )
         if window_count and window_count > 1:
             if planning_style in {"creative", "adaptive"}:
@@ -3516,10 +3547,17 @@ def enhance_prompt(
         and not is_h3_ref2va
     )
     is_h3_structured = is_h3_context_ir or is_h3_ref2va
+    if is_h3_structured:
+        # Keep offsets, admission, immutable dialogue and fallback compilation
+        # on the same normalized copy; the user's stored source stays intact.
+        prompt = normalize_h3_dialogue_tags(prompt)
     is_flux3_image = mode == "image" and (model_type or "").lower().startswith("flux3")
-    is_moss_image = mode == "image" and (model_type or "").lower().startswith("moss_image")
-    if is_moss_image:
-        # A general cinematic writer cannot safely strip MOSS's layout fields.
+    from services.enhance_guides import moss_image_enhancement_kind
+    moss_enhancement_kind = moss_image_enhancement_kind(model_type or "", mode)
+    is_moss_image_edit = moss_enhancement_kind == "edit"
+    is_moss_image = moss_enhancement_kind == "layout"
+    if is_moss_image or is_moss_image_edit:
+        # A general writer cannot safely rewrite either native MOSS prompt contract.
         raw_enhancer_mode = False
     audio_driven = is_h3_ref2va and has_h3_performance_audio(reference_context)
     needs_h3_dialogue = is_h3_structured and not audio_driven
@@ -3551,6 +3589,10 @@ def enhance_prompt(
         # Inject content guidance
         from services.director.nsfw_guidance import inject_content_guidance
         system = inject_content_guidance(system, nsfw, "enhance")
+        if mode == "image":
+            from services.image_prompt_style import IMAGE_STYLE_GUIDANCE
+
+            system = f"{system}\n\n{IMAGE_STYLE_GUIDANCE}"
         # Inject LoRA hints into system prompt
         if lora_system_hint:
             system = f"{system}\n\n{lora_system_hint}"
@@ -3628,8 +3670,9 @@ def enhance_prompt(
 
     if raw_enhancer_mode:
         # The fine-tuned enhancer (a) doesn't reliably honor a "write N
-        # paragraphs" instruction and (b) likes to prepend a bogus "rendered
-        # in a 3D animation style" clause. Always run the style cleanup; and
+        # paragraphs" instruction and (b) can prepend a bogus video-style
+        # clause. Image requests retain their style wording; the legacy video
+        # cleanup must not strip an explicitly requested illustration/3D look.
         # when the user gave one line per window, enhance each window
         # independently and collapse it to a single paragraph — that makes the
         # output EXACTLY window_count paragraphs regardless of the model.
@@ -3653,7 +3696,7 @@ def enhance_prompt(
                     planning_style,
                 )
                 r = generate(prompt=w_prompt, image_paths=(image_paths if i == 0 else None), **gen_kw)
-                r = _clean_enhancer_output(r)
+                r = r.strip() if mode == "image" and r else _clean_enhancer_output(r)
                 r = " ".join(r.split()) if r else ln  # collapse to one paragraph
                 outs.append(r or ln)
             return repair_text("\n".join(outs))
@@ -3670,7 +3713,8 @@ def enhance_prompt(
         )
         print(f"[Enhance] Raw enhancer ({model_type}, images={bool(image_paths)}, windows={window_count})")
         result = generate(prompt=raw_prompt, image_paths=image_paths, **gen_kw)
-        return repair_text(_clean_enhancer_output(result) or prompt)
+        cleaned = result.strip() if mode == "image" and result else _clean_enhancer_output(result)
+        return repair_text(cleaned or prompt)
 
     adaptive_scripted_dialogue = False
     if planning_style == "adaptive" and needs_h3_dialogue:
@@ -3704,11 +3748,11 @@ def enhance_prompt(
                 "environment. Keep under 150 words. Output only the enhanced prompt."
             ),
             "image": (
-                "You are an expert photographer. Enhance the user's image prompt with "
-                "detailed descriptions of composition, lighting, colors, and mood. "
-                "The output is a STILL PHOTOGRAPH — describe static poses only, no motion verbs "
-                "(no walking, running, reaching, turning, dancing). "
-                "Keep under 150 words. Output only the enhanced prompt."
+                "You are an image prompt editor. Preserve the user's requested medium, "
+                "style, subjects, composition and exact visible text. Clarify useful "
+                "details within that style. A still image can depict an action pose. "
+                "Keep simple briefs concise and detailed briefs complete. "
+                "Output only the enhanced prompt."
             ),
             "audio": (
                 "You are an expert audio producer. Enhance the user's audio description "
@@ -3822,6 +3866,11 @@ def enhance_prompt(
         if nsfw_block:
             system = f"{system}\n\n{nsfw_block}"
 
+    if mode == "image":
+        from services.image_prompt_style import IMAGE_STYLE_GUIDANCE
+
+        system = f"{system}\n\n{IMAGE_STYLE_GUIDANCE}"
+
     # Shared video-enhance rules — e.g. reference characters by a stable visual
     # appearance, not by name/relationship/pronoun (the model has no memory of
     # who anyone is). Appended for video so EVERY path gets it: per-model guides
@@ -3896,6 +3945,27 @@ def enhance_prompt(
                 "unseen image content. Do not render the reference tokens as visible lettering.\n\n"
                 f"{user_prompt}"
             )
+        elif is_moss_image_edit:
+            ordered_map = reference_context.strip() if reference_context else "\n".join(
+                f"Reference image {index + 1} is the attached image in position {index + 1}."
+                for index in range(len(image_paths))
+            )
+            user_prompt = (
+                "Use these MOSS Image Edit references in their attachment order. "
+                "Follow any image roles the user assigns in the brief; the numbered "
+                "map identifies order only and does not assign extra roles.\n\n"
+                f"{ordered_map}\n\n{user_prompt}"
+            )
+        elif mode == "image" and str(model_type or "").startswith("fibo2"):
+            ordered_map = reference_context.strip() if reference_context else "\n".join(
+                f"Image {index + 1} is the attached image in position {index + 1}."
+                for index in range(len(image_paths))
+            )
+            user_prompt = (
+                "Use the attached Fibo images in this exact order. Preserve the edit and "
+                "source roles requested by the user.\n\n"
+                f"{ordered_map}\n\n{user_prompt}"
+            )
         elif mode == "image":
             user_prompt = f"I have attached a reference image. Enhance this prompt based on what you see in the image:\n\n{user_prompt}"
         else:
@@ -3924,7 +3994,9 @@ def enhance_prompt(
         )
         writing_budget = creative_dialogue_budget(prompt, duration_seconds)
         if writing_budget:
-            system += "\nCREATIVE DIALOGUE ALLOCATION: " + writing_budget.instruction()
+            system += "\nCREATIVE DIALOGUE ALLOCATION: " + _enhance_dialogue_budget_instruction(
+                prompt, writing_budget, model_type,
+            )
 
     if planning_style == "adaptive":
         from services.adaptive_enhancement import adaptive_dialogue_expected, adaptive_writing_guide
@@ -3955,9 +4027,16 @@ def enhance_prompt(
             "\n\nCRITICAL MINIMAX H3 REF2VA OUTPUT CONTRACT: Output ONLY the six required fields, "
             "in order: subject_definitions:, summary:, retention_analysis:, detailed_description:, "
             "overall_soundscape:, and non_diegetic_music:. Use only the supplied <Picture n>, <Video n>, "
-            "and <Audio n> labels. These labels and fields are model syntax, not explanatory headings. "
-            "Every VOICE REFERENCE must be bound inside subject_definitions to its matching <Subject n> "
-            "and its stable speaker ID. Subject numbering follows reusable-reference order, while (S1), "
+            "and <Audio n> labels and the native Subject IDs and roles shown in the supplied inventory. "
+            "These labels and fields are model syntax, not explanatory headings. Never invent, renumber, "
+            "or add a Subject ID. A scene/environment or visual-treatment Subject may describe only that "
+            "role; it is never a character identity or dialogue speaker. If no identity-bearing character "
+            "Subject is supplied, keep named cast as plain character names and use supplied Video labels "
+            "only for their listed roles. Do not promote a motion Video or paired/legacy soundtrack Audio "
+            "to character identity or voice reference. Bind an Audio as a voice reference only when the "
+            "inventory explicitly marks it as a voice reference for that owner; use the matching Subject "
+            "when allocated, otherwise keep the owner as a plain character name without inventing a Subject. "
+            "Subject numbering follows reusable-reference order, while (S1), "
             "(S2), etc. are assigned independently by first actual vocal-event order. Spoken lines require "
             "that same event-ordered ID and <d>[Language] literal words</d>. Each line is spoken once by "
             "that character only; no other character repeats, echoes, mouths, or paraphrases it. Voice "
@@ -3966,6 +4045,26 @@ def enhance_prompt(
             "explanation, filenames, or LoRA display names. Exact creator-declared "
             "trainedWords tokens from active-LoRA guidance may appear when relevant."
         )
+        import re
+        native_subject_roles = [
+            line.strip()
+            for line in str(reference_context or "").splitlines()
+            if re.match(r"(?i)^\s*<Subject\s+\d+>\s+is\s+", line)
+        ]
+        if native_subject_roles:
+            system += "\nNATIVE SUBJECT ROLE MAP (authoritative):\n" + "\n".join(native_subject_roles)
+        cast = _h3_explicit_cast_speakers(prompt)
+        character_subjects = [
+            item for item in _parse_h3_ref2va_subject_manifest(reference_context)
+            if int(item["index"]) not in _h3_ref2va_scene_subject_ids(reference_context)
+        ]
+        if cast and not character_subjects and not audio_driven:
+            system += (
+                "\nPROMPT-NATIVE CAST: " + "; ".join(dict.fromkeys(cast.values())) + ". "
+                "Use these plain names for visible characters and dialogue. No character Subject "
+                "IDs were allocated. The scene Subject is the environment only. Motion videos "
+                "and paired soundtrack labels do not allocate character or voice identities."
+            )
     elif is_h3_context_ir:
         system += (
             "\n\nCRITICAL MINIMAX H3 OUTPUT CONTRACT: Output ONLY the structured "
@@ -3982,6 +4081,15 @@ def enhance_prompt(
             "active-LoRA guidance may appear when relevant."
         )
     elif is_flux3_image:
+        variant = (
+            "ACTIVE FLUX 3 MODEL: Klein Base is undistilled and supports classifier-free "
+            "guidance; do not describe it as the distilled checkpoint or claim its "
+            "negative-prompt conditioning is ignored. "
+            if str(model_type or "").lower().startswith("flux3_klein_base") else
+            "ACTIVE FLUX 3 MODEL: Klein is the distilled checkpoint with no separate "
+            "negative-prompt conditioning. "
+        )
+        system += "\n\n" + variant + "Maestro owns sampling and guidance settings; do not add them to the caption."
         system += (
             "\n\nFLUX 3 OUTPUT CONTRACT: Return only the final still-image caption or editing "
             "instruction. Native <ref_image_N> tokens identify attached inputs in order and are "
@@ -3992,6 +4100,15 @@ def enhance_prompt(
             "IDs, reference bindings and all coordinates after the caption. Retain each <id> tag. "
             "Only clarify the caption and descriptions; never change, omit or invent layout boxes. "
             "Boxes use [top,left,bottom,right], integers from 0 to 1000, and guide composition rather than exact pixel masks."
+        )
+    elif is_moss_image_edit:
+        system += (
+            "\n\nMOSS IMAGE EDIT OUTPUT CONTRACT: Return one concise, natural-language "
+            "instruction for the requested edit. Honor the user's ordered image roles "
+            "and change only what they asked to change. Preserve unrequested identity, "
+            "composition, visible text, and relevant source details. Do not invent a "
+            "full scene; when a composite is requested, use only the specified elements. "
+            "Do not add image tokens, layout JSON, masks, coordinates, or explanations."
         )
     elif is_moss_image:
         system += (
@@ -4212,7 +4329,10 @@ def enhance_prompt(
         # caption halfway through a <ref_image_N> token and drop later subjects.
         result = _clean_enhance_output(
             result,
-            preserve_structure=is_h3_structured or is_flux3_image or is_moss_image or speech_writer_active,
+            preserve_structure=(
+                is_h3_structured or is_flux3_image or is_moss_image
+                or is_moss_image_edit or speech_writer_active
+            ),
         )
     if is_h3_context_ir and result:
         # Adaptive dialogue may compile named cues into tags. For ordinary
@@ -4312,16 +4432,33 @@ def enhance_prompt(
                 if is_h3_ref2va
                 else "Emit each of the three required field labels exactly once, in order."
             )
+            supplied_lines = _extract_h3_quoted_dialogue(prompt) if needs_h3_dialogue else []
+            draft_lines = {_h3_dialogue_comparison_text(line) for line in _extract_h3_dialogue_blocks(result)}
+            missing_lines = [line for line in supplied_lines if _h3_dialogue_comparison_text(line) not in draft_lines]
+            restorations = ""
+            if missing_lines:
+                restorations = (
+                    "\nMISSING SUPPLIED LINES — restore each at its original source position and speaker:\n"
+                    + "\n".join(f"- {line}" for line in missing_lines)
+                )
             retry = generate(
-                prompt=user_prompt + "\n\nPREVIOUS DRAFT TO REPAIR:\n" + result,
+                prompt=(user_prompt + "\n\nPREVIOUS DRAFT TO REPAIR:\n" + result
+                        + "\n\nVALIDATION FAILURES TO FIX:\n- " + "\n- ".join(failures)
+                        + restorations
+                        + "\nReturn the complete corrected prompt, preserving all supplied spoken lines."),
                 system_prompt=(
                     system
                     + f"\n\nRETRY REQUIREMENT: Be concise. {field_requirement} "
                     "Do not repeat a subject definition or reference mapping. Never replace a requested "
                     "spoken line with the words 'speaks', 'talks', or 'dialogue'; write the actual <d> block. "
-                    "The numbered Saved character Subject map in the request is immutable: never renumber it, "
-                    "never emit <Subject N>, and never add another Subject for a repeated label. Speaker IDs "
-                    "remain independent and follow first actual vocal-event order."
+                    "The supplied native Subject IDs and roles are immutable: never renumber them, invent a "
+                    "Subject, or add another Subject for a repeated label. A scene/environment or style "
+                    "Subject is never a character or speaker. If no character Subject is supplied, retain "
+                    "named cast as plain names and use Video labels only for their listed roles. A paired or "
+                    "legacy soundtrack Audio is not a voice reference. Bind Audio as voice only when the "
+                    "inventory explicitly marks it for that owner; use a Subject if allocated, otherwise "
+                    "the plain character name. Speaker IDs remain independent and follow first actual "
+                    "vocal-event order."
                 ),
                 max_new_tokens=effective_max_tokens,
                 temperature=min(float(temperature), 0.35),
@@ -4835,6 +4972,220 @@ def _extract_h3_quoted_dialogue(text: str) -> list[str]:
     return [entry["words"] for entry in _extract_h3_source_dialogue_entries(text)]
 
 
+def _h3_explicit_cast_speakers(text: str) -> dict[int, str]:
+    """Read ``Characters: (S1) Name ...`` aliases without treating S as Subject.
+
+    User-authored cast manifests often identify a speaker separately from the
+    numbered Omni Subject map.  In particular, a scene Subject may be S1 only
+    by coincidence; this parser returns names for vocal ownership, never
+    Subject IDs.
+    """
+    import re
+
+    source = str(text or "")
+    manifest: dict[int, str] = {}
+    headings = list(re.finditer(r"(?im)^\s*characters?\s*:\s*", source))
+    for heading_index, heading in enumerate(headings):
+        end = len(source)
+        blank = re.search(r"\n\s*\n", source[heading.end():])
+        if blank:
+            end = min(end, heading.end() + blank.start())
+        next_heading = re.search(
+            r"(?im)^\s*(?:scene|setting|action|story|description|style|audio|music)\s*:",
+            source[heading.end():],
+        )
+        if next_heading:
+            end = min(end, heading.end() + next_heading.start())
+        if heading_index + 1 < len(headings):
+            end = min(end, headings[heading_index + 1].start())
+        body = source[heading.end():end]
+        markers = list(re.finditer(r"\(\s*S(\d+)\s*\)", body, re.IGNORECASE))
+        for index, marker in enumerate(markers):
+            previous_end = markers[index - 1].end() if index else 0
+            next_start = markers[index + 1].start() if index + 1 < len(markers) else len(body)
+            before = body[previous_end:marker.start()]
+            after = body[marker.end():next_start]
+
+            def clean_name(value: str) -> str:
+                value = re.sub(r"<[^>]*>", " ", value)
+                value = re.sub(r"(?i)\b(?:as\s+(?:a\s+)?)?references?\b.*$", " ", value)
+                value = re.sub(r"(?i)\b(?:video|audio)\s+\d+\b", " ", value)
+                value = re.sub(r"(?i)\b(?:is|are|with|using|from)\s*$", " ", value)
+                value = re.sub(r"\s+", " ", value).strip(" \t\r\n:;,.-–—")
+                return value
+
+            # Most manifests put the name after (Sx), while ``JIM (S3)`` is a
+            # common reverse ordering. Restrict the latter to the current
+            # punctuation-delimited entry so a preceding character cannot leak.
+            after_name = clean_name(after.split("<", 1)[0])
+            before_entry = re.split(r"[\r\n.!?;]", before)[-1]
+            before_name = clean_name(before_entry)
+            name = after_name or before_name
+            if not name or re.fullmatch(r"S\d+", name, re.IGNORECASE):
+                continue
+            speaker = int(marker.group(1))
+            previous = manifest.get(speaker)
+            if previous is None or _h3_ref2va_normalized_name(previous) == _h3_ref2va_normalized_name(name):
+                manifest[speaker] = name
+            else:
+                # A conflicting declaration is not reliable ownership proof.
+                manifest.pop(speaker, None)
+    return manifest
+
+
+def _h3_explicit_cast_section_spans(text: str) -> list[tuple[int, int]]:
+    """Return the contents of source ``Characters:`` sections."""
+    import re
+
+    source = str(text or "")
+    spans = []
+    headings = list(re.finditer(r"(?im)^\s*characters?\s*:\s*", source))
+    for index, heading in enumerate(headings):
+        end = len(source)
+        blank = re.search(r"\n\s*\n", source[heading.end():])
+        if blank:
+            end = min(end, heading.end() + blank.start())
+        next_heading = re.search(
+            r"(?im)^\s*(?:scene|setting|action|story|description|style|audio|music)\s*:",
+            source[heading.end():],
+        )
+        if next_heading:
+            end = min(end, heading.end() + next_heading.start())
+        if index + 1 < len(headings):
+            end = min(end, headings[index + 1].start())
+        spans.append((heading.end(), end))
+    return spans
+
+
+def _canonicalize_h3_source_cast_markers(text: str, cast_speakers: dict[int, str]) -> str:
+    """Render source cast IDs as names when event order changes those IDs."""
+    import re
+
+    blocks: list[str] = []
+
+    def protect_dialogue(match):
+        blocks.append(match.group(0))
+        return f"@@MAESTRO_CAST_DIALOGUE_{len(blocks) - 1}@@"
+
+    result = re.sub(r"(?is)<d\b[^>]*>.*?</d\s*>", protect_dialogue, str(text or ""))
+    for start, end in reversed(_h3_explicit_cast_section_spans(result)):
+        section = result[start:end]
+        section = re.sub(r"\(\s*S\d+\s*\)", "", section, flags=re.IGNORECASE)
+        result = result[:start] + section + result[end:]
+
+    def replace_marker(match):
+        name = cast_speakers.get(int(match.group(1)))
+        if not name:
+            return match.group(0)
+        # ``Tavi (S2)`` and ``(S2) Tavi`` already contain the actor's name.
+        # Replacing only the marker would create a new "Tavi Tavi" owner.
+        before = result[max(0, match.start() - len(name) - 3):match.start()]
+        after = result[match.end():match.end() + len(name) + 3]
+        if (re.search(rf"(?<!\w){re.escape(name)}\s*$", before, re.I)
+                or re.match(rf"\s*{re.escape(name)}(?!\w)", after, re.I)):
+            return ""
+        return name
+
+    result = re.sub(r"\(\s*S(\d+)\s*\)", replace_marker, result, flags=re.IGNORECASE)
+    for index, block in enumerate(blocks):
+        result = result.replace(f"@@MAESTRO_CAST_DIALOGUE_{index}@@", block)
+    return result
+
+
+def _h3_source_speaker_marker_match_for_dialogue(
+    source: str,
+    dialogue_start: int,
+    previous_dialogue_end: int = 0,
+) -> Optional[tuple[int, int, int]]:
+    """Find the source span for a cast marker attached to a speaker cue."""
+    import re
+    from models.minimax_h3.speakers import _SPEECH_VERB_RE
+
+    floor = max(0, int(previous_dialogue_end))
+    prefix = str(source or "")[floor:int(dialogue_start)]
+    prefix_offset = floor
+    clip = list(re.finditer(r"(?i)(?:\[\s*(?:shot|scene)\s+\d+\s*\]|(?:^|\n)\s*(?:shot|scene)\s+\d+\s*:?)", prefix))
+    if clip:
+        prefix_offset += clip[-1].end()
+        prefix = prefix[clip[-1].end():]
+    speech_verbs = list(_SPEECH_VERB_RE.finditer(prefix))
+    if speech_verbs:
+        before_verb = prefix[:speech_verbs[-1].start()]
+        markers = list(re.finditer(r"\(\s*S(\d+)\s*\)", before_verb, re.IGNORECASE))
+        if markers:
+            marker = markers[-1]
+            return prefix_offset + marker.start(), prefix_offset + marker.end(), int(marker.group(1))
+
+    # Without a speech verb, accept only a marker adjacent to the tag. This
+    # covers compact ``Name (S1) <d>`` cues while rejecting ``to (S2)``.
+    trailing = list(re.finditer(r"\(\s*S(\d+)\s*\)", prefix, re.IGNORECASE))
+    if trailing:
+        marker = trailing[-1]
+        suffix = prefix[marker.end():]
+        leading = prefix[max(0, marker.start() - 32):marker.start()]
+        if len(suffix.strip()) <= 24 and not re.search(r"\b(?:to|for|toward|towards)\s*$", leading, re.IGNORECASE):
+            return prefix_offset + marker.start(), prefix_offset + marker.end(), int(marker.group(1))
+    return None
+
+
+def _h3_source_speaker_marker_for_dialogue(
+    source: str,
+    dialogue_start: int,
+    previous_dialogue_end: int = 0,
+) -> Optional[int]:
+    """Find a cast marker attached to the speaker verb, not a speech object."""
+    match = _h3_source_speaker_marker_match_for_dialogue(
+        source, dialogue_start, previous_dialogue_end,
+    )
+    return match[2] if match else None
+
+
+def _h3_ref2va_scene_subject_ids(reference_context: Optional[str]) -> set[int]:
+    """Return native environment/style Subjects that cannot own dialogue."""
+    import re
+    return {
+        int(value)
+        for value in re.findall(
+            r"(?im)^\s*<Subject\s+(\d+)>\s+is\s+(?:the environment and location|the visual treatment)\b",
+            str(reference_context or ""),
+        )
+    }
+
+
+def _extract_h3_ref2va_audio_sections(prompt: str) -> tuple[str, dict[str, str]]:
+    """Lift prompt-native sound fields so fallback keeps them in their fields."""
+    import re
+
+    source = str(prompt or "")
+    field_names = ("subject_definitions", "summary", "retention_analysis", "detailed_description",
+                   "overall_soundscape", "non_diegetic_music")
+    dialogue_spans = [
+        match.span()
+        for match in re.finditer(r"(?is)<d\b[^>]*>.*?</d\s*>", source)
+    ]
+    headers = [header for header in re.finditer(
+        r"(?im)^\s*(" + "|".join(field_names) + r")\s*:\s*", source,
+    ) if not any(start <= header.start() < end for start, end in dialogue_spans)]
+    requested: dict[str, list[str]] = {"overall_soundscape": [], "non_diegetic_music": []}
+    remove_spans: list[tuple[int, int]] = []
+    for index, header in enumerate(headers):
+        field = header.group(1).casefold()
+        if field not in requested:
+            continue
+        end = headers[index + 1].start() if index + 1 < len(headers) else len(source)
+        value = source[header.end():end].strip()
+        if value and value not in requested[field]:
+            requested[field].append(value)
+        remove_spans.append((header.start(), end))
+    for start, end in reversed(remove_spans):
+        source = source[:start] + source[end:]
+    return source.strip(), {
+        field: "\n".join(values)
+        for field, values in requested.items()
+        if values
+    }
+
+
 def _extract_h3_source_dialogue_entries(
     text: str,
     reference_context: Optional[str] = None,
@@ -4927,15 +5278,108 @@ def _extract_h3_source_dialogue_entries(
     spans = filtered_spans
     spans.sort(key=lambda entry: entry["start"])
     manifest = _parse_h3_ref2va_subject_manifest(reference_context)
-    if manifest:
+    scene_subjects = _h3_ref2va_scene_subject_ids(reference_context)
+    speaker_manifest = [
+        subject for subject in manifest
+        if int(subject["index"]) not in scene_subjects
+    ]
+    cast_speakers = _h3_explicit_cast_speakers(source)
+    if cast_speakers:
+        from models.minimax_h3.speakers import (
+            _ref2va_alias_values,
+            _resolve_ref2va_dialogue_owner_name,
+            resolve_ref2va_dialogue_owners,
+        )
+
+        valid_subjects = {int(subject["index"]) for subject in speaker_manifest}
+        subject_aliases: dict[str, set[int]] = {}
+        for subject in speaker_manifest:
+            for alias in _ref2va_alias_values({"character_name": subject["name"]}):
+                subject_aliases.setdefault(alias, set()).add(int(subject["index"]))
+        cast_by_normalized_name = {
+            _h3_ref2va_normalized_name(name): name
+            for name in cast_speakers.values()
+        }
+        vocal_speakers: dict[tuple, int] = {}
+        previous_end = 0
+        for index, entry in enumerate(spans, start=1):
+            owner = entry.get("speaker") or _resolve_ref2va_dialogue_owner_name(
+                source, int(entry["start"]), int(entry["end"]),
+            )
+            cast_marker = _h3_source_speaker_marker_for_dialogue(
+                source, int(entry["start"]), previous_end,
+            )
+            normalized_owner = _h3_ref2va_normalized_name(owner or "")
+            if normalized_owner in cast_by_normalized_name:
+                owner = cast_by_normalized_name[normalized_owner]
+            elif not owner and cast_marker in cast_speakers:
+                owner = cast_speakers[int(cast_marker)]
+            elif cast_marker in cast_speakers:
+                # A prop named during a chained action is not a new speaker:
+                # ``(S2) Tavi holds the Compass and smiles and says ...``.
+                # Require both the adjacent named actor and a final ownerless
+                # "and says" clause. A named guest in "and Rook says" keeps
+                # its own ownership instead of inheriting this cast marker.
+                marker_span = _h3_source_speaker_marker_match_for_dialogue(
+                    source, int(entry["start"]), previous_end,
+                )
+                if marker_span:
+                    actor_tail = source[marker_span[1]:int(entry["start"])]
+                    cast_name = cast_speakers[int(cast_marker)]
+                    if (re.match(rf"\s*{re.escape(cast_name)}\b", actor_tail, re.I)
+                            and re.search(
+                                r"\band\s+(?:then\s+)?(?:says?|speaks?|replies|answers?|"
+                                r"asks?|whispers?|shouts?)\b[^.!?;\r\n]*$",
+                                actor_tail, re.I,
+                            )):
+                        owner = cast_name
+
+            subject = None
+            if owner:
+                owner_aliases = _ref2va_alias_values({"character_name": owner})
+                candidates = {
+                    next(iter(subject_aliases[alias]))
+                    for alias in owner_aliases
+                    if alias in subject_aliases and len(subject_aliases[alias]) == 1
+                }
+                if len(candidates) == 1:
+                    subject = next(iter(candidates))
+            if subject is None and not owner and valid_subjects:
+                # Keep the established strict ambiguity behavior for dialogue
+                # without a source-cast attribution.
+                owners = resolve_ref2va_dialogue_owners(
+                    source,
+                    [(int(entry["start"]), int(entry["end"]), entry["words"])],
+                    {
+                        alias: next(iter(subjects))
+                        for alias, subjects in subject_aliases.items()
+                        if len(subjects) == 1
+                    },
+                    valid_subjects,
+                )
+                subject, owner = owners[0]
+            if subject is None and not owner and len(valid_subjects) == 1:
+                subject = next(iter(valid_subjects))
+            if subject is not None:
+                entry["subject_id"] = subject
+            if owner:
+                entry["speaker"] = owner
+            key = ("subject", subject) if subject is not None else (
+                ("name", owner.casefold()) if owner else ("event", index)
+            )
+            entry["speaker_id"] = vocal_speakers.setdefault(
+                key, len(vocal_speakers) + 1,
+            )
+            previous_end = max(previous_end, int(entry["end"]))
+    elif speaker_manifest:
         from models.minimax_h3.speakers import (
             _ref2va_alias_values,
             resolve_ref2va_dialogue_owners,
         )
 
-        valid_subjects = {int(subject["index"]) for subject in manifest}
+        valid_subjects = {int(subject["index"]) for subject in speaker_manifest}
         alias_candidates: dict[str, set[int]] = {}
-        for subject in manifest:
+        for subject in speaker_manifest:
             for alias in _ref2va_alias_values({"character_name": subject["name"]}):
                 alias_candidates.setdefault(alias, set()).add(int(subject["index"]))
         aliases = {
@@ -4959,18 +5403,23 @@ def _extract_h3_source_dialogue_entries(
     else:
         from models.minimax_h3.speakers import _resolve_ref2va_dialogue_owner_name
         vocal_speakers: dict[tuple, int] = {}
+        previous_end = 0
         for index, entry in enumerate(spans, start=1):
-            prefix = source[max(0, int(entry["start"]) - 80):int(entry["start"])]
-            explicit = re.findall(r"\(S(\d+)\)", prefix, flags=re.IGNORECASE)
             owner = entry.get("speaker") or _resolve_ref2va_dialogue_owner_name(
                 source, int(entry["start"]), int(entry["end"]),
             )
             key = ("name", owner.casefold()) if owner else ("event", index)
             if owner:
                 entry["speaker"] = owner
-            entry["speaker_id"] = vocal_speakers.setdefault(
-                key, int(explicit[-1]) if explicit else max(vocal_speakers.values(), default=0) + 1,
+            actor_marker = _h3_source_speaker_marker_for_dialogue(
+                source, int(entry["start"]), previous_end,
             )
+            entry["speaker_id"] = vocal_speakers.setdefault(
+                key,
+                int(actor_marker) if actor_marker is not None
+                else max(vocal_speakers.values(), default=0) + 1,
+            )
+            previous_end = max(previous_end, int(entry["end"]))
     return spans
 
 
@@ -5602,6 +6051,17 @@ def _build_h3_dialogue_requirement(
     return ""
 
 
+def _h3_dialogue_comparison_text(value: str) -> str:
+    """Ignore layout whitespace without changing spoken words or punctuation."""
+    return " ".join(str(value or "").split())
+
+
+def _h3_dialogue_words_pattern(value: str) -> str:
+    """Match incidental line wrapping or spacing inside an exact speech span."""
+    import re
+    return r"\s+".join(re.escape(word) for word in str(value or "").split())
+
+
 def _h3_dialogue_contract_satisfied(prompt: str, result: str) -> bool:
     import re
     from services.dialogue_writing import dialogue_forbidden
@@ -5612,7 +6072,11 @@ def _h3_dialogue_contract_satisfied(prompt: str, result: str) -> bool:
     has_speaker_id = bool(re.search(r"\(S\d+\)", str(result or "")))
     if quotes:
         return has_speaker_id and all(
-            any(entry_language == language and words == line for entry_language, words in entries)
+            any(
+                entry_language == language
+                and _h3_dialogue_comparison_text(words) == _h3_dialogue_comparison_text(line)
+                for entry_language, words in entries
+            )
             for line in quotes
         )
     if dialogue_forbidden(prompt):
@@ -6097,7 +6561,9 @@ def _h3_context_speaker_binding_plan(
         return plan
     if len(result_entries) != len(source_entries):
         return None
-    if [str(entry["words"]).strip() for entry in result_entries] != expected_words:
+    if [_h3_dialogue_comparison_text(entry["words"]) for entry in result_entries] != [
+        _h3_dialogue_comparison_text(words) for words in expected_words
+    ]:
         return None
     matches = list(re.finditer(
         r"<d>\s*\[([^\]\r\n]+)\]\s*((?:(?!<d>).)*?)\s*</d>",
@@ -6167,7 +6633,7 @@ def _h3_context_speaker_binding_plan(
         language = _canonical_h3_language_tag(match.group(1) or "")
         if language != _canonical_h3_language_tag(expected.get("language") or ""):
             return None
-        if (match.group(2) or "").strip() != str(expected["words"]).strip():
+        if _h3_dialogue_comparison_text(match.group(2)) != _h3_dialogue_comparison_text(expected["words"]):
             return None
         expected_id = int(expected.get("speaker_id") or 0)
         if expected_id <= 0:
@@ -6811,11 +7277,28 @@ def _ensure_h3_visual_grounding(
 def validate_h3_source_dialogue_duration(prompt: str, duration_seconds: Optional[float]) -> None:
     """Reject impossible exact scripts before asking the writer to preserve them."""
     import math
+    import re
     from services.dialogue_timing import DIALOGUE_DEFAULT_WORDS_PER_SECOND, DIALOGUE_MAX_WORDS_PER_SECOND
     from services.dialogue_writing import spoken_word_count
     from services.h3_prompt_budget import H3PromptBudgetError
     from services.h3_dialogue_source import unclosed_h3_spoken_quote_error
 
+    prompt = normalize_h3_dialogue_tags(prompt)
+    inside_dialogue = False
+    for tag in re.finditer(r"</?d>", prompt, flags=re.IGNORECASE):
+        opening = tag.group().lower() == "<d>"
+        if opening == inside_dialogue:
+            raise H3PromptBudgetError(
+                "MiniMax H3 found an unclosed or nested dialogue tag. Use <d>spoken words</d> "
+                "for each line, with stage and sound directions outside the tags. "
+                "Your original prompt has not been changed."
+            )
+        inside_dialogue = opening
+    if inside_dialogue:
+        raise H3PromptBudgetError(
+            "MiniMax H3 found an unclosed dialogue tag. Close the spoken line with </d> "
+            "before enhancing. Your original prompt has not been changed."
+        )
     source_error = unclosed_h3_spoken_quote_error(prompt)
     if source_error:
         raise H3PromptBudgetError(source_error)
@@ -7513,7 +7996,7 @@ def _canonicalize_h3_ref2va_dialogue_speakers(
         speaker_id = entry.get("speaker_id")
         if not speaker_id:
             continue
-        words_pattern = re.escape(str(entry["words"])).replace(r"\ ", r"\s+")
+        words_pattern = _h3_dialogue_words_pattern(entry["words"])
         match = re.compile(
             rf"<d>\s*\[[^\]]+\]\s*{words_pattern}\s*</d>",
             flags=re.DOTALL | re.IGNORECASE,
@@ -7781,19 +8264,20 @@ def _h3_ref2va_dialogue_binding_contract_satisfied(
         # the full ordered tag sequence; the owner loop below alone would allow
         # extra, duplicated, or reordered guest lines after the required turns.
         if only_supplied_dialogue_requested(prompt) and [
-            str(entry["words"]) for entry in result_entries
-        ] != [str(entry["words"]) for entry in source_entries]:
+            _h3_dialogue_comparison_text(entry["words"]) for entry in result_entries
+        ] != [_h3_dialogue_comparison_text(entry["words"]) for entry in source_entries]:
             return False
     definitions_match = re.search(
         r"(?ms)^\s*subject_definitions\s*:(.*?)(?=^\s*summary\s*:)", text
     )
     definitions = definitions_match.group(1) if definitions_match else ""
     cursor = 0
+    result_entry_cursor = 0
     for entry in source_entries:
         speaker_id = entry.get("speaker_id")
         if not speaker_id:
             continue
-        words_pattern = re.escape(str(entry["words"])).replace(r"\ ", r"\s+")
+        words_pattern = _h3_dialogue_words_pattern(entry["words"])
         match = re.compile(
             rf"<d>\s*\[[^\]]+\]\s*{words_pattern}\s*</d>",
             flags=re.DOTALL | re.IGNORECASE,
@@ -7805,6 +8289,20 @@ def _h3_ref2va_dialogue_binding_contract_satisfied(
         if not ids or int(ids[-1]) != int(speaker_id):
             return False
         subject_id = entry.get("subject_id")
+        # A matching vocal ID and a correct header do not prove that the
+        # visible actor beside this particular line is its intended owner.
+        # Compare the resolved event too, independently of the S namespace.
+        resolved_index = next((
+            index for index in range(result_entry_cursor, len(result_entries))
+            if _h3_dialogue_comparison_text(result_entries[index]["words"])
+            == _h3_dialogue_comparison_text(entry["words"])
+        ), None)
+        if resolved_index is None:
+            return False
+        resolved_entry = result_entries[resolved_index]
+        if resolved_entry.get("subject_id") != subject_id:
+            return False
+        result_entry_cursor = resolved_index + 1
         if subject_id is not None and not re.search(
             rf"<Subject\s+{int(subject_id)}>\s*\(S{int(speaker_id)}\)",
             definitions,
@@ -7858,6 +8356,24 @@ def _compile_h3_explicit_dialogue(
     """Compile quotes and bare tags into canonical, speaker-bound H3 dialogue."""
     result = str(prompt or "")
     entries = _extract_h3_source_dialogue_entries(result, reference_context)
+    cast_speakers = _h3_explicit_cast_speakers(result)
+    if cast_speakers and entries:
+        previous_end = 0
+        event_order_differs = False
+        for entry in entries:
+            marker = _h3_source_speaker_marker_match_for_dialogue(
+                result, int(entry["start"]), previous_end,
+            )
+            if marker and marker[2] in cast_speakers and int(entry.get("speaker_id") or 0) != marker[2]:
+                event_order_differs = True
+            previous_end = max(previous_end, int(entry["end"]))
+        if event_order_differs:
+            # Cast-list S numbers are source aliases; H3 dialogue IDs follow
+            # first vocal-event order. Render those aliases as names in the
+            # fallback copy so a reordered cast cannot contradict the emitted
+            # (S1), (S2), ... voice tags. The submitted source stays untouched.
+            result = _canonicalize_h3_source_cast_markers(result, cast_speakers)
+            entries = _extract_h3_source_dialogue_entries(result, reference_context)
     for entry in reversed(entries):
         start = int(entry["start"])
         end = int(entry["end"])
@@ -7892,7 +8408,13 @@ def _compile_h3_explicit_dialogue(
             result = result[:start] + f"<d>[{entry['language']}] {entry['words']}</d>" + result[end:]
             continue
         existing = re.search(r"(?:<Subject\s+\d+>\s*)?\(S\d+\)\s*$", prefix, flags=re.IGNORECASE)
-        if existing:
+        existing_lead = prefix[:existing.start()] if existing else ""
+        recipient_marker = bool(re.search(
+            r"\b(?:to|for|toward|towards|with|at|from|of)\s*$",
+            existing_lead,
+            flags=re.IGNORECASE,
+        ))
+        if existing and not recipient_marker:
             absolute = max(0, start - 60) + existing.start()
             result = result[:absolute] + replacement + result[end:]
         else:
@@ -8011,9 +8533,22 @@ def _strip_h3_untagged_dialogue_duplicates(result: str, prompt: str) -> str:
 
 def _enforce_h3_soundscape_silence(result: str, prompt: str) -> str:
     """Keep the model from filling dialogue gaps with invented human noises."""
+    import re
+    _, explicit_audio_fields = _extract_h3_ref2va_audio_sections(prompt)
+    if "overall_soundscape" in explicit_audio_fields:
+        pattern = re.compile(
+            r"(?ms)^\s*overall_soundscape\s*:.*?(?=^\s*non_diegetic_music\s*:|\Z)",
+        )
+        match = pattern.search(str(result or ""))
+        requested_soundscape = explicit_audio_fields["overall_soundscape"].strip()
+        if not match or requested_soundscape not in match.group(0):
+            replacement = "overall_soundscape: " + requested_soundscape + "\n"
+            if match:
+                result = pattern.sub(lambda _match: replacement, str(result or ""), count=1)
+            else:
+                result = str(result or "").rstrip() + "\n" + replacement.rstrip()
     if not _h3_requests_speech(prompt):
         return result
-    import re
 
     # Preserve vocal reactions only when the source positively requests one.
     # H3 prompts often say "no voices, whispers, grunts..."; a plain keyword
@@ -8113,6 +8648,19 @@ def _enforce_h3_soundscape_silence(result: str, prompt: str) -> str:
     if not match:
         return result
     content = match.group(2).strip()
+    if "overall_soundscape" in explicit_audio_fields and not re.search(
+        r"(?i)\b(?:grunts?|gasps?|screams?|laughs?|laughter|sob\w*|cr(?:y|ies|ied|ying)|"
+        r"chuckl\w*|giggl\w*|audible\s+breathing|nonverbal\s+vocal\w*|"
+        r"chatter\w*|murmur\w*|voice\w*|speech|conversation|talk\w*)\b",
+        explicit_audio_fields["overall_soundscape"],
+    ):
+        silence_clause = (
+            "Outside the tagged dialogue, no human voices, whispers, grunts, audible breathing, "
+            "or speech-like vocalizations occur"
+        )
+        if silence_clause.casefold() not in content.casefold():
+            content = content.rstrip(" .") + ". " + silence_clause + "."
+        return result[:match.start()] + match.group(1) + " " + content + "\n" + result[match.end():]
     sentences = re.split(r"(?<=[.!?])\s+", content)
     kept = []
     for sentence in sentences:
@@ -8153,6 +8701,13 @@ def _enforce_h3_music_request(
 ) -> str:
     """Do not turn visual words such as 'cinematic' into an invented score."""
     import re
+    _, explicit_audio_fields = _extract_h3_ref2va_audio_sections(prompt)
+    if "non_diegetic_music" in explicit_audio_fields:
+        replacement = "non_diegetic_music: " + explicit_audio_fields["non_diegetic_music"].strip()
+        pattern = re.compile(r"(?ms)^\s*non_diegetic_music\s*:.*\Z")
+        if pattern.search(str(result or "")):
+            return pattern.sub(lambda _match: replacement, str(result or ""), count=1)
+        return str(result or "").rstrip() + "\n" + replacement
     requests_music = bool(
         re.search(
             r"(?i)\b(?:music|song|score|soundtrack|orchestra|orchestral|instrumental|melody|theme)\b",
@@ -8190,6 +8745,7 @@ def _build_h3_ref2va_tagged_fallback(
     source_error = unclosed_h3_spoken_quote_error(prompt)
     if source_error:
         raise H3PromptBudgetError(source_error)
+    request_prompt, explicit_audio_fields = _extract_h3_ref2va_audio_sections(prompt)
 
     from services.studio_enhancement import record_review_warning
     if rejection_reasons:
@@ -8202,22 +8758,24 @@ def _build_h3_ref2va_tagged_fallback(
         record_review_warning("The AI draft did not produce a valid H3 reference prompt. Review the source-based draft before generating.")
     if has_h3_performance_audio(reference_context):
         definitions, retention = _canonical_h3_ref2va_subject_fields(reference_context, {})
-        return enforce_h3_performance_audio(
+        request = _compile_h3_explicit_dialogue(request_prompt, reference_context).strip()
+        performance_fallback = enforce_h3_performance_audio(
             f"subject_definitions: {definitions}\n"
             "summary: [reference generation + audio reuse] The requested visual performance.\n"
             f"retention_analysis: {retention}\n"
             "detailed_description: The target video maintains the requested visual style. "
-            f"[Shot 1] {prompt}\n"
-            "overall_soundscape: The supplied target soundtrack.\n"
-            "non_diegetic_music: N/A"
+            f"[Shot 1] {request}\n"
+            f"overall_soundscape: {explicit_audio_fields.get('overall_soundscape', 'The supplied target soundtrack.')}\n"
+            f"non_diegetic_music: {explicit_audio_fields.get('non_diegetic_music', 'N/A')}"
         )
+        return performance_fallback
     manifest = _parse_h3_ref2va_subject_manifest(reference_context)
     speaker_map = _h3_ref2va_subject_speaker_map(prompt, reference_context)
     subject_mapping, retention_mapping = _canonical_h3_ref2va_subject_fields(
         reference_context,
         speaker_map,
     )
-    request = _compile_h3_explicit_dialogue(prompt, reference_context)
+    request = _compile_h3_explicit_dialogue(request_prompt, reference_context)
     request_text = request.strip()
     if request_text and request_text[-1] not in ".!?":
         request_text += "."
@@ -8310,9 +8868,16 @@ def _build_h3_ref2va_tagged_fallback(
     )
     sound_requested = bool(re.search(
         r"(?i)\b(?:sound|audio|soundtrack|music|ambience|ambiance|foley|sound effects?)\b",
-        prompt,
+        request_prompt,
     ))
-    if paired_audio:
+    if "overall_soundscape" in explicit_audio_fields:
+        soundscape = explicit_audio_fields["overall_soundscape"].strip()
+        if paired_audio:
+            soundscape += (
+                f"\nUse {paired_audio.group(1)} as a reference for the supplied soundtrack "
+                "and its audible timing."
+            )
+    elif paired_audio:
         soundscape = (
             f"Use {paired_audio.group(1)} as a reference for the supplied soundtrack and its audible timing."
         )
@@ -8346,7 +8911,7 @@ def _build_h3_ref2va_tagged_fallback(
         f"[Shot 1] The finished target video follows this request: {request_text}{identity_picture_clause}"
         f"{composition_clause}{motion_clause} {speech_boundary}{dialogue_boundary} {timed_clause}\n"
         f"overall_soundscape: {soundscape}{voice_clause}\n"
-        "non_diegetic_music: N/A"
+        f"non_diegetic_music: {explicit_audio_fields.get('non_diegetic_music', 'N/A').strip()}"
     )
 
 
@@ -8650,7 +9215,7 @@ def plan_angle_prompts(
     style_prompt: str,
     num_angles: int = 4,
 ) -> list:
-    """Generate image-edit prompts for camera angle variations of a reference photo.
+    """Generate image-edit prompts for camera angle variations of a reference image.
 
     Uses the LLM to refine each angle category into a short prompt that
     incorporates the user's style description.
@@ -8670,17 +9235,20 @@ def plan_angle_prompts(
     )
 
     system_prompt = (
-        "You are a photography director. Write short image-edit prompts that describe "
-        "how to reframe a reference photo into different camera angles. "
+        "You are an image composition director. Write short image-edit prompts that describe "
+        "how to reframe a reference image into different camera angles. "
         "Each prompt should be under 30 words and describe the framing, angle, and mood. "
         "Incorporate the user's style into each prompt. "
         "Output numbered prompts like '1. prompt text'. Output ONLY the numbered prompts."
     )
+    from services.image_prompt_style import IMAGE_STYLE_GUIDANCE
+
+    system_prompt += "\n\n" + IMAGE_STYLE_GUIDANCE
 
     user_prompt = (
         f"Visual style: {style_prompt}\n\n"
         f"Write {len(angles)} image-edit prompts to create these camera angle variations "
-        f"of a reference photo:\n\n{angle_list}\n\n"
+        f"of a reference image:\n\n{angle_list}\n\n"
         f"Each prompt should describe the camera angle and incorporate the visual style. Go:"
     )
 
@@ -9612,9 +10180,12 @@ def plan_clip_prompts_and_images(
 
     # ── Build system prompt per prompt_type ──────────────────────────
     photo_line = (
-        "You are given a REFERENCE PHOTO — use it to identify the people, "
+        "You are given a REFERENCE IMAGE — use it to identify the people, "
         "their clothing, and the setting.\n"
     ) if has_image else ""
+    from services.image_prompt_style import IMAGE_STYLE_GUIDANCE
+
+    photo_line += IMAGE_STYLE_GUIDANCE + "\n"
 
     char_rule = (
         "- NEVER use character names in image OR video prompts — neither the image "
@@ -9632,17 +10203,41 @@ def plan_clip_prompts_and_images(
         "- Character names ARE only allowed in spoken dialogue in the video prompt.\n"
         "- Describe characters using only the character descriptions provided."
     )
+
+    # Shared rules for all music video modes
+    shared_rules = (
+        "- Use the Scene Concept as your PRIMARY guide for locations, outfits, "
+        "props, and activities.\n"
+        "- LOCATIONS ARE BINDING: if the Scene Concept names a specific location "
+        "or setting, EVERY clip stays in that location unless the Scene Concept "
+        "itself calls for a move. Do NOT invent new locations for visual variety — "
+        "vary the camera angle, framing, distance, and lighting instead.\n"
+        "- Do NOT add subjects, creatures, or objects the Scene Concept and "
+        "reference images don't contain. Any examples in these instructions "
+        "show FORMAT only — never copy their content into prompts.\n"
+        "- Use the lyrics to inspire mood and visual metaphors, NOT literal text.\n"
+        "- If a clip says 'Performer:', that person must appear.\n"
+        f"{char_rule}\n"
+        "- Do NOT put lyrics or spoken words in prompts.\n"
+        "- CRITICAL: Each image and video prompt is generated INDEPENDENTLY with "
+        "NO context from other clips. The image generator does NOT know who any "
+        "character is. Every prompt must be FULLY SELF-CONTAINED — "
+        "re-describe each character's clothing, hair, and appearance, plus the "
+        "setting, lighting, and atmosphere in EVERY prompt. Never assume the "
+        "generator 'remembers' anything from prior clips.\n"
+    )
+
     if prompt_type == "image":
         if has_image:
             system_prompt = (
                 f"You are a creative music video scene designer.\n{photo_line}\n"
-                "Each clip's image prompt EDITS the reference photo to create a visually "
+                "Each clip's image prompt EDITS the reference image to create a visually "
                 "distinct starting frame. Think like a cinematographer choosing each shot — "
                 "vary camera angle, framing, or lighting when it serves the scene, but "
                 "maintain continuity when that makes more sense.\n\n"
                 "Focus your prompt on WHAT TO CHANGE — new camera angles, different framing, "
                 "new settings, repositioned characters, lighting shifts. You do NOT need to "
-                "re-describe things that stay the same as the reference photo.\n\n"
+                "re-describe things that stay the same as the reference image.\n\n"
                 "WHEN TO DESCRIBE CHARACTERS: When you change the setting to a new location, "
                 "re-describe characters by clothing/appearance so the editor knows who to place. "
                 "When the setting stays the same, you only need to describe characters whose "
@@ -9651,17 +10246,17 @@ def plan_clip_prompts_and_images(
                 "GOOD: 'change the setting to a neon-lit club, the woman in the red dress stands center stage under purple lights'\n"
                 "GOOD: 'change to an over-the-shoulder shot from behind the man in the dark jacket, looking at the stage'\n"
                 "BAD: 'Edit the provided image. Show Sarah dancing. Preserve character identity.' — uses name, meta-instructions\n"
-                "BAD: re-describing the entire reference photo when nothing changed\n\n"
+                "BAD: re-describing the entire reference image when nothing changed\n\n"
                 "RULES:\n"
                 f"{shared_rules}"
                 "- Use a mix of shot types (close-ups, wide shots, over-shoulder, etc.) "
                 "where appropriate — but continuity between consecutive clips is fine when it fits.\n"
-                "- The PERFORMER IS the person/character in the reference photo. Anchor them "
+                "- The PERFORMER IS the person/character in the reference image. Anchor them "
                 "explicitly in EVERY prompt ('the [descriptor] from the reference image') — "
                 "describing them loosely as a new character makes the image model invent a "
                 "different-looking one.\n"
-                "- NO motion blur, speed lines, or long-exposure effects — the image is a sharp "
-                "still frame; motion belongs to the video prompt.\n"
+                "- Keep the opening frame in the requested medium. Retain requested "
+                "motion lines, blur or other visual effects without narrating later transitions.\n"
                 "- Focus on WHAT TO CHANGE from the reference. Do not re-describe things that stay the same.\n"
                 "- Do NOT start with 'Edit the provided image' — just describe the changes.\n"
                 "- Do NOT use preservation meta-language ('preserve', 'maintain', 'keep unchanged').\n"
@@ -9712,19 +10307,19 @@ def plan_clip_prompts_and_images(
     else:
         # Combined "both" mode — LLM has full creative control
         image_instruction = (
-            "- I (image edit): EDITS the reference photo to create the FIRST FRAME BEFORE action begins. "
+            "- I (image edit): EDITS the reference image to create the OPENING INSTANT before later video transitions. "
             "Show the INITIAL STATE: if clothing will be removed, it's still on; if someone enters, "
             "show the room without them. Focus on WHAT TO CHANGE from reference. "
-            "Describe POSES as static states (standing, seated, leaning). "
-            "No motion verbs (walking, running, reaching, heaving, turning). "
-            "No motion blur, speed lines, or long-exposure effects — the frame is sharp. "
+            "Describe the opening-frame pose and scene state. "
+            "Keep later transitions in the video prompt. "
+            "Preserve the requested medium and any deliberate visual effects in that still frame. "
             "Anchor the performer as 'the [descriptor] from the reference image'. "
-            "NEVER use names. Actions belong ONLY in V, never in I.\n"
+            "NEVER use names. Later transitions belong in V; I may show action already underway at the opening instant.\n"
         ) if has_image else (
-            "- I (image): the FIRST FRAME BEFORE action begins — a frozen still photograph. "
+            "- I (image): the OPENING INSTANT before later video transitions — a single still frame in the requested medium. "
             "Show the INITIAL STATE: if clothing will be removed, it's still on; if someone enters, "
-            "the room is empty. Describe static poses only (standing, seated, leaning). "
-            "No motion verbs (walking, running, reaching, heaving, turning). "
+            "the room is empty. Describe the opening-frame pose and scene state. "
+            "Keep later transitions in the video prompt. "
             "Characters (by appearance, not name), positions, setting, lighting, mood.\n"
         )
         system_prompt = (
@@ -9740,7 +10335,7 @@ def plan_clip_prompts_and_images(
             "'cut to', or 'series of shots'. Character names ARE only allowed in spoken dialogue.\n"
             f"{image_instruction}"
             "- I prompts describe ONE SINGLE STATIC IMAGE — the starting frame that the "
-            "video animates FROM. No motion, no actions, no dancing. Just a frozen "
+            "video animates FROM. Do not narrate later transitions here. Just a frozen "
             "establishing shot: where everyone is, what the setting looks like.\n\n"
             "CREATIVE DIRECTION:\n"
             f"{shared_rules}"
@@ -10108,9 +10703,12 @@ def plan_short_film_prompts(
 
     # ── Build system prompt ──────────────────────────────────────
     photo_line = (
-        "You are given a REFERENCE PHOTO showing the characters. "
+        "You are given a REFERENCE IMAGE showing the characters. "
         "Use it to identify the people, their appearance, clothing, and setting.\n"
     ) if has_image else ""
+    from services.image_prompt_style import IMAGE_STYLE_GUIDANCE
+
+    photo_line += IMAGE_STYLE_GUIDANCE + "\n"
 
     char_rule = (
         "- NEVER use character names in image OR video prompts — neither the image "
@@ -10120,7 +10718,7 @@ def plan_short_film_prompts(
         "write 'the woman in the white lab coat' instead of 'Dr Ava', or "
         "'the man in the blue shirt' instead of 'Mr Johnson'.\n"
         "- Character names ARE only allowed in spoken dialogue in the video prompt.\n"
-        "- Describe characters using what you SEE in the photo + the character descriptions."
+        "- Describe characters using what you SEE in the image + the character descriptions."
     ) if has_image else (
         "- NEVER use character names in image OR video prompts. Instead, describe each "
         "person by their visual appearance: clothing, hair color, position. "
@@ -10169,12 +10767,12 @@ def plan_short_film_prompts(
             system_prompt = (
                 f"You are a cinematic scene designer for a short film.\n{photo_line}\n"
                 f"{char_context}"
-                "Each shot's image prompt EDITS the reference photo to create a starting "
+                "Each shot's image prompt EDITS the reference image to create a starting "
                 "frame. Think like a cinematographer — vary camera angle, framing, or lighting "
                 "when it serves the scene, but maintain continuity when that makes more sense.\n\n"
                 "Focus your prompt on WHAT TO CHANGE — new camera angles, different framing, "
                 "new settings, repositioned characters, lighting shifts. You do NOT need to "
-                "re-describe things that stay the same as the reference photo.\n\n"
+                "re-describe things that stay the same as the reference image.\n\n"
                 "WHEN TO DESCRIBE CHARACTERS: When you change the setting to a new location, "
                 "re-describe characters by clothing/appearance so the editor knows who to place. "
                 "When the setting stays the same, you only need to describe characters whose "
@@ -10184,7 +10782,7 @@ def plan_short_film_prompts(
                 "- 'change the setting to a dark alley with rain. The woman in the white coat stands against a wall.'\n"
                 "- 'change to an over-the-shoulder shot from behind the man, looking across the room'\n\n"
                 "BAD EXAMPLES (never write prompts like this):\n"
-                "- 'change to a bright living room. Woman in pink sits on couch. Man sits next to her.' — re-describes what's already in the reference photo\n"
+                "- 'change to a bright living room. Woman in pink sits on couch. Man sits next to her.' — re-describes what's already in the reference image\n"
                 "- 'Edit the provided image. Show Dr Ava standing.' — uses name, meta-instruction\n\n"
                 "RULES:\n"
                 "- Use a mix of shot types (close-ups, wide shots, over-shoulder, etc.) where "
@@ -10252,19 +10850,19 @@ def plan_short_film_prompts(
     else:
         # Combined "both" mode
         image_instruction = (
-            "- I (image edit): EDITS the reference photo to create the FIRST FRAME BEFORE action begins. "
+            "- I (image edit): EDITS the reference image to create the OPENING INSTANT before later video transitions. "
             "Show the INITIAL STATE: if clothing will be removed, it's still on; if someone enters, "
             "show the room without them. Focus on WHAT TO CHANGE from reference. "
-            "Describe POSES as static states (standing, seated, leaning). "
-            "No motion verbs (walking, running, reaching, heaving, turning). "
-            "No motion blur, speed lines, or long-exposure effects — the frame is sharp. "
+            "Describe the opening-frame pose and scene state. "
+            "Keep later transitions in the video prompt. "
+            "Preserve the requested medium and any deliberate visual effects in that still frame. "
             "Anchor the performer as 'the [descriptor] from the reference image'. "
-            "NEVER use names. Actions belong ONLY in V, never in I.\n"
+            "NEVER use names. Later transitions belong in V; I may show action already underway at the opening instant.\n"
         ) if has_image else (
-            "- I (image): the FIRST FRAME BEFORE action begins — a frozen still photograph. "
+            "- I (image): the OPENING INSTANT before later video transitions — a single still frame in the requested medium. "
             "Show the INITIAL STATE: if clothing will be removed, it's still on; if someone enters, "
-            "the room is empty. Describe static poses only (standing, seated, leaning). "
-            "No motion verbs (walking, running, reaching, heaving, turning). "
+            "the room is empty. Describe the opening-frame pose and scene state. "
+            "Keep later transitions in the video prompt. "
             "Characters (by appearance, not name), positions, setting, lighting, mood.\n"
         )
         system_prompt = (
@@ -10282,7 +10880,7 @@ def plan_short_film_prompts(
             "Character names ARE only allowed in spoken dialogue.\n"
             f"{image_instruction}"
             "- I prompts describe ONE SINGLE STATIC IMAGE — the starting frame that "
-            "the video animates FROM. No motion, no actions, no gestures. Just a frozen "
+            "the video animates FROM. Do not narrate later transitions here. Just a frozen "
             "establishing shot: where everyone is, what the setting looks like.\n\n"
             "CINEMATIC DIRECTION:\n"
             "- Match camera complexity to the content. If someone is speaking directly "
@@ -10468,9 +11066,12 @@ def plan_short_film_from_story(
             char_context = "Characters:\n" + "\n".join(char_lines) + "\n\n"
 
     photo_line = (
-        "You are given a REFERENCE PHOTO showing the characters. "
+        "You are given a REFERENCE IMAGE showing the characters. "
         "Use it to identify the people, their appearance, clothing, and setting.\n"
     ) if has_image else ""
+    from services.image_prompt_style import IMAGE_STYLE_GUIDANCE
+
+    photo_line += IMAGE_STYLE_GUIDANCE + "\n"
 
     char_rule = (
         "- NEVER use character names in image_prompt OR video_prompt — neither the "
@@ -10479,7 +11080,7 @@ def plan_short_film_from_story(
         "in frame, based on what you visually see in the attached reference image. "
         "For example, write 'the woman in the white lab coat' instead of a character name.\n"
         "- Character names ARE only allowed in spoken dialogue within the video_prompt.\n"
-        "- Describe characters using what you SEE in the photo + the character descriptions."
+        "- Describe characters using what you SEE in the image + the character descriptions."
     ) if has_image else (
         "- NEVER use character names in image_prompt OR video_prompt. Instead, describe "
         "each person by their visual appearance: clothing, hair color, position.\n"
@@ -10504,18 +11105,18 @@ def plan_short_film_from_story(
 
     # ── System prompt: scene planner + prompt writer ──────────────
     image_instruction = (
-        "- image_prompt: EDITS the reference photo to create the FIRST FRAME BEFORE action begins. "
+        "- image_prompt: EDITS the reference image to create the OPENING INSTANT before later video transitions. "
         "Show the INITIAL STATE: if clothing will be removed, it's still on; if someone enters, "
         "show the room without them. Focus on WHAT TO CHANGE from reference. "
-        "Describe POSES as static states (standing, seated, leaning). "
-        "No motion verbs (walking, running, reaching, heaving, turning). "
-        "Actions belong ONLY in video_prompt, never in image_prompt. "
+        "Describe the opening-frame pose and scene state. "
+        "Keep later transitions in the video prompt. "
+        "Later transitions belong in video_prompt; image_prompt may show action already underway. "
         "NEVER use character names or meta-instructions.\n"
     ) if has_image else (
-        "- image_prompt: the FIRST FRAME BEFORE action begins — a frozen still photograph. "
+        "- image_prompt: the OPENING INSTANT before later video transitions — a single still frame in the requested medium. "
         "Show the INITIAL STATE: if clothing will be removed, it's still on; if someone enters, "
-        "the room is empty. Describe static poses only (standing, seated, leaning). "
-        "No motion verbs (walking, running, reaching, heaving, turning). "
+        "the room is empty. Describe the opening-frame pose and scene state. "
+        "Keep later transitions in the video prompt. "
         "Characters (by appearance, NOT by name), positions, setting, lighting, mood.\n"
     )
 
@@ -10580,15 +11181,15 @@ def plan_short_film_from_story(
         "- Let the story concept guide you — don't force cinematic complexity onto simple content.\n\n"
         f"{image_instruction}\n"
         "IMAGE PROMPT GUIDE (how to write image_prompt values):\n"
-        "The image_prompt EDITS the reference photo to create a starting frame for each "
+        "The image_prompt EDITS the reference image to create a starting frame for each "
         "scene. Match your approach to the camera style above — vary angle and framing "
         "when the story calls for it, maintain continuity when it doesn't.\n\n"
-        "The image editor starts with the reference photo and applies your changes. "
+        "The image editor starts with the reference image and applies your changes. "
         "Focus your prompt on WHAT TO CHANGE — new camera angles, different framing, "
         "new settings, repositioned characters, lighting shifts. You do NOT need to "
-        "re-describe things that stay the same as the reference photo.\n\n"
+        "re-describe things that stay the same as the reference image.\n\n"
         "IMPORTANT — what each prompt does:\n"
-        "- image_prompt = the FIRST FRAME BEFORE action begins. Describe the shot setup: camera "
+        "- image_prompt = the OPENING INSTANT before later video transitions. Describe the shot setup: camera "
         "angle, framing, setting, lighting, character positions.\n"
         "- video_prompt = all motion, action, dialogue, gestures, camera movement\n\n"
         "WHEN TO DESCRIBE CHARACTERS: When you change the setting to a new location, "
@@ -10625,9 +11226,9 @@ def plan_short_film_from_story(
         "- Character names ARE only allowed in spoken dialogue in the video_prompt\n"
         "- Do NOT start with 'Edit the provided image'\n"
         "- Do NOT use meta-language ('preserve', 'maintain', 'keep unchanged')\n"
-        "- image_prompt = STILL PHOTOGRAPH. No motion verbs whatsoever: no walking, "
-        "running, reaching, heaving, turning, gesturing, raising, dancing. "
-        "Describe static poses only (standing, seated, leaning). All action belongs in video_prompt.\n"
+        "- image_prompt shows one opening frame in the requested medium. "
+        "Preserve the opening pose, including action already underway when requested. "
+        "Keep later transitions and subsequent actions in video_prompt.\n"
         "- Carry forward cumulative visual state changes: if a character got wet, "
         "injured, or changed clothes earlier, mention that difference.\n"
         f"{char_rule}\n"

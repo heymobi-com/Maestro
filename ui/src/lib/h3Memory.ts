@@ -3,9 +3,44 @@ import type { ModelOptions, SlidingWindowMemoryPolicy } from '../types'
 // 17*n+5 frames at 24fps: 29.958s, outside H3's published 15s envelope.
 export const H3_EXPERIMENTAL_MAX_FRAMES = 719
 
+/** Older Flex backends expose only a native pass; newer ones own H3 history. */
+export function isPikaFlexSinglePass(options?: ModelOptions | null): boolean {
+  return options?.minimax_h3_pika_flex === true
+    && !(options.sliding_window === true && options.video_continuation === true)
+}
+
+/** Resolve Pika Flex identity from the selected model before async options load. */
+export function isPikaFlexModelType(
+  modelType: unknown,
+  options?: ModelOptions | null,
+): boolean {
+  return modelType === 'minimax_h3_pika_flex'
+    || modelType === 'minimax_h3_ref2va_pika_flex'
+    || (!!modelType && options?.model_type === modelType
+      && options.minimax_h3_pika_flex === true)
+}
+
+/** Clear only the unsupported First Block cache fields for the effective Pika request. */
+export function clearPikaFlexCacheSettings<T extends {
+  skip_steps_cache_type?: unknown
+  skip_steps_multiplier?: unknown
+  skip_steps_start_step_perc?: unknown
+}>(
+  modelType: unknown,
+  params: T,
+  options?: ModelOptions | null,
+): T {
+  if (!isPikaFlexModelType(modelType, options)) return params
+  params.skip_steps_cache_type = ''
+  delete params.skip_steps_multiplier
+  delete params.skip_steps_start_step_perc
+  return params
+}
+
 export function supportsH3ExtendedDuration(options?: ModelOptions | null): boolean {
   return !!options && !options.audio_only && options.model_type !== 'viggle_animate'
     && !options.minimax_h3_fasth3
+    && !options.minimax_h3_pika_flex
     && String(options.architecture || '').startsWith('minimax_h3')
 }
 

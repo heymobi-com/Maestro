@@ -57,7 +57,7 @@ class TestSolEngineSourceContracts(unittest.TestCase):
         )
 
     def test_sol_runtime_is_default_on_supported_hardware_with_legacy_fallback(self):
-        profile = (ROOT / "launcher_profile.js").read_text(encoding="utf-8")
+        profile = (ROOT / "scripts" / "pinokio" / "launcher_profile.js").read_text(encoding="utf-8")
         torch_script = (ROOT / "torch.js").read_text(encoding="utf-8")
         sol_script = (ROOT / "sol_torch.js").read_text(encoding="utf-8")
         menu = (ROOT / "pinokio.js").read_text(encoding="utf-8")

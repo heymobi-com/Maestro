@@ -9,6 +9,7 @@ import { MediaTrimDialog } from '../shared/MediaTrimDialog'
 import { useStore } from '../../stores/useStore'
 import { isKreaIdentityEdit, normalizeKreaIdentitySettings } from '../../lib/kreaIdentityControls'
 import { getUploadUrl, fetchOutputMetadata, getFileUrl, moveOutput, uploadImage } from '../../api/client'
+import { requestOpenComfyUIWorkflow, type ComfyUIScalar } from '../../api/comfyui'
 import type { EditorAsset, OutputFile, OutputMetadata } from '../../types'
 import { formatGenerationDuration } from '../../lib/format'
 import { formatDuration } from '../../lib/durationPlanning'
@@ -16,6 +17,7 @@ import { modelDisplayName } from '../../lib/modelDisplay'
 import { sendToGalleryInput, useGalleryInputs, type GalleryInputTarget } from '../../lib/galleryInputs'
 import { getVideoPosterUrl } from '../../lib/thumbnailCache'
 import { useVideoPosterSize } from '../../lib/useVideoPosterSize'
+import { getGalleryVideoIdentity, useGalleryVideoFrameAspect } from '../../lib/galleryVideoFit'
 import { useMediaDuration } from '../../lib/mediaDuration'
 import { getMediaTimestamp } from '../../lib/mediaTimestamp'
 import { useDirectorAwareReroll } from '../../lib/directorReroll'
@@ -130,8 +132,11 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const saveRecipeFromOutput = useStore(s => s.saveRecipeFromOutput)
   const nsfwMode = useStore(s => !!s.servicesConfig?.nsfw_mode)
 
-  const [meta, setMeta] = useState<OutputMetadata | null>(null)
-  const [metaLoaded, setMetaLoaded] = useState(false)
+  const fileIdentity = getGalleryVideoIdentity(file)
+  const [metaEntry, setMetaEntry] = useState<{ identity: string; value: OutputMetadata } | null>(null)
+  const [metaLoadedIdentity, setMetaLoadedIdentity] = useState<string | null>(null)
+  const meta = metaEntry?.identity === fileIdentity ? metaEntry.value : null
+  const metaLoaded = metaLoadedIdentity === fileIdentity
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [deleteError, setDeleteError] = useState('')
   const [deleting, setDeleting] = useState(false)
@@ -162,7 +167,12 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   const actionMenuPopupRef = useRef<HTMLDivElement>(null)
   const itemRef = useRef<HTMLDivElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
-  const posterSize = useVideoPosterSize(videoRef, file.type === 'video' ? file.url : '')
+  const currentFileIdentityRef = useRef(fileIdentity)
+  useLayoutEffect(() => {
+    currentFileIdentityRef.current = fileIdentity
+  }, [fileIdentity])
+  const videoFit = useGalleryVideoFrameAspect(fileIdentity, meta?.media_info, file.size, videoRef)
+  const posterSize = useVideoPosterSize(videoRef, file.type === 'video' ? fileIdentity : '')
   const measuredMediaInfo = meta?.media_info
   const durationSeed = measuredMediaInfo?.size_bytes === file.size
     ? measuredMediaInfo.duration_seconds
@@ -194,16 +204,23 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     if (!el) return
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries[0].isIntersecting) {
-          setMetaLoaded(true)
-          fetchOutputMetadata(file.name, file.workspace).then(setMeta).catch(() => {})
+        if (entries[0].isIntersecting && currentFileIdentityRef.current === fileIdentity) {
+          observer.disconnect()
+          setMetaLoadedIdentity(fileIdentity)
+          fetchOutputMetadata(file.name, file.workspace)
+            .then(value => {
+              if (currentFileIdentityRef.current === fileIdentity) {
+                setMetaEntry({ identity: fileIdentity, value })
+              }
+            })
+            .catch(() => {})
         }
       },
       { threshold: 0.1 }
     )
     observer.observe(el)
     return () => observer.disconnect()
-  }, [file.name, file.workspace, metaLoaded])
+  }, [file.name, file.workspace, fileIdentity, metaLoaded])
 
   // Multi-window media becomes gallery-visible before its final sidecar is
   // necessarily written.  The first request can therefore return embedded
@@ -215,11 +232,11 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
     let cancelled = false
     fetchOutputMetadata(file.name, file.workspace)
       .then(nextMeta => {
-        if (!cancelled) setMeta(nextMeta)
+        if (!cancelled) setMetaEntry({ identity: fileIdentity, value: nextMeta })
       })
       .catch(() => {})
     return () => { cancelled = true }
-  }, [file.name, file.workspace, file.metadata_ready, file.metadata_updated_at, metaLoaded, meta])
+  }, [file.name, file.workspace, file.metadata_ready, file.metadata_updated_at, fileIdentity, metaLoaded, meta])
 
   // Pause video when scrolled out of view (but don't auto-play when scrolled in)
   useEffect(() => {
@@ -230,6 +247,16 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   }, [isActive])
 
   const params = meta?.params as Record<string, unknown> | null
+  const comfyWorkflowId = params?.generation_engine === 'comfyui' && typeof params.comfyui_workflow_id === 'string'
+    ? params.comfyui_workflow_id
+    : null
+  const comfyInputs = (() => {
+    const value = params?.comfyui_inputs
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+    return Object.fromEntries(Object.entries(value).filter(([, item]) =>
+      typeof item === 'string' || typeof item === 'boolean' || (typeof item === 'number' && Number.isFinite(item)),
+    )) as Record<string, ComfyUIScalar>
+  })()
   const uploadFilenames = meta?.upload_filenames as Record<string, string | string[]> | undefined
   const mediaTimestamp = getMediaTimestamp(meta?.timestamp, file.created_at)
 
@@ -431,9 +458,13 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
   }, [index, onPlaybackStart])
 
   const handleLoadSettings = useCallback(() => {
+    if (comfyWorkflowId) {
+      requestOpenComfyUIWorkflow(comfyWorkflowId, comfyInputs)
+      return
+    }
     setSelectedOutput(index)
     setTimeout(() => loadSettingsFromOutput(), 50)
-  }, [index, setSelectedOutput, loadSettingsFromOutput])
+  }, [comfyWorkflowId, comfyInputs, index, setSelectedOutput, loadSettingsFromOutput])
 
   // The sidecar of a Director clip records the run that rendered it but not the project
   // itself: the brief, the reference manifest and the transcript live in the run. So for
@@ -885,11 +916,14 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
       onClick={handleSelect}
     >
       {/* Media player — bg-media-canvas keeps the letterbox dark even on light themes */}
-      <div className="relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-t-[10px] bg-media-canvas">
+      <div
+        className="relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-t-[10px] bg-media-canvas"
+        style={{ aspectRatio: file.type === 'video' ? videoFit.frameAspect : undefined }}
+      >
         {file.type === 'video' ? (
           <video
             ref={videoRef}
-            key={file.url}
+            key={fileIdentity}
             src={file.url}
             poster={posterSize ? getVideoPosterUrl(file.url, posterSize) ?? undefined : undefined}
             preload="none"
@@ -900,6 +934,7 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
             muted={!isActive}
             data-gallery-media="true"
             onPlay={handlePlaybackStart}
+            onLoadedMetadata={videoFit.onLoadedMetadata}
           />
         ) : file.type === 'audio' ? (
           <div className="flex flex-col items-center gap-4">
@@ -1064,8 +1099,8 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
               }`}
               title={isDirectorChild
                 ? 'Load settings: in Studio, or in the Director project that rendered this clip'
-                : 'Load settings'}
-              aria-label="Load settings"
+                : comfyWorkflowId ? 'Use ComfyUI settings' : 'Load settings'}
+              aria-label={isDirectorChild ? 'Load settings' : comfyWorkflowId ? 'Use ComfyUI settings' : 'Load settings'}
               aria-haspopup={isDirectorChild ? 'menu' : undefined}
               aria-expanded={isDirectorChild ? showLoadMenu : undefined}
             >
@@ -1451,6 +1486,14 @@ export function MediaFeedItem({ file, index, isActive, onActivate, onPlaybackSta
             {meta?.model_details?.sample_rate && <>
               <dt className="text-text-muted">Audio</dt>
               <dd className="text-text-secondary">{meta.model_details.sample_rate / 1000} kHz · {meta.model_details.channels === 2 ? 'stereo' : `${meta.model_details.channels} channel`}</dd>
+            </>}
+            {meta?.model_details?.speech_generation && <>
+              <dt className="text-text-muted">Speech parts</dt>
+              <dd className={meta.model_details.speech_generation.incomplete ? 'text-amber-400' : 'text-text-secondary'}>
+                {meta.model_details.speech_generation.completed_chunks ?? 0} / {meta.model_details.speech_generation.total_chunks ?? 0} generated
+                {meta.model_details.speech_generation.incomplete ? ' · Partial output' : ''}
+                {meta.model_details.speech_generation.warnings?.map((warning, index) => <p key={index} className="mt-1 text-amber-400">{warning}</p>)}
+              </dd>
             </>}
             {(meta?.model_details?.artists?.length || meta?.model_details?.artist) && <>
               <dt className="text-text-muted">Music LoRAs</dt>

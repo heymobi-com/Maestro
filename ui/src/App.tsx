@@ -24,8 +24,11 @@ const StorageDashboard = lazy(() => import('./components/StorageDashboard/Storag
 const RetakeDialog = lazy(() => import('./components/RetakeDialog').then(module => ({default: module.RetakeDialog})))
 const RecipesOverlay = lazy(() => import('./components/Recipes/RecipesOverlay').then(module => ({default: module.RecipesOverlay})))
 const EditorWorkspace = lazy(() => import('./editor/EditorWorkspace').then(module => ({default: module.EditorWorkspace})))
+const WorldExplorer = lazy(() => import('./components/Worlds/WorldExplorer').then(module => ({default: module.WorldExplorer})))
 
 function App() {
+  const worldsOpen = useStore(s => s.servicesConfig?.worlds_enabled === true && s.worldsOpen)
+  const setWorldsOpen = useStore(s => s.setWorldsOpen)
   const loadModels = useStore(s => s.loadModels)
   const loadOutputs = useStore(s => s.loadOutputs)
   const loadWorkspaces = useStore(s => s.loadWorkspaces)
@@ -48,6 +51,11 @@ function App() {
   const controlsReady = useStore(s => s.modelsLoaded && !s.modelsLoading && !s.modelsLoadError)
   const isMobile = useIsMobileSidecar()
   const isEditor = sidebarMode === 'editor'
+
+  const openWorlds = () => {
+    if (isMobile) setSidebarOpen(false)
+    setWorldsOpen(true)
+  }
 
   useEffect(() => {
     const startup = createAppStartup({
@@ -136,7 +144,7 @@ function App() {
         <Suspense fallback={<p role="status" className="m-auto text-sm text-text-muted">Loading editor…</p>}><EditorWorkspace /></Suspense>
       ) : (
         <>
-          <Sidebar />
+          <Sidebar onOpenWorlds={openWorlds} />
           <MainContent />
         </>
       )}
@@ -146,6 +154,17 @@ function App() {
       <DeferredPanel active={storageOpen}><StorageDashboard /></DeferredPanel>
       <DeferredPanel active={recipesOpen}><RecipesOverlay /></DeferredPanel>
       <DeferredPanel active={retakeOpen}><RetakeDialog /></DeferredPanel>
+      {worldsOpen && (
+        <button
+          type="button"
+          aria-label="Close World Explorer"
+          onClick={() => setWorldsOpen(false)}
+          className="fixed inset-0 z-[84] cursor-default bg-black/40"
+        />
+      )}
+      <DeferredPanel active={worldsOpen}>
+        <WorldExplorer open={worldsOpen} onClose={() => setWorldsOpen(false)} />
+      </DeferredPanel>
       <AssistantWidget />
       {/* OomRecoveryBanner is a fixed-position overlay — renders nothing
           unless the latest job/pipeline failure has oom_info attached.

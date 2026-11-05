@@ -1,4 +1,3 @@
-import { Settings, X } from 'lucide-react'
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useState, type CSSProperties } from 'react'
 import { useStore } from '../../stores/useStore'
 import { AvatarControls } from './AvatarControls'
@@ -28,14 +27,18 @@ import { VoiceRefSection } from './VoiceRefSection'
 import { ToolsPanel } from './ToolsPanel'
 import { HardwareStatusBar } from './HardwareStatusBar'
 import { VideoWorkflowSelector } from './VideoWorkflowSelector'
+import { ComfyUIEngineControl } from './ComfyUIEngineControl'
 import { ImageWorkflowSelector } from './ImageWorkflowSelector'
 import { ImageWorkflowControls } from './ImageWorkflowControls'
 import { ControlVideoSection } from './ControlVideoSection'
-import { AppModeToggle, MaestroBrand } from '../AppModeNavigation'
+import { SidebarHeader } from './SidebarHeader'
 import { CharacterToolbarContext, PromptDock, SidebarLayoutContext } from './SidebarPanels'
 import { StartupStatus } from '../StartupStatus'
 
 const DirectorChat = lazy(() => import('./DirectorChat').then(module => ({default: module.DirectorChat})))
+const StudioTitlesPanel = lazy(() => import('../../editor/StudioTitlesPanel').then(module => ({
+  default: module.StudioTitlesPanel,
+})))
 
 function isKeyboardInput(element: Element | null): boolean {
   if (element instanceof HTMLTextAreaElement) return !element.disabled && !element.readOnly
@@ -62,7 +65,7 @@ function inputRevealBounds(input: HTMLElement) {
   return input.getBoundingClientRect()
 }
 
-export function Sidebar() {
+export function Sidebar({ onOpenWorlds, embedded = false }: { onOpenWorlds?: () => void; embedded?: boolean } = {}) {
   const toggleSettings = useStore(s => s.toggleSettings)
   const generationMode = useStore(s => s.generationMode)
   const imageMode = useStore(s => s.params.image_mode)
@@ -74,6 +77,8 @@ export function Sidebar() {
   const selectedModel = useStore(s => s.models.find(model => model.model_type === s.params.model_type))
   const isMobile = useIsMobileSidecar()
   const [characterSlot, setCharacterSlot] = useState<HTMLDivElement | null>(null)
+  const [enhancementSlot, setEnhancementSlot] = useState<HTMLDivElement | null>(null)
+  const [titlesFooterHost, setTitlesFooterHost] = useState<HTMLDivElement | null>(null)
   const [sidebarElement, setSidebarElement] = useState<HTMLElement | null>(null)
   const [settingsElement, setSettingsElement] = useState<HTMLDivElement | null>(null)
   const layout = useMemo(() => ({ sidebar: sidebarElement, settings: settingsElement }), [sidebarElement, settingsElement])
@@ -86,7 +91,9 @@ export function Sidebar() {
     let focusFrame = 0
     const resize = () => {
       const input = document.activeElement
-      const editing = sidebarOpen && !!sidebarElement?.contains(input) && isKeyboardInput(input)
+      const insideKeyboardSurface = !!sidebarElement?.contains(input)
+        || !!input?.closest('[data-sidebar-overlay]')
+      const editing = sidebarOpen && insideKeyboardSurface && isKeyboardInput(input)
       // Browser chrome and restored tabs can leave innerHeight much taller
       // than the visible page without a keyboard. Measure the actual viewport
       // while idle, retaining that baseline only during text entry. This also
@@ -189,6 +196,7 @@ export function Sidebar() {
   const toolsTool = useStore(s => s.toolsTool)
   const toolsUpscaleMedia = useStore(s => s.toolsUpscaleMedia)
   const videoWorkflow = useStore(s => s.studioVideoWorkflow)
+  const isTitles = isVideo && videoWorkflow === 'titles'
   const imageWorkflow = useStore(s => s.studioImageWorkflow)
   const isUpscale = isTools && toolsTool === 'upscale'
   const isImageUpscale = isUpscale && toolsUpscaleMedia === 'image'
@@ -219,7 +227,7 @@ export function Sidebar() {
   const isBlend = isVideo && imageMode === 4
   const isDirector = sidebarMode === 'director'
   const isI2vOnly = modelOptions?.i2v_class && !modelOptions?.t2v_class
-  const hasPrompt = !isStandaloneTool && !isAnimate && !(isAudio && ['sfx', 'mixer', 'music'].includes(audioSubMode))
+  const hasPrompt = !isStandaloneTool && !isAnimate && !isTitles && !(isAudio && ['sfx', 'mixer', 'music'].includes(audioSubMode))
 
   // Video Transform controls backed by the legacy edit-mode engines.
   const editControls = (
@@ -260,21 +268,30 @@ export function Sidebar() {
   const studioControls = (
     <SidebarLayoutContext.Provider value={layout}>
     <CharacterToolbarContext.Provider value={characterSlot}>
+      <>
       <div data-testid="studio-body-scroll" className="studio-scroll-body flex min-h-0 flex-1 flex-col">
       {/* Prompt Edit/Recast → Image Mode round-trip banner. Visible while
           a boundary anchor or Recast reference is being edited; null otherwise. */}
-      <AnchorReturnBanner />
+      {!isTitles && <AnchorReturnBanner />}
 
-      <div data-testid="studio-workflow-header" className="studio-workflow-header flex shrink-0 flex-col gap-2 px-3 pb-2 pt-3">
+      {!embedded && <div data-testid="studio-workflow-header" className="studio-workflow-header flex shrink-0 flex-col gap-2 px-3 pb-2 pt-3">
         <GenerationModeSelector />
 
         {/* Studio's user-facing hierarchy is media first, workflow second.
             The workflow selectors route into the legacy video/avatar/tools
             engines so saved jobs and API behavior remain compatible. */}
-        {isVideoWorkspace && <VideoWorkflowSelector />}
+        {isVideoWorkspace && <VideoWorkflowSelector onOpenWorlds={onOpenWorlds} />}
         {isImageWorkspace && <ImageWorkflowSelector />}
         {isAudioWorkspace && <AudioSubModeToggle />}
-      </div>
+        {(isVideoWorkspace || isImageWorkspace || isAudioWorkspace) && (
+          <ComfyUIEngineControl modelType={selectedModel?.model_type || ''} kind={isImageWorkspace ? 'image' : isAudioWorkspace ? 'audio' : 'video'} />
+        )}
+      </div>}
+      {isTitles ? (
+        <Suspense fallback={<p role="status" className="m-3 text-xs text-text-muted">Loading Titles…</p>}>
+          <StudioTitlesPanel footerHost={titlesFooterHost} />
+        </Suspense>
+      ) : (
       <div className="studio-composition mx-3 flex grow shrink-0 basis-auto flex-col rounded-2xl border border-border bg-bg-primary/30" data-has-prompt={hasPrompt}>
       <div data-testid="studio-controls-scroll" className={`${hasPrompt ? 'studio-inputs shrink-0' : 'grow shrink-0'} flex min-w-0 flex-col gap-3 p-2.5 [&>*]:shrink-0`}>
         {isUpscale ? (
@@ -340,13 +357,24 @@ export function Sidebar() {
       </div>
 
       {hasPrompt && (
-        <PromptDock>{isMultiClip ? <MultiClipEditor /> : <PromptInput />}</PromptDock>
+        <PromptDock toolbarHost={enhancementSlot}>{isMultiClip ? <MultiClipEditor /> : <PromptInput />}</PromptDock>
       )}
       </div>
+      )}
       </div>
-      {!isStandaloneTool && <StudioFooter onCharacterSlot={setCharacterSlot} onAnchor={setSettingsElement} />}
+      {/* Keep generation controls outside the scrolling prompt/input body. */}
+      {!isStandaloneTool && !isTitles && <StudioFooter onCharacterSlot={setCharacterSlot} onEnhancementSlot={hasPrompt && !isMultiClip ? setEnhancementSlot : undefined} onAnchor={setSettingsElement} />}
+      <div ref={setTitlesFooterHost} data-testid="titles-footer-host" className="studio-footer shrink-0" hidden={!isTitles} />
+      </>
     </CharacterToolbarContext.Provider>
     </SidebarLayoutContext.Provider>
+  )
+
+  if (embedded) return (
+    <div ref={setSidebarElement} className="maestro-sidebar flex h-full min-h-0 w-full min-w-0 flex-col bg-bg-secondary" data-testid="editor-ai-controls">
+      <StartupStatus />
+      {studioControls}
+    </div>
   )
 
   // Mobile: overlay drawer
@@ -363,19 +391,7 @@ export function Sidebar() {
           data-keyboard-open={visibleViewport?.keyboardOpen ?? false}
           className={`maestro-sidebar fixed top-0 h-dvh w-[380px] max-w-[94vw] bg-bg-secondary border-r border-border z-50 flex flex-col transition-[left] duration-300 ease-in-out ${sidebarOpen ? 'left-0' : '-left-full'}`}>
           {/* Header */}
-          <div className="shrink-0 px-4 py-3 border-b border-border flex items-center justify-between">
-            <MaestroBrand compact />
-            <div className="flex items-center gap-1.5">
-              <AppModeToggle size="sm" />
-              <button
-                onClick={() => setSidebarOpen(false)}
-                aria-label="Close sidecar"
-                className="p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors"
-              >
-                <X size={16} />
-              </button>
-            </div>
-          </div>
+          <SidebarHeader mobile onSettings={toggleSettings} onClose={() => setSidebarOpen(false)} />
           <StartupStatus />
           {isDirector ? <Suspense fallback={<p role="status" className="m-3 text-xs text-text-muted">Loading Director…</p>}><DirectorChat /></Suspense> : studioControls}
           <div className="studio-hardware shrink-0"><HardwareStatusBar /></div>
@@ -388,19 +404,7 @@ export function Sidebar() {
   return (
     <aside ref={setSidebarElement} className="maestro-sidebar w-[420px] h-full bg-bg-secondary border-r border-border flex flex-col shrink-0">
       {/* Header */}
-      <div className="flex h-14 shrink-0 items-center justify-between border-b border-border px-4">
-        <MaestroBrand />
-        <div className="flex items-center gap-2">
-          <AppModeToggle />
-          <button
-            onClick={toggleSettings}
-            className="p-1.5 rounded-lg hover:bg-bg-hover text-text-secondary hover:text-text-primary transition-colors"
-            title="Settings"
-          >
-            <Settings size={16} />
-          </button>
-        </div>
-      </div>
+      <SidebarHeader onSettings={toggleSettings} onClose={() => setSidebarOpen(false)} />
       <StartupStatus />
       {isDirector ? <Suspense fallback={<p role="status" className="m-3 text-xs text-text-muted">Loading Director…</p>}><DirectorChat /></Suspense> : studioControls}
       <div className="studio-hardware shrink-0"><HardwareStatusBar /></div>

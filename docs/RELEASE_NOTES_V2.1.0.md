@@ -211,7 +211,7 @@ See [H3 Voice Audio](H3-Voice-Audio.md) and [TTS characters](TTS-Characters.md).
   cancellation, model selection, strength and window settings.
 
 See [fused H3 LoRAs](H3-Fused-LoRAs.md), [Face Refiner](H3-Face-Refiner.md)
-and the [H3/media port record](development/wan2gp-12-71-port-plan.md).
+and the [H3/media port record](technical/wan2gp-12-71-port.md).
 
 ## Media Flow, temporal upsampling and optional DLSS
 

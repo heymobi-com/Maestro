@@ -2,7 +2,7 @@ const {
   isSolCapable,
   needsCuda13DriverUpdate,
   runtimeProfile,
-} = require("./launcher_profile")
+} = require("./scripts/pinokio/launcher_profile")
 
 module.exports = async (kernel) => {
   const runtime = runtimeProfile(kernel)
@@ -37,6 +37,17 @@ module.exports = async (kernel) => {
           "uv pip install -r requirements.txt --index-strategy unsafe-best-match",
           "uv pip install hf-xet pip"
         ]
+      }
+    },
+    // Agent Access has its own CPU-only Python 3.11 environment. Keeping it
+    // separate prevents the MCP/ASGI stack from changing CUDA model wheels.
+    {
+      method: "shell.run",
+      params: {
+        venv: "env-agent",
+        venv_python: "3.11",
+        path: "app",
+        message: ["uv pip install -r requirements-agent-access.txt"]
       }
     },
     {

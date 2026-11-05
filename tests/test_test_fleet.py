@@ -28,6 +28,14 @@ class FleetTests(unittest.TestCase):
             self.assertIn("User jobs", self.run_target()["reason"])
             launch.assert_not_called()
 
+    def test_nested_bench_already_running_is_not_dispatched_again(self):
+        for script in (fleet.TEST_BENCH_SCRIPT, fleet.LEGACY_TEST_BENCH_SCRIPT):
+            with self.subTest(script=script):
+                status = {"ready": True, "running": True, "running_scripts": [script]}
+                with patch.object(fleet, "pterm_status", return_value=status), patch.object(fleet, "endpoint", return_value="http://pc:1234"), patch.object(fleet, "latest", return_value=None), patch.object(fleet.subprocess, "Popen") as launch:
+                    self.assertIn("existing test", self.run_target()["reason"])
+                    launch.assert_not_called()
+
     def test_uncertain_previous_receipt_is_not_retried(self):
         with patch.object(fleet, "pterm_status", return_value={"ready": True, "running": True}), patch.object(fleet, "endpoint", return_value="http://pc:1234"), patch.object(fleet, "latest", return_value={"status": "uncertain"}), patch.object(fleet.subprocess, "Popen") as launch:
             self.assertEqual(self.run_target()["status"], "deferred")
@@ -78,7 +86,7 @@ class FleetTests(unittest.TestCase):
         with patch.object(fleet, "pterm_status", return_value=status), patch.object(fleet, "endpoint", return_value="http://pc:9999"), patch.object(fleet, "latest", side_effect=[None, receipt]), patch.object(fleet, "busy_jobs", return_value=[]), patch.object(fleet, "collect", return_value=["new.zip"]), patch.object(fleet.subprocess, "Popen") as launch:
             record = self.run_target()
             command = launch.call_args.args[0]
-            self.assertEqual(command[:3], ["pterm", "start", "test_bench.js"])
+            self.assertEqual(command[:3], ["pterm", "start", fleet.TEST_BENCH_SCRIPT])
             self.assertIn("--base_url=http://127.0.0.1:4567", command)
             self.assertEqual(record["status"], "collected")
             self.assertEqual(record["files"], ["new.zip"])

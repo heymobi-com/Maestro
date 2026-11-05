@@ -107,4 +107,4 @@ The versioned source is
 Backend policies, Studio controls and Director clip-limit responses all
 consume the same rows and provenance. See also
 [Performance Auto-Tune](Performance-auto-tune.md#automatic-clip-and-window-durations)
-and the [memory benchmark guide](development/memory-benchmark.md).
+and the [memory benchmark guide](testing/memory-benchmark.md).

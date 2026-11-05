@@ -239,7 +239,7 @@ async function openFixture(browser, bundle, scenario, viewport = {width: 1360, h
         return json(route, {configured: true, nsfw_mode: false, auto_performance: false});
       }
       if (method === 'GET' && pathname === '/api/v1/model-visibility') {
-        return json(route, {configured: true, enabled_models: models.map(model => model.model_type), mode_overrides: {}, initialized_mature_models: [], defaults_version: 23});
+        return json(route, {configured: true, enabled_models: models.map(model => model.model_type), mode_overrides: {}, initialized_mature_models: [], defaults_version: scenario.visibilityDefaultsVersion ?? 26});
       }
       if (method === 'GET' && pathname === '/api/v1/presets') return json(route, {presets: []});
       if (method === 'GET' && pathname === '/api/v1/h3-window-overrides') return json(route, {overrides: {}});
@@ -294,6 +294,10 @@ async function openFixture(browser, bundle, scenario, viewport = {width: 1360, h
         return json(route, {models: []});
       }
       if (method === 'GET' && pathname === '/api/v1/llm/status') return json(route, {loaded: false, status: 'unloaded'});
+      if (method === 'GET' && pathname === '/api/v1/comfyui/status') return json(route, {
+        enabled: false, endpoint: 'http://127.0.0.1:8188', execution_timeout: 7200,
+        dedicated: false, routes: {}, pending_submissions: [],
+      });
       if (method === 'GET' && pathname === '/api/v1/workspaces') return json(route, {active: 'default', workspaces: [{name: 'default', path: 'default'}]});
       if (method === 'GET' && pathname === '/api/v1/outputs') return json(route, {outputs: [], total: 0});
       if (method === 'GET' && pathname === '/api/v1/system-config') return json(route, {});

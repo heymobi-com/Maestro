@@ -72,7 +72,7 @@ guard. Within a 3% denoising-time difference, lower measured VRAM wins. A single
 profile's repeated runs are observations, not proof that it beats another.
 Auto does not start background searches, retry failures, or run speculative
 generations. Use controlled manual comparisons or the existing
-[memory benchmark](development/memory-benchmark.md) to supply alternatives.
+[memory benchmark](testing/memory-benchmark.md) to supply alternatives.
 **Refresh learning** updates the readout; **Clear comparisons** discards this
 hardware/runtime's evidence without changing settings.
 

@@ -25,6 +25,8 @@ TERMINAL = {"completed", "failed", "cancelled", "canceled", "error"}
 PENDING = {"running", "uncertain", "dispatched", "restoration_pending", "interrupted"}
 MAX_BYTES = 32 * 1024 * 1024
 REF_PATTERN = re.compile(r"pinokio://[A-Za-z0-9.:-]+/api/[A-Za-z0-9_.-]+\Z")
+TEST_BENCH_SCRIPT = "tests/pinokio/test_bench.js"
+LEGACY_TEST_BENCH_SCRIPT = "test_bench.js"
 
 
 def stamp():
@@ -160,7 +162,11 @@ def run_target(executable, target, mode, directory, timeout, collect_only=False,
             record["remote"] = before
             record["files"] = collect(base, before, directory)
             return finish("collected")
-        if "test_bench.js" in status.get("running_scripts", []) or (before or {}).get("status") in PENDING or (saved or {}).get("status") in PENDING:
+        running_scripts = status.get("running_scripts", [])
+        if any(
+            script in running_scripts
+            for script in (TEST_BENCH_SCRIPT, LEGACY_TEST_BENCH_SCRIPT)
+        ) or (before or {}).get("status") in PENDING or (saved or {}).get("status") in PENDING:
             return finish("deferred", "An existing test is running or requires reconciliation")
         active = busy_jobs(base)
         if active:
@@ -172,7 +178,7 @@ def run_target(executable, target, mode, directory, timeout, collect_only=False,
         if state_path:
             write_json(state_path, record)
         with (directory / "pinokio-action.log").open("w", encoding="utf-8") as output:
-            process = subprocess.Popen([executable, "start", "test_bench.js", "--ref", ref,
+            process = subprocess.Popen([executable, "start", TEST_BENCH_SCRIPT, "--ref", ref,
                                         "--", "--mode=" + mode, "--base_url=" + worker_base],
                                        stdout=output, stderr=subprocess.STDOUT)
             deadline = time.monotonic() + timeout

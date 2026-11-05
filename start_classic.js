@@ -2,7 +2,7 @@ const {
   isRtx50,
   legacyRuntimeProfile,
   runtimeProfile,
-} = require("./launcher_profile")
+} = require("./scripts/pinokio/launcher_profile")
 
 module.exports = async (kernel) => {
   let port = await kernel.port()
@@ -38,6 +38,15 @@ module.exports = async (kernel) => {
     },
     daemon: true,
     run: [
+      {
+        // The controller runs separately from the classic generation server
+        // and remains available if either Maestro surface is stopped.
+        method: "shell.run",
+        params: {
+          path: ".",
+          message: ["node scripts/pinokio/agent_access_rpc.js autostart"],
+        },
+      },
       ...runtimeGuard,
       ...(hasRecoveryRuntime ? [{
         when: `{{!exists('${runtime.marker}')}}`,
@@ -52,7 +61,8 @@ module.exports = async (kernel) => {
           venv: selectedEnv,
           venv_python: selectedPython,
           env: {
-            SERVER_PORT: port
+            SERVER_PORT: port,
+            MAESTRO_LAUNCHER_SCRIPT: "start_classic.js",
           },
           path: "app",
           message: [

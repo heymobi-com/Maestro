@@ -2,7 +2,7 @@ const {
   isSolCapable,
   needsCuda13DriverUpdate,
   runtimeProfile,
-} = require("./launcher_profile")
+} = require("./scripts/pinokio/launcher_profile")
 
 const localWebEndpoint = (local) => {
   if (
@@ -25,7 +25,9 @@ const localWebEndpoint = (local) => {
       || urlPort !== port
     ) return null
 
-    return { url: local.url, port }
+    const webUiUrl = new URL(url.href)
+    webUiUrl.searchParams.set("maestro_ui_policy", "lan-v2")
+    return { url: local.url, webUiUrl: webUiUrl.href, port }
   } catch {
     return null
   }
@@ -33,7 +35,9 @@ const localWebEndpoint = (local) => {
 
 const testBenchMenu = (endpoint, info) => [{
   icon: "fa-solid fa-flask",
-  text: info.running("test_bench.js") ? "Developer tests (running)" : "Developer tests",
+  text: info.running("tests/pinokio/test_bench.js") || info.running("test_bench.js")
+    ? "Developer tests (running)"
+    : "Developer tests",
   menu: [
     ["smoke", "Diagnostics only"],
     ["prompt", "Prompt regression tests"],
@@ -43,12 +47,12 @@ const testBenchMenu = (endpoint, info) => [{
   ].map(([mode, text]) => ({
     icon: "fa-solid fa-flask",
     text,
-    href: `test_bench.js?mode=${mode}`,
+    href: `tests/pinokio/test_bench.js?mode=${mode}`,
     params: { mode, base_url: endpoint.url },
   })).concat([{
     icon: "fa-solid fa-toggle-on",
     text: "Enable local prompt tests (restart when idle)",
-    href: "test_bench_enable.js",
+    href: "tests/pinokio/test_bench_enable.js",
   }, {
     icon: "fa-regular fa-folder-open",
     text: "Saved test reports",
@@ -57,16 +61,55 @@ const testBenchMenu = (endpoint, info) => [{
   }]),
 }]
 
+const agentAccessMenu = (info, ready, running) => {
+  if (!ready) return [{
+    icon: "fa-solid fa-shield-halved",
+    text: "Set up Agent Access",
+    href: "agent_access.js",
+    params: { setup: true },
+  }]
+  const items = running
+    ? [{
+      icon: "fa-solid fa-terminal",
+      text: "Agent Access Terminal",
+      href: "agent_access.js",
+    }]
+    : [{
+      icon: "fa-solid fa-shield-halved",
+      text: "Start Agent Access and show local setup code",
+      href: "agent_access.js",
+      params: { setup: true },
+    }]
+  if (running) {
+    const local = info.local("agent_access.js") || {}
+    const url = typeof local.agent_access_url === "string" ? local.agent_access_url : ""
+    try {
+      const parsed = new URL(url)
+      if (parsed.protocol === "https:" && parsed.hostname === "127.0.0.1" && parsed.port) {
+        items.push({
+          icon: "fa-solid fa-arrow-up-right-from-square",
+          text: "Open Agent Access",
+          href: url,
+        })
+      }
+    } catch (_) {
+      // Record the URL only after the local HTTPS listener is ready.
+    }
+  }
+  return items
+}
+
 module.exports = {
   version: "8.0",
   title: "Maestro",
   description: "An all-in-one, 100% local AI creative studio, director, and multi-track editor. Generate with MiniMax H3, LTX-2.5/2.3, Wan, Flux, Qwen, and more; turn an idea or song into a planned production; then finish it on the timeline. Requires an NVIDIA GPU (6GB+ VRAM).",
-  icon: "maestro_simplified_icon_alpha.png",
+  icon: "docs/images/maestro-icon.png",
   menu: async (kernel, info) => {
     const runtime = runtimeProfile(kernel)
     const solCapable = isSolCapable(kernel)
     const cuda13DriverUpdateRequired = solCapable && needsCuda13DriverUpdate(kernel)
     const samReady = info.exists("app/services/sam/env/.maestro-sam-ready")
+    const agentAccessReady = info.exists("app/env-agent/pyvenv.cfg")
     // Do not gate this menu on kernel.gpu. Pinokio can render an app menu
     // before its hardware inventory has populated that property, which would
     // hide Start from supported systems. install.js retains the documented
@@ -78,6 +121,8 @@ module.exports = {
       sol_install: info.running("sol_install.js"),
       start: info.running("start.js"),
       start_sol: info.running("start_sol.js"),
+      start_classic: info.running("start_classic.js"),
+      agent_access: info.running("agent_access.js"),
       update: info.running("update.js"),
       huggingface_login: info.running("huggingface_login.js"),
       tailscale_setup: info.running("tailscale_setup.js"),
@@ -109,7 +154,7 @@ module.exports = {
         href: "huggingface_login.js",
       }]
     } else if (installed && solCapable && !cuda13DriverUpdateRequired && !runtimeReady
-      && !running.start && !running.start_sol) {
+      && !running.start && !running.start_sol && !running.start_classic) {
       return [{
         // An upgrade is an explicit user action. A default script href would
         // auto-run update.js (including git pull) just by opening this menu.
@@ -125,7 +170,7 @@ module.exports = {
         text: "<div><strong>Reset</strong><div>Revert to pre-install state</div></div>",
         href: "reset.js",
         confirm: "Are you sure you wish to reset the app?"
-      }]
+      }, ...agentAccessMenu(info, agentAccessReady, running.agent_access)]
     } else if (installed && solCapable && cuda13DriverUpdateRequired && !runtimeReady) {
       return [...(info.exists("app/env") ? [{
         default: true,
@@ -141,7 +186,7 @@ module.exports = {
         text: "<div><strong>Reset</strong><div>Revert to pre-install state</div></div>",
         href: "reset.js",
         confirm: "Are you sure you wish to reset the app?"
-      }]
+      }, ...agentAccessMenu(info, agentAccessReady, running.agent_access)]
     } else if (installed) {
       if (running.start) {
         const endpoint = localWebEndpoint(info.local("start.js"))
@@ -150,7 +195,7 @@ module.exports = {
             default: true,
             icon: "fa-solid fa-rocket",
             text: "Open Web UI",
-            href: endpoint.url,
+            href: endpoint.webUiUrl,
           }, {
             icon: "fa-solid fa-shield-halved",
             text: running.tailscale_setup
@@ -164,13 +209,13 @@ module.exports = {
             icon: 'fa-solid fa-terminal',
             text: "Terminal",
             href: "start.js",
-          }, ...testBenchMenu(endpoint, info)]
+          }, ...testBenchMenu(endpoint, info), ...agentAccessMenu(info, agentAccessReady, running.agent_access)]
         } else {
           return [{
             icon: 'fa-solid fa-terminal',
             text: "Terminal",
             href: "start.js",
-          }]
+          }, ...agentAccessMenu(info, agentAccessReady, running.agent_access)]
         }
       } else if (running.start_sol) {
         const endpoint = localWebEndpoint(info.local("start_sol.js"))
@@ -179,7 +224,7 @@ module.exports = {
             default: true,
             icon: "fa-solid fa-bolt",
             text: "Open Web UI (Sol Runtime)",
-            href: endpoint.url,
+            href: endpoint.webUiUrl,
           }, {
             icon: "fa-solid fa-shield-halved",
             text: running.tailscale_setup
@@ -193,20 +238,27 @@ module.exports = {
             icon: 'fa-solid fa-terminal',
             text: "Sol Runtime Terminal",
             href: "start_sol.js",
-          }, ...testBenchMenu(endpoint, info)]
+          }, ...testBenchMenu(endpoint, info), ...agentAccessMenu(info, agentAccessReady, running.agent_access)]
         }
         return [{
           icon: 'fa-solid fa-terminal',
           text: "Sol Runtime Terminal",
           href: "start_sol.js",
-        }]
+        }, ...agentAccessMenu(info, agentAccessReady, running.agent_access)]
+      } else if (running.start_classic) {
+        return [{
+          default: true,
+          icon: "fa-solid fa-terminal",
+          text: "Classic Engine Terminal",
+          href: "start_classic.js",
+        }, ...agentAccessMenu(info, agentAccessReady, running.agent_access)]
       } else if (running.reset) {
         return [{
           default: true,
           icon: 'fa-solid fa-terminal',
           text: "Resetting",
           href: "reset.js",
-        }]
+        }, ...agentAccessMenu(info, agentAccessReady, running.agent_access)]
       } else {
         return [{
           icon: "fa-solid fa-power-off",
@@ -279,7 +331,7 @@ module.exports = {
           text: "<div><strong>Reset</strong><div>Revert to pre-install state</div></div>",
           href: "reset.js",
           confirm: "Are you sure you wish to reset the app?"
-        }]
+        }, ...agentAccessMenu(info, agentAccessReady, running.agent_access)]
       }
     } else {
       return [{

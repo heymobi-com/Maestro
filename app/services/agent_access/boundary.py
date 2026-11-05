@@ -1,0 +1,1460 @@
+"""One authorization boundary for UI, REST, media, WebSockets and MCP.
+
+This module imports no MCP SDK or model code. The model backend and the bundled
+CPU controller use the same identity store and policy. Proxy headers never grant
+authority; local-device authority is limited to direct same-PC UI requests.
+"""
+from __future__ import annotations
+
+import hashlib
+import ipaddress
+import json
+import os
+import re
+import tempfile
+import threading
+from copy import deepcopy
+from pathlib import Path
+from urllib.parse import unquote, unquote_plus, urlsplit
+
+from starlette.datastructures import UploadFile
+from starlette.requests import Request
+from starlette.responses import HTMLResponse, JSONResponse
+
+from .auth import AuthError, LOCAL_DEVICE_PRINCIPAL
+from .catalog import required_scope
+from .context import credential_context, principal_context, public_origin_context, submission_context
+from .jobs import JournalError
+
+COOKIE_NAME = "maestro_owner"
+MUTATIONS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+MAX_JSON = 8 * 1024 * 1024
+MAX_MULTIPART_BODY = 500 * 1024 * 1024
+MAX_MULTIPART_HEADERS = 64 * 1024
+MAX_MULTIPART_HEADER_COUNT = 128
+MAX_MULTIPART_FIELDS = 128
+MAX_MULTIPART_FILES = 32
+MAX_MULTIPART_FIELD_BYTES = 1024 * 1024
+MULTIPART_CHUNK_SIZE = 64 * 1024
+MAX_CONCURRENT_MULTIPART = 2
+PUBLIC = frozenset({
+    "/api/v1/remote-access/pinokio/status",
+    "/api/v1/agent-access/status", "/api/v1/agent-access/request-console-code",
+    "/api/v1/agent-access/certificate",
+    "/api/v1/agent-access/local-challenge", "/api/v1/agent-access/local-approve",
+    "/api/v1/agent-access/owner-login", "/agent-access/login",
+    "/agent-access/certificate.pem", "/.well-known/maestro",
+    "/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp",
+    "/.well-known/oauth-authorization-server", "/.well-known/openid-configuration",
+    "/oauth/register", "/oauth/authorize", "/oauth/token", "/oauth/revoke",
+})
+OWNER_PREFIXES = (
+    "/api/v1/agent-access/settings", "/api/v1/agent-access/grants",
+    "/api/v1/agent-access/local-clients",
+    "/api/v1/agent-access/browser-code", "/api/v1/agent-access/audit",
+    "/api/v1/agent-access/authorizations", "/api/v1/testbench", "/api/v1/promptbench",
+)
+_SECRET_KEY = re.compile(
+    r"(?:^|_)(?:api_?key|token|access_token|refresh_token|password|secret(?:_?key)?|private_key|authorization|authorization_header|bearer_token)$",
+    re.IGNORECASE,
+)
+_CONSOLE_CODE = re.compile(r"(\[Maestro Agent Access\][^\r\n]*?(?:owner|browser) code\s*:)\s*[^\r\n]+", re.IGNORECASE)
+_BEARER_VALUE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE)
+_HF_VALUE = re.compile(r"\bhf_[A-Za-z0-9]{20,}\b")
+_URL_IN_TEXT = re.compile(r"\b(?:https?|wss?)://[^\s\"'<>]+", re.IGNORECASE)
+_URL_SECRET_QUERY_KEYS = frozenset({
+    "token", "api_key", "apikey", "access_token", "refresh_token", "client_secret",
+})
+_WINDOWS_ABSOLUTE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
+_MEDIA_KEYS = frozenset({
+    "path", "image", "image_path", "image_start", "image_end", "video_path", "audio_path",
+    "input_path", "input_file", "source_path", "file_path", "output_path", "output_dir",
+    "image_refs", "ref_images", "reference_images", "video_refs", "audio_refs",
+    "control_video", "video_guide", "audio_guide", "audio_prompt", "voice_ref",
+    "audio_reference", "reference_video", "reference_audio", "init_image",
+})
+
+
+def cookie_name(runtime, scheme: str | None = None) -> str:
+    """Return an installation cookie isolated by transport scheme.
+
+    Browser cookies are host-scoped but not port-scoped, and browsers prevent
+    an insecure HTTP response from replacing a Secure cookie with the same
+    name. Pinokio's localhost HTTP UI and its HTTPS controller can share a
+    hostname, so they need distinct names. The unsuffixed name remains the
+    legacy name and is accepted during upgrade.
+    """
+    base = COOKIE_NAME + "_" + runtime.installation_id.replace("-", "")[:12]
+    if scheme in {"https", "wss"}:
+        return base + "_https"
+    if scheme in {"http", "ws"}:
+        return base + "_http"
+    return base
+
+
+def cookie_names(runtime, scheme: str | None = None) -> tuple[str, ...]:
+    """Current cookie followed by the previous unsuffixed cookie name."""
+    names = (cookie_name(runtime, scheme), cookie_name(runtime))
+    return tuple(dict.fromkeys(names))
+
+
+def redact(value):
+    if isinstance(value, dict):
+        return {
+            key: ("[redacted]" if _is_secret_key(key) else redact(item))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact(item) for item in value]
+    if isinstance(value, str):
+        text = _HF_VALUE.sub("[redacted]", _BEARER_VALUE.sub("Bearer [redacted]", _CONSOLE_CODE.sub(r"\1 [redacted]", value)))
+        return _URL_IN_TEXT.sub(_redact_url_match, text)
+    return value
+
+
+def _redact_url_match(match) -> str:
+    candidate = match.group(0)
+    suffix = ""
+    while candidate and candidate[-1] in ".,;)]}":
+        suffix = candidate[-1] + suffix
+        candidate = candidate[:-1]
+    try:
+        parts = urlsplit(candidate)
+        if not parts.scheme or not parts.netloc or not parts.query:
+            return match.group(0)
+    except ValueError:
+        return match.group(0)
+    base, marker, query_and_fragment = candidate.partition("?")
+    if not marker:
+        return match.group(0)
+    query, fragment_marker, fragment = query_and_fragment.partition("#")
+    redacted_segments = []
+    changed = False
+    for segment in query.split("&"):
+        raw_key, equals, raw_value = segment.partition("=")
+        normalized_key = _normalize_key(unquote_plus(raw_key))
+        if normalized_key in _URL_SECRET_QUERY_KEYS and equals and raw_value:
+            redacted_segments.append(raw_key + "=%5Bredacted%5D")
+            changed = True
+        else:
+            redacted_segments.append(segment)
+    if not changed:
+        return match.group(0)
+    sanitized = base + "?" + "&".join(redacted_segments)
+    if fragment_marker:
+        sanitized += "#" + fragment
+    return sanitized + suffix
+
+
+def _is_secret_key(key: object) -> bool:
+    # API responses use both snake_case and camelCase credential names.
+    normalized = _normalize_key(key)
+    return _SECRET_KEY.search(normalized) is not None
+
+
+def _normalize_key(key: object) -> str:
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(key)).replace("-", "_").casefold()
+
+
+def _reject_redacted_credentials(value, *, depth: int = 0) -> None:
+    """Reject placeholders in write payloads so they cannot erase real secrets."""
+    if depth > 40:
+        raise AuthError(400, "Request nesting is too deep")
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if _is_secret_key(key) and isinstance(item, str) and item.strip().casefold() == "[redacted]":
+                raise AuthError(400, "Replace redacted credential placeholders before submitting this change")
+            _reject_redacted_credentials(item, depth=depth + 1)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _reject_redacted_credentials(item, depth=depth + 1)
+
+
+def _file_receive(path: Path, upstream=None, *, chunk_size: int = MULTIPART_CHUNK_SIZE):
+    """Replay a private spool file as bounded ASGI request chunks."""
+    handle = path.open("rb")
+    sent_final = False
+
+    async def receive():
+        nonlocal sent_final
+        if sent_final:
+            if upstream is not None:
+                return await upstream()
+            return {"type": "http.request", "body": b"", "more_body": False}
+        body = handle.read(chunk_size)
+        if body:
+            return {"type": "http.request", "body": body, "more_body": True}
+        sent_final = True
+        handle.close()
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    receive.close_spool = handle.close
+    return receive
+
+
+def secure_transport(scope: dict) -> bool:
+    if scope.get("scheme") in {"https", "wss"}:
+        return True
+    headers = {k.lower(): v for k, v in scope.get("headers", [])}
+    try:
+        host = urlsplit("http://" + headers.get(b"host", b"").decode("latin1")).hostname
+    except ValueError:
+        return False
+    peer = str((scope.get("client") or ("", 0))[0])
+    try:
+        loopback = ipaddress.ip_address(peer).is_loopback
+    except ValueError:
+        loopback = False
+    # A loopback proxy is not evidence that the caller is local. Do not trust a
+    # forwarded header here; a configured ASGI proxy layer may set scheme=https.
+    forwarded = any(k.startswith(b"x-forwarded-") or k == b"forwarded" for k in headers)
+    return loopback and host in {"127.0.0.1", "localhost", "::1"} and not forwarded
+
+
+def same_origin(scope: dict) -> bool:
+    headers = {k.lower(): v.decode("latin1") for k, v in scope.get("headers", [])}
+    origin = headers.get(b"origin")
+    if not origin:
+        return headers.get(b"sec-fetch-site") == "same-origin"
+    try:
+        parsed = urlsplit(origin)
+        scheme = str(scope.get("scheme", "")).lower()
+        if scheme == "ws":
+            scheme = "http"
+        elif scheme == "wss":
+            scheme = "https"
+        host = urlsplit(scheme + "://" + headers.get(b"host", ""))
+        parsed_port = parsed.port
+        host_port = host.port
+    except ValueError:
+        return False
+    if (
+        scheme not in {"http", "https"}
+        or parsed.scheme.lower() != scheme
+        or parsed.username is not None
+        or parsed.password is not None
+        or not parsed.hostname
+        or host.username is not None
+        or host.password is not None
+        or not host.hostname
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or host.path
+        or host.query
+        or host.fragment
+    ):
+        return False
+    default_port = 443 if scheme == "https" else 80
+    return (
+        parsed.hostname.casefold() == host.hostname.casefold()
+        and (parsed_port or default_port) == (host_port or default_port)
+    )
+
+
+def _local_request_details(scope: dict):
+    """Return strict request origin details for local browser approval only."""
+    scheme = str(scope.get("scheme", "")).lower()
+    if scope.get("type", "http") != "http" or scheme not in {"http", "https"}:
+        return None
+    peer = scope.get("client")
+    if not isinstance(peer, (tuple, list)) or not peer or not isinstance(peer[0], str):
+        return None
+    try:
+        if not ipaddress.ip_address(peer[0]).is_loopback:
+            return None
+    except ValueError:
+        return None
+
+    raw_headers = scope.get("headers")
+    if not isinstance(raw_headers, (tuple, list)):
+        return None
+    headers = {}
+    for item in raw_headers:
+        if not isinstance(item, (tuple, list)) or len(item) != 2:
+            return None
+        name, value = item
+        if not isinstance(name, bytes) or not isinstance(value, bytes):
+            return None
+        name = name.lower()
+        if not name or name in headers:
+            return None
+        try:
+            text = value.decode("latin1")
+        except UnicodeDecodeError:
+            return None
+        headers[name] = text
+    if b"authorization" in headers or any(
+        name == b"forwarded" or name == b"x-real-ip" or name.startswith(b"x-forwarded-")
+        for name in headers
+    ):
+        return None
+
+    host = headers.get(b"host")
+    if not isinstance(host, str) or not host or host != host.strip() or any(ord(char) < 33 or ord(char) > 126 for char in host):
+        return None
+    if any(char in host for char in ("\\", ",", "%")):
+        return None
+    try:
+        parsed_host = urlsplit("//" + host)
+        host_name = parsed_host.hostname
+        host_port = parsed_host.port
+    except ValueError:
+        return None
+    if (
+        not host_name
+        or parsed_host.netloc != host
+        or parsed_host.username is not None
+        or parsed_host.password is not None
+        or parsed_host.path
+        or parsed_host.query
+        or parsed_host.fragment
+        or (host_port is not None and not 1 <= host_port <= 65535)
+    ):
+        return None
+    host_name = host_name.casefold()
+    # Match secure_transport's accepted loopback authorities. The peer check
+    # still accepts any loopback source address, but Host must be a canonical
+    # localhost authority understood by the rest of the browser boundary.
+    if host_name not in {"127.0.0.1", "localhost", "::1"}:
+        return None
+    effective_port = host_port or (443 if scheme == "https" else 80)
+    return scheme, headers, host_name, effective_port
+
+
+def _local_request_origin(details) -> str:
+    scheme, _headers, host_name, port = details
+    authority = f"[{host_name}]" if ":" in host_name else host_name
+    return f"{scheme}://{authority}:{port}"
+
+
+def _local_request_same_origin(details) -> bool:
+    scheme, headers, host_name, port = details
+    origin = headers.get(b"origin")
+    fetch_site = headers.get(b"sec-fetch-site")
+    if fetch_site is not None and fetch_site.casefold() != "same-origin":
+        return False
+    if origin is None:
+        return fetch_site is not None and fetch_site.casefold() == "same-origin"
+    if not origin or origin != origin.strip():
+        return False
+    try:
+        parsed = urlsplit(origin)
+        origin_port = parsed.port
+    except ValueError:
+        return False
+    if (
+        parsed.scheme.lower() != scheme
+        or parsed.username is not None
+        or parsed.password is not None
+        or not parsed.hostname
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        return False
+    return (
+        parsed.hostname.casefold() == host_name
+        and (origin_port or (443 if scheme == "https" else 80)) == port
+    )
+
+
+def local_browser_approval_eligible(scope: dict, *, require_same_origin: bool = False) -> bool:
+    """Whether this unforwarded native request may use local owner approval."""
+    details = _local_request_details(scope)
+    if details is None:
+        return False
+    return not require_same_origin or _local_request_same_origin(details)
+
+
+def _direct_loopback_ui_request(scope: dict) -> bool:
+    """Whether an unauthenticated request came directly from this PC."""
+    scope_type = scope.get("type", "http")
+    scheme = str(scope.get("scheme", "")).lower()
+    if scope_type == "http":
+        if scheme not in {"http", "https"}:
+            return False
+        return _local_request_details(scope) is not None
+    if scope_type == "websocket":
+        if scheme not in {"ws", "wss"}:
+            return False
+        normalized = dict(scope)
+        normalized["type"] = "http"
+        normalized["scheme"] = "https" if scheme == "wss" else "http"
+        return _local_request_details(normalized) is not None
+    return False
+
+
+def _direct_loopback_local_agent_api(scope: dict, path: str) -> bool:
+    """Accept a local client credential only on the native loopback API."""
+    if (
+        scope.get("type") != "http"
+        or str(scope.get("scheme", "")).lower() != "http"
+        or not (path == "/openapi.json" or path.startswith("/api/v1/"))
+    ):
+        return False
+    peer = scope.get("client")
+    if not isinstance(peer, (tuple, list)) or not peer or not isinstance(peer[0], str):
+        return False
+    try:
+        if not ipaddress.ip_address(peer[0]).is_loopback:
+            return False
+    except ValueError:
+        return False
+    raw_headers = scope.get("headers")
+    if not isinstance(raw_headers, (tuple, list)):
+        return False
+    headers = {}
+    for item in raw_headers:
+        if not isinstance(item, (tuple, list)) or len(item) != 2:
+            return False
+        name, value = item
+        if not isinstance(name, bytes) or not isinstance(value, bytes):
+            return False
+        name = name.lower()
+        if not name or name in headers:
+            return False
+        headers[name] = value
+    if (
+        b"authorization" not in headers
+        or b"origin" in headers
+        or any(
+            name == b"forwarded" or name == b"x-real-ip" or name.startswith(b"x-forwarded-")
+            for name in headers
+        )
+    ):
+        return False
+    host = headers.get(b"host")
+    if not host:
+        return False
+    try:
+        authority = host.decode("latin1")
+        parsed = urlsplit("//" + authority)
+        port = parsed.port
+    except (UnicodeError, ValueError):
+        return False
+    return bool(
+        parsed.netloc == authority
+        and parsed.hostname
+        and parsed.hostname.casefold().rstrip(".") in {"127.0.0.1", "localhost", "::1"}
+        and (port is None or 1 <= port <= 65535)
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.path
+        and not parsed.query
+        and not parsed.fragment
+    )
+
+
+def local_device_request_allowed(scope: dict) -> bool:
+    """Enforce browser-origin checks for direct local-device authority.
+
+    Top-level site metadata is intentionally not used for safe GET navigation:
+    Pinokio embeds the loopback UI from a different private-IP origin. API
+    mutations and WebSocket upgrades still require the app's own origin.
+    """
+    if not _direct_loopback_ui_request(scope):
+        return False
+    headers = {key.lower(): value for key, value in scope.get("headers", [])}
+    if b"origin" in headers and not same_origin(scope):
+        return False
+    method = str(scope.get("method", "GET")).upper()
+    if scope.get("type") == "websocket" or method in MUTATIONS:
+        return same_origin(scope)
+    return True
+
+
+def pinokio_access_origin(config_path: Path | None = None) -> str | None:
+    """Read only the trusted private-IP access origin from Pinokio config."""
+    path = Path(config_path) if config_path is not None else Path.home() / ".pinokio" / "config.json"
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+        access = config.get("access") if isinstance(config, dict) else None
+        if not isinstance(access, dict):
+            return None
+        scheme = access.get("protocol")
+        host = access.get("host")
+        port = access.get("port")
+        if (
+            not isinstance(scheme, str)
+            or scheme.lower() not in {"http", "https"}
+            or not isinstance(host, str)
+            or not host
+            or host != host.strip()
+            or type(port) is not int
+            or not 1 <= port <= 65535
+        ):
+            return None
+        address = ipaddress.ip_address(host)
+        if (
+            not address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_multicast
+            or address.is_unspecified
+            or address.is_reserved
+        ):
+            return None
+        authority = f"[{address.compressed}]" if address.version == 6 else address.compressed
+        return f"{scheme.lower()}://{authority}:{port}"
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+_LOOPBACK_FRAME_ANCESTORS = (
+    "http://localhost:*", "https://localhost:*",
+    "http://127.0.0.1:*", "https://127.0.0.1:*",
+    "http://[::1]:*", "https://[::1]:*",
+)
+
+
+def pinokio_frame_origins(config_path: Path | None = None) -> tuple[str, ...]:
+    """Allow Pinokio's configured endpoint at this PC's private LAN aliases.
+
+    Pinokio can advertise a bridge IP in its config while a remote browser
+    uses the PC's LAN IP. Keep its exact scheme/port, and derive aliases from
+    this PC rather than request headers or arbitrary private-network hosts.
+    """
+    configured = pinokio_access_origin(config_path)
+    if configured is None:
+        return ()
+    from .state import private_lan_ipv4_addresses
+
+    parsed = urlsplit(configured)
+    origins = [configured]
+    for candidate in private_lan_ipv4_addresses():
+        try:
+            address = ipaddress.IPv4Address(candidate)
+        except (ValueError, TypeError):
+            continue
+        if (
+            not address.is_private
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_multicast
+            or address.is_unspecified
+            or address.is_reserved
+        ):
+            continue
+        origin = f"{parsed.scheme}://{address.compressed}:{parsed.port}"
+        if origin not in origins:
+            origins.append(origin)
+    return tuple(origins)
+
+
+def _exact_frame_origin(value: str) -> str | None:
+    if not isinstance(value, str) or not value or value != value.strip():
+        return None
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or not parsed.port
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    host = parsed.hostname.casefold()
+    authority = f"[{host}]" if ":" in host else host
+    return f"{parsed.scheme.lower()}://{authority}:{port}"
+
+
+def frame_ancestor_sources(origins: tuple[str, ...] | list[str] | None = None) -> tuple[str, ...]:
+    """Return a narrow CSP allow-list for the local UI and trusted Pinokio shell."""
+    configured = pinokio_frame_origins() if origins is None else tuple(origins)
+    values = ["'self'", *_LOOPBACK_FRAME_ANCESTORS]
+    for origin in configured:
+        canonical = _exact_frame_origin(origin)
+        if canonical and canonical not in values:
+            values.append(canonical)
+    return tuple(values)
+
+
+def _apply_frame_ancestors(headers: list[tuple[bytes, bytes]], sources: tuple[str, ...]) -> list[tuple[bytes, bytes]]:
+    directive = "frame-ancestors " + " ".join(sources)
+    # A second CSP policy is intersected with any existing policy. Keeping
+    # existing headers intact preserves stricter frame rules and upload
+    # sandbox policies set by the application.
+    return [*headers, (b"content-security-policy", directive.encode("latin1"))]
+
+
+def local_approval_origin(scope: dict) -> str | None:
+    """Canonical scheme/host/port binding for a verified local request."""
+    details = _local_request_details(scope)
+    return _local_request_origin(details) if details is not None else None
+
+
+def local_approval_cookie_name(runtime, scope: dict) -> str:
+    """Challenge cookie isolated by install, scheme, and effective host port."""
+    details = _local_request_details(scope)
+    if details is None:
+        raise ValueError("A verified local request is required")
+    scheme, _headers, _host, port = details
+    base = COOKIE_NAME + "_" + runtime.installation_id.replace("-", "")[:12]
+    return f"{base}_local_{scheme}_{port}"
+
+
+def _canonical_additional_roots(additional_roots) -> tuple[Path, ...]:
+    if additional_roots is None:
+        return ()
+    if isinstance(additional_roots, (str, os.PathLike)):
+        items = (additional_roots,)
+    else:
+        try:
+            items = tuple(additional_roots)
+        except Exception as error:
+            raise AuthError(403, "Trusted media roots could not be verified") from error
+    roots = []
+    try:
+        for item in items:
+            if not isinstance(item, (str, os.PathLike)):
+                raise TypeError("media root must be a filesystem path")
+            text = os.fspath(item)
+            if not isinstance(text, str) or not text or "\x00" in text:
+                raise ValueError("media root is invalid")
+            roots.append(Path(text).expanduser().resolve(strict=False))
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        raise AuthError(403, "Trusted media roots could not be verified") from error
+    return tuple(roots)
+
+
+def validate_media_paths(
+    value,
+    app_root: Path | None,
+    *,
+    key: str = "",
+    depth: int = 0,
+    additional_roots=(),
+) -> None:
+    trusted_extra_roots = _canonical_additional_roots(additional_roots)
+    trusted_roots: list[Path] = []
+    if app_root is not None:
+        try:
+            native_root = Path(app_root).resolve(strict=False)
+            trusted_roots.extend(
+                (native_root / name).resolve(strict=False)
+                for name in ("uploads", "outputs", "outputs2", "storage", "ckpts", "loras", "loras_i2v", "temp")
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
+            raise AuthError(403, "Maestro media roots could not be verified") from error
+    trusted_roots.extend(trusted_extra_roots)
+
+    def visit(item, field_key: str, current_depth: int) -> None:
+        if current_depth > 40:
+            raise AuthError(400, "Request nesting is too deep")
+        if isinstance(item, dict):
+            for name, child in item.items():
+                visit(child, _normalize_key(name), current_depth + 1)
+        elif isinstance(item, list):
+            for child in item:
+                visit(child, field_key, current_depth + 1)
+        elif isinstance(item, str) and field_key in _MEDIA_KEYS and item:
+            if item.startswith(("asset:", "maestro-asset:")):
+                raise AuthError(400, "Resolve the uploaded asset ID before using this endpoint")
+            if item.startswith(("https://", "http://", "data:")):
+                return  # The named operation's own URL/data validator applies.
+            if "\x00" in item:
+                raise AuthError(400, "Invalid media path")
+            # Plain named assets and model IDs are validated by the existing route.
+            if not (_WINDOWS_ABSOLUTE.match(item) or "/" in item or "\\" in item):
+                return
+            path = Path(item)
+            candidates = []
+            try:
+                if path.is_absolute() or _WINDOWS_ABSOLUTE.match(item):
+                    candidates.append(path.resolve(strict=False))
+                else:
+                    if app_root is not None:
+                        candidates.append((Path(app_root) / path).resolve(strict=False))
+                    candidates.extend((root / path).resolve(strict=False) for root in trusted_extra_roots)
+            except (OSError, RuntimeError, ValueError) as error:
+                raise AuthError(403, "Media path could not be verified") from error
+            if not any(
+                candidate == root or candidate.is_relative_to(root)
+                for candidate in candidates
+                for root in trusted_roots
+            ):
+                raise AuthError(403, "Agents may use registered media and Maestro storage paths; upload external files first")
+
+    visit(value, key, depth)
+
+
+def browser_login_origin(status: dict, scope: dict) -> str:
+    """Use a certificate-backed address for this browser's actual host."""
+    # This value is inserted only by the signed Pinokio controller envelope.
+    if scope.get("maestro.pinokio_origin"):
+        return scope["maestro.pinokio_origin"]
+    try:
+        headers = dict(scope.get("headers", []))
+        host = urlsplit("//" + headers.get(b"host", b"").decode("latin1")).hostname
+        if host in {"127.0.0.1", "localhost", "::1"}:
+            return status.get("local_setup_url") or status.get("controller_url") or ""
+        for candidate in status.get("lan_mcp_urls") or []:
+            parsed = urlsplit(candidate)
+            if parsed.scheme == "https" and parsed.hostname == host and parsed.path == "/mcp":
+                return candidate[:-4]
+    except (ValueError, TypeError):
+        pass
+    return status.get("controller_url") or ""
+
+
+def login_document(
+    status: dict,
+    *,
+    secure: bool = True,
+    notice: str | None = None,
+    local_device_access: bool = False,
+) -> str:
+    # The legacy form sends only a short-lived owner code; local-device approval
+    # uses an ephemeral proof and never exposes a long-lived credential.
+    import html
+    setup_url = html.escape(str(status.get("local_setup_url") or ""), quote=True)
+    local_approval_available = secure and status.get("local_approval_available") is True
+    local_approval_markup = (
+        '<button id="local-approve" type="button">Approve on this PC</button>'
+        '<p id="local-approval-message" role="status"></p>'
+        if local_approval_available else ""
+    )
+    if local_approval_available and local_device_access:
+        intro_markup = "<p>No code or terminal needed. Approve local management on this PC.</p>"
+    elif local_approval_available:
+        intro_markup = "<p>No code or terminal needed. Approve this browser to sign in on this computer.</p>"
+    else:
+        intro_markup = "<p>Enter the one-time browser code from Pinokio's Agent Access terminal, or from another signed-in Maestro browser.</p>"
+    autofocus = "" if local_approval_available else " autofocus"
+    manual_form = (
+        '<form method="post" action="/api/v1/agent-access/owner-login"><label for="code">Browser code</label>'
+        f'<input id="code" name="code" autocomplete="off" required{autofocus}><button type="submit">Sign in</button></form>'
+    )
+    manual_recovery = (
+        '<details><summary>Use a browser sign-in code</summary><p>Enter a one-time code from Pinokio or another signed-in Maestro browser.</p>'
+        + manual_form
+        + '<button id="request" type="button">Show a code in Pinokio</button><p id="message" role="status"></p></details>'
+        if local_approval_available else
+        manual_form + '<button id="request" type="button">Show a code in Pinokio</button><p id="message" role="status"></p>'
+    )
+    notice_markup = (
+        f'<p role="alert" style="color:#ffb2a9">{html.escape(notice)}</p>'
+        if notice else ""
+    )
+    if local_device_access:
+        local_approval_script = """document.getElementById('local-approve')?.addEventListener('click',async()=>{let b=document.getElementById('local-approve'),e=document.getElementById('local-approval-message');b.disabled=true;try{let proof=Array.from(crypto.getRandomValues(new Uint8Array(32)),x=>x.toString(16).padStart(2,'0')).join('');let c=await fetch('/api/v1/agent-access/local-challenge',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Accept':'application/json','Content-Type':'application/json'},body:JSON.stringify({proof})}),cj=await c.json();if(!c.ok||typeof cj.nonce!=='string')throw Error();let a=await fetch('/api/v1/agent-access/local-approve',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Accept':'application/json','Content-Type':'application/json'},body:JSON.stringify({nonce:cj.nonce,proof,approve:true})}),aj=await a.json();if(!a.ok||aj.ok!==true)throw Error();let s=await fetch('/api/v1/agent-access/status',{credentials:'same-origin',cache:'no-store'}),sj=await s.json();if(!s.ok||sj.authenticated!==true||sj.owner!==true||sj.auth_method!=='local_device')throw Error();let n=document.querySelector('input[name="next"]')?.value||'/';location.assign(n.startsWith('/oauth/authorize?')?n:'/')}catch{e.textContent='Local approval could not be completed. Try again or use a browser code.';b.disabled=false}});"""
+    else:
+        local_approval_script = """document.getElementById('local-approve')?.addEventListener('click',async()=>{let b=document.getElementById('local-approve'),e=document.getElementById('local-approval-message');b.disabled=true;try{let c=await fetch('/api/v1/agent-access/local-challenge',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Accept':'application/json'}}),cj=await c.json();if(!c.ok||typeof cj.nonce!=='string')throw Error();let a=await fetch('/api/v1/agent-access/local-approve',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Accept':'application/json','Content-Type':'application/json'},body:JSON.stringify({nonce:cj.nonce,approve:true})}),aj=await a.json();if(!a.ok||aj.ok!==true)throw Error();let s=await fetch('/api/v1/agent-access/status',{credentials:'same-origin',cache:'no-store'}),sj=await s.json();if(!s.ok||sj.authenticated!==true||sj.owner!==true)throw Error();let n=document.querySelector('input[name="next"]')?.value||'/';location.assign(n.startsWith('/oauth/authorize?')?n:'/')}catch{e.textContent='Local approval could not be completed. Try again or use a browser code.';b.disabled=false}});"""
+    if not secure:
+        address = html.escape(str(status.get("controller_url") or ""), quote=True)
+        return f'<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Maestro secure connection</title><main><h1>Open Maestro securely</h1>{notice_markup}<p>Browser codes are entered over HTTPS. Open the secure address and verify the certificate fingerprint shown in Pinokio.</p><p><a href="{address}">Open secure Maestro</a></p></main>'
+    parts = [
+        """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,interactive-widget=resizes-content"><title>Connect to Maestro</title>
+<style>body{margin:0;background:#171b1e;color:#edf0f2;font:16px system-ui;display:grid;min-height:100svh;place-items:center}main{box-sizing:border-box;width:min(92vw,440px);padding:28px;background:#20262b;border:1px solid #3b444c;border-radius:20px}input,button{box-sizing:border-box;width:100%;font:inherit;padding:13px;border-radius:10px;margin-top:12px}input{background:#171b1e;color:#fff;border:1px solid #56616b}button{background:#ff9d61;color:#1a1a1a;border:0;cursor:pointer}p{color:#b6bfc8;line-height:1.5}a{color:#ffad7b}details{margin-top:18px}summary{cursor:pointer;color:#ffad7b}#message,#local-approval-message{white-space:pre-wrap}</style></head><body><main><h1>Connect to Maestro</h1>""",
+        intro_markup,
+        local_approval_markup,
+        manual_recovery,
+        f'<p><a href="{setup_url}">Open this computer\'s secure setup</a></p>',
+        """</main><script>
+document.getElementById('request').onclick=async()=>{let e=document.getElementById('message');try{let r=await fetch('/api/v1/agent-access/request-console-code',{method:'POST'});let j=await r.json();e.textContent=j.message||j.detail?.message||j.detail||'Check the Pinokio terminal.'}catch{e.textContent='Could not request a code. Open Agent Access in Pinokio.'}};
+""",
+        local_approval_script,
+        """</script></body></html>""",
+    ]
+    document = "".join(parts)
+    if notice_markup:
+        document = document.replace("<form method=", notice_markup + "<form method=", 1)
+    return document
+
+class AccessBoundary:
+    def __init__(
+        self,
+        app,
+        *,
+        runtime,
+        journal=None,
+        app_root: Path | None = None,
+        always_protect: bool = False,
+        asset_resolver=None,
+        additional_media_roots=None,
+        dynamic_scope_resolver=None,
+        validate_controller_origin: bool = False,
+        allow_local_ui: bool = False,
+        allow_local_agent_tokens: bool = False,
+        allow_legacy_browser: bool = False,
+        frame_ancestor_origins: tuple[str, ...] | list[str] | None = None,
+    ):
+        self.app, self.runtime, self.journal = app, runtime, journal
+        self.app_root = Path(app_root).resolve() if app_root else None
+        self.always_protect = bool(always_protect)
+        self.asset_resolver = asset_resolver
+        self.additional_media_roots = additional_media_roots
+        self.dynamic_scope_resolver = dynamic_scope_resolver
+        self.validate_controller_origin = bool(validate_controller_origin)
+        self.allow_local_ui = bool(allow_local_ui)
+        self.allow_local_agent_tokens = bool(allow_local_agent_tokens)
+        self.allow_legacy_browser = bool(allow_legacy_browser)
+        self.frame_ancestor_sources = (
+            frame_ancestor_sources(frame_ancestor_origins) if self.allow_local_ui else ()
+        )
+        self._multipart_slots = threading.BoundedSemaphore(MAX_CONCURRENT_MULTIPART)
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in {"http", "websocket"}:
+            return await self.app(scope, receive, send)
+        path = scope.get("path", "/")
+        method = scope.get("method", "GET").upper()
+        headers = {k.lower(): v.decode("latin1") for k, v in scope.get("headers", [])}
+        frame_sources = self.frame_ancestor_sources
+        if scope.get("maestro.pinokio_frame_origin"):
+            frame_sources = (*frame_sources, scope["maestro.pinokio_frame_origin"])
+        fresh_ui_shell = (
+            bool(frame_sources)
+            and scope["type"] == "http"
+            and method in {"GET", "HEAD"}
+            and path in {"/", "/index.html"}
+        )
+        if fresh_ui_shell:
+            # A body-only ETag can validate HTML carrying an obsolete framing
+            # policy. Fetch the small UI shell afresh, including its current
+            # security headers; hashed assets keep their normal caching.
+            scope = {**scope, "headers": [
+                (key, value) for key, value in scope.get("headers", [])
+                if key.lower() not in {b"if-none-match", b"if-modified-since"}
+            ]}
+        if (
+            frame_sources
+            and not path.startswith(("/uploads/", "/api/v1/uploads/"))
+        ):
+            original_send = send
+
+            async def protect_local_ui_framing(message):
+                if message["type"] == "http.response.start":
+                    response_headers = list(message.get("headers", []))
+                    content_type = {
+                        key.lower(): value for key, value in response_headers
+                    }.get(b"content-type", b"").split(b";", 1)[0].lower()
+                    if content_type in {b"text/html", b"application/xhtml+xml"}:
+                        if fresh_ui_shell:
+                            response_headers = [
+                                (key, value) for key, value in response_headers
+                                if key.lower() not in {b"cache-control", b"etag", b"last-modified"}
+                            ]
+                            response_headers.append((b"cache-control", b"no-store"))
+                        response_headers = _apply_frame_ancestors(
+                            response_headers, frame_sources,
+                        )
+                        message = {**message, "headers": response_headers}
+                await original_send(message)
+
+            send = protect_local_ui_framing
+        allow_insecure_login_transport = (
+            scope.get("scheme") == "http"
+            and (
+                (method == "GET" and path == "/agent-access/login")
+                # The route rejects remote HTTP before reading the code body;
+                # it returns the secure controller URL to the browser.
+                or (method == "POST" and path == "/api/v1/agent-access/owner-login")
+            )
+        )
+        if self.validate_controller_origin and self.runtime.origin_for_scope(
+            scope, allow_insecure_remote=allow_insecure_login_transport,
+        ) is None:
+            response = JSONResponse(
+                {"detail": "Use the canonical Maestro endpoint, loopback, or a verified certificate IP alias on the configured port"},
+                status_code=421,
+                headers={"Cache-Control": "no-store"},
+            )
+            return await response(scope, receive, send)
+        is_mcp_path = path == "/mcp" or path.startswith("/mcp/")
+        if is_mcp_path and not self.runtime.auth.enabled:
+            if scope["type"] == "websocket":
+                return await send({"type": "websocket.close", "code": 4404})
+            response = JSONResponse({"detail": "Not Found"}, status_code=404, headers={"Cache-Control": "no-store"})
+            return await response(scope, receive, send)
+        # The native UI keeps its existing browser/LAN access. This exception
+        # never applies to the HTTPS controller, MCP, Agent Access management,
+        # or an explicitly authenticated agent request. Cookies from an OAuth
+        # browser sign-in must not turn ordinary native UI requests into agent
+        # requests or unexpectedly require HTTPS on an existing LAN URL.
+        legacy_browser_request = (
+            self.allow_legacy_browser
+            and not self.always_protect
+            and not self.validate_controller_origin
+            and not is_mcp_path
+            and b"authorization" not in headers
+            and not path.startswith(("/api/v1/agent-access", "/agent-access", "/oauth/", "/.well-known/"))
+            and not path.startswith(OWNER_PREFIXES)
+        )
+        security_configured = self.always_protect or self.runtime.security_required
+        configured = security_configured and not legacy_browser_request
+        if security_configured and path.startswith(("/uploads/", "/api/v1/uploads/")):
+            original_send = send
+
+            async def protect_uploaded_content(message):
+                if message["type"] == "http.response.start":
+                    response_headers = list(message.get("headers", []))
+                    content_type = {key.lower(): value for key, value in response_headers}.get(b"content-type", b"").split(b";", 1)[0].lower()
+                    if content_type in {b"text/html", b"application/xhtml+xml", b"image/svg+xml", b"application/xml", b"text/xml", b"text/javascript", b"application/javascript"}:
+                        protected = {b"content-security-policy", b"content-disposition", b"x-content-type-options"}
+                        response_headers = [(key, value) for key, value in response_headers if key.lower() not in protected]
+                        response_headers.extend([(b"content-security-policy", b"sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:"), (b"content-disposition", b"attachment"), (b"x-content-type-options", b"nosniff")])
+                        message = {**message, "headers": response_headers}
+                await original_send(message)
+
+            send = protect_uploaded_content
+        principal = token = None
+        local_agent_credential = False
+        try:
+            local_device_transport = self.allow_local_ui and _direct_loopback_ui_request(scope)
+            local_device = (
+                local_device_transport
+                and not legacy_browser_request
+                and b"authorization" not in headers
+                and not is_mcp_path
+                # Public OAuth protocol requests also come from native clients
+                # on this PC. They must use their own code/PKCE or refresh
+                # credentials, never the local browser's synthetic authority.
+                and path not in {"/oauth/register", "/oauth/token", "/oauth/revoke"}
+                and self.runtime.security_required
+                and self.runtime.auth.owner_configured
+            )
+            if local_device and not local_device_request_allowed(scope):
+                raise AuthError(403, "A same-origin local browser request is required")
+            authorization_present = b"authorization" in headers
+            bearer = headers.get(b"authorization", "")
+            if local_device:
+                # Direct same-PC UI authority is installation-scoped and never
+                # becomes an MCP credential or a browser bearer session.
+                principal = LOCAL_DEVICE_PRINCIPAL
+            elif authorization_present:
+                if not bearer.startswith("Bearer "):
+                    raise AuthError(401, "Use a Bearer access token")
+                token = bearer[7:]
+            elif not legacy_browser_request:
+                request = Request({**scope, "type": "http"})
+                cookies = request.cookies
+                token = next((cookies[name] for name in cookie_names(self.runtime, scope.get("scheme")) if name in cookies), None)
+            if token:
+                try:
+                    principal = self.runtime.auth.authenticate(token)
+                except AuthError:
+                    if (
+                        self.allow_local_agent_tokens
+                        and not is_mcp_path
+                        and _direct_loopback_local_agent_api(scope, path)
+                    ):
+                        principal = self.runtime.auth.authenticate_local(token)
+                        local_agent_credential = True
+                    else:
+                        if path not in PUBLIC:
+                            raise
+                        token = None
+            if path not in PUBLIC and configured:
+                if principal is None:
+                    raise AuthError(401, "Sign in to Maestro or pair this agent")
+                if not secure_transport(scope):
+                    raise AuthError(426, "Use the secure Maestro connection for authenticated access")
+                if headers.get(b"origin") and not same_origin(scope):
+                    raise AuthError(403, "This request origin is not allowed")
+                if principal.owner and method in MUTATIONS and not bearer and not same_origin(scope):
+                    raise AuthError(403, "A same-origin browser request is required")
+                if not principal.owner:
+                    if path.startswith(OWNER_PREFIXES) or path.startswith("/classic"):
+                        raise AuthError(403, "Only the owner can manage access or developer diagnostics")
+                    needed = "observe" if path == "/mcp" else self._required_scope(principal, method, path)
+                    if needed not in principal.scopes:
+                        raise AuthError(403, f"This operation requires {needed} permission")
+                    if path not in {"/mcp", "/openapi.json"} and not path.startswith(("/api/v1/", "/uploads/")):
+                        raise AuthError(403, "Use the documented Maestro API for this operation")
+            if local_agent_credential and path == "/openapi.json" and "observe" not in principal.scopes:
+                raise AuthError(403, "This operation requires observe permission")
+            # An off server never becomes an unpaired MCP endpoint. Once an
+            # owner exists, disabling MCP retains the browser/API auth boundary.
+            if is_mcp_path and (not self.runtime.auth.enabled or principal is None):
+                raise AuthError(401 if self.runtime.auth.enabled else 404, "Agent Access is disabled or this client is not paired")
+            if not principal or path in PUBLIC or not path.startswith("/api/v1/"):
+                ptoken = principal_context.set(principal)
+                ctoken = credential_context.set(token)
+                otoken = public_origin_context.set(self.runtime.origin_for_scope(scope) if self.validate_controller_origin else None)
+                try:
+                    return await self.app(scope, receive, send)
+                finally:
+                    principal_context.reset(ptoken)
+                    credential_context.reset(ctoken)
+                    public_origin_context.reset(otoken)
+            return await self._agent_http(scope, receive, send, principal, token, headers)
+        except (AuthError, JournalError, ValueError) as error:
+            status = getattr(error, "status", 400)
+            if scope["type"] == "websocket":
+                return await send({"type": "websocket.close", "code": 4401 if status == 401 else 4403})
+            request_origin = self.runtime.origin_for_scope(scope) if self.validate_controller_origin else None
+            login_status = self.runtime.public_status()
+            origin = request_origin or browser_login_origin(login_status, scope) or self.runtime.origin
+            detail = {"code": "maestro_auth_required" if status == 401 else "maestro_access_denied", "message": str(error), "login_url": origin}
+            if status == 401 and method == "GET" and "text/html" in headers.get(b"accept", "") and not path.startswith("/api/"):
+                response = HTMLResponse(login_document({
+                    **login_status,
+                    "controller_url": origin,
+                    "local_approval_available": local_browser_approval_eligible(scope),
+                }, secure=secure_transport(scope)), status_code=401, headers={"Cache-Control": "no-store"})
+            else:
+                metadata_path = "/.well-known/oauth-protected-resource/mcp" if path == "/mcp" else "/.well-known/oauth-protected-resource"
+                challenge = f'Bearer resource_metadata="{origin}{metadata_path}"'
+                response = JSONResponse({"detail": detail}, status_code=status, headers={
+                    "Cache-Control": "no-store",
+                    **({"WWW-Authenticate": challenge} if status == 401 else {}),
+                })
+            return await response(scope, receive, send)
+
+    def _required_scope(self, principal, method: str, path: str) -> str:
+        dynamic_transfer_path = (
+            method in {"GET", "HEAD"}
+            and re.fullmatch(r"/api/v1/agent-access/transfers/[^/]+(?:/chunk)?", path) is not None
+        )
+        if self.dynamic_scope_resolver is not None and dynamic_transfer_path:
+            try:
+                dynamic_scope = self.dynamic_scope_resolver(principal, method, path)
+            except Exception as error:
+                raise AuthError(403, "The transfer permission could not be verified") from error
+            if dynamic_scope is not None:
+                if not isinstance(dynamic_scope, str) or dynamic_scope not in {"observe", "generate", "manage", "admin"}:
+                    raise AuthError(403, "The transfer permission could not be verified")
+                return dynamic_scope
+        return required_scope(method, path)
+
+    async def _spool_multipart(self, scope, receive):
+        raw_headers = scope.get("headers", [])
+        if len(raw_headers) > MAX_MULTIPART_HEADER_COUNT or sum(len(k) + len(v) for k, v in raw_headers) > MAX_MULTIPART_HEADERS:
+            raise AuthError(431, "Multipart request headers exceed the configured limit")
+        content_types = [v for k, v in raw_headers if k.lower() == b"content-type"]
+        content_lengths = [v for k, v in raw_headers if k.lower() == b"content-length"]
+        transfer_encodings = [v for k, v in raw_headers if k.lower() == b"transfer-encoding"]
+        content_encodings = [v for k, v in raw_headers if k.lower() == b"content-encoding"]
+        if (
+            len(content_types) != 1
+            or len(content_lengths) > 1
+            or len(transfer_encodings) > 1
+            or len(content_encodings) > 1
+            or (content_lengths and transfer_encodings)
+        ):
+            raise AuthError(400, "Multipart request headers are ambiguous")
+        try:
+            content_type = content_types[0].decode("latin1")
+            if content_lengths and not re.fullmatch(rb"[0-9]+", content_lengths[0]):
+                raise ValueError("invalid Content-Length")
+            declared_size = int(content_lengths[0].decode("ascii")) if content_lengths else None
+        except (UnicodeDecodeError, ValueError):
+            raise AuthError(400, "Multipart request headers are invalid") from None
+        if declared_size is not None and (declared_size < 0 or declared_size > MAX_MULTIPART_BODY):
+            raise AuthError(413, "Multipart upload exceeds the 500 MiB limit")
+        normalized_encodings = [value.decode("latin1").strip().casefold() for value in content_encodings]
+        if any(value not in {"", "identity"} for value in normalized_encodings):
+            raise AuthError(415, "Compressed multipart request bodies are not supported")
+
+        directory = getattr(self.runtime, "directory", None)
+        if directory is None:
+            raise AuthError(500, "Multipart upload storage is unavailable")
+        spool_directory = Path(directory)
+        try:
+            spool_directory.mkdir(parents=True, exist_ok=True)
+            try:
+                spool_directory.chmod(0o700)
+            except OSError:
+                pass
+            descriptor, name = tempfile.mkstemp(prefix=".agent-access-upload-", dir=spool_directory)
+        except OSError as error:
+            raise AuthError(507, "Could not create private upload storage") from error
+
+        spool_path = Path(name)
+        hasher = hashlib.sha256()
+        total = 0
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                while True:
+                    message = await receive()
+                    if message.get("type") == "http.disconnect":
+                        raise AuthError(400, "Upload disconnected before completion")
+                    if message.get("type") != "http.request":
+                        raise AuthError(400, "Invalid multipart request stream")
+                    chunk = message.get("body", b"")
+                    if not isinstance(chunk, (bytes, bytearray, memoryview)):
+                        raise AuthError(400, "Invalid multipart request body")
+                    total += len(chunk)
+                    if total > MAX_MULTIPART_BODY:
+                        raise AuthError(413, "Multipart upload exceeds the 500 MiB limit")
+                    if chunk:
+                        handle.write(chunk)
+                        hasher.update(chunk)
+                    if not message.get("more_body", False):
+                        break
+                handle.flush()
+            if declared_size is not None and total != declared_size:
+                raise AuthError(400, "Multipart Content-Length does not match the received body")
+        except BaseException:
+            spool_path.unlink(missing_ok=True)
+            raise
+        return spool_path, total, hasher.hexdigest(), content_type
+
+    def _trusted_additional_media_roots(self):
+        if self.additional_media_roots is None:
+            return ()
+        try:
+            configured_roots = self.additional_media_roots()
+        except Exception as error:
+            raise AuthError(403, "Trusted media roots could not be verified") from error
+        return _canonical_additional_roots(configured_roots)
+
+    async def _validate_multipart(
+        self,
+        scope,
+        spool_path: Path,
+        app_root: Path | None,
+        additional_roots=(),
+    ) -> None:
+        parser_receive = _file_receive(spool_path)
+        form = None
+        try:
+            request = Request(scope, parser_receive)
+            form = await request.form(
+                max_files=MAX_MULTIPART_FILES,
+                max_fields=MAX_MULTIPART_FIELDS,
+                max_part_size=MAX_MULTIPART_FIELD_BYTES,
+            )
+            for name, value in form.multi_items():
+                field_name = _normalize_key(name)
+                if isinstance(value, UploadFile):
+                    filename = value.filename or ""
+                    decoded_filename = filename
+                    for _ in range(2):
+                        decoded_filename = unquote(decoded_filename)
+                    if (
+                        not filename
+                        or decoded_filename in {".", ".."}
+                        or "\x00" in decoded_filename
+                        or "/" in decoded_filename
+                        or "\\" in decoded_filename
+                        or _WINDOWS_ABSOLUTE.match(decoded_filename)
+                        or len(filename.encode("utf-8", "replace")) > 1024
+                    ):
+                        raise AuthError(400, "Multipart file names must be simple file names")
+                    continue
+                if not isinstance(value, str):
+                    raise AuthError(400, "Multipart form fields must be text or files")
+                _reject_redacted_credentials({field_name: value})
+                if app_root is None and not additional_roots:
+                    continue
+                validate_media_paths(value, app_root, key=field_name, additional_roots=additional_roots)
+                stripped = value.lstrip()
+                if stripped.startswith(("{", "[")):
+                    try:
+                        structured = json.loads(value)
+                    except (ValueError, RecursionError):
+                        continue
+                    _reject_redacted_credentials(structured)
+                    validate_media_paths(structured, app_root, additional_roots=additional_roots)
+        except AuthError:
+            raise
+        except Exception as error:
+            raise AuthError(400, "Multipart form data is invalid or exceeds its field limits") from error
+        finally:
+            try:
+                if form is not None:
+                    await form.close()
+            finally:
+                parser_receive.close_spool()
+
+    async def _agent_http(self, scope, receive, send, principal, token, headers):
+        path, method = scope["path"], scope["method"].upper()
+        for _ in range(2):
+            if any(part == ".." for part in path.replace("\\", "/").split("/")):
+                raise AuthError(400, "Invalid operation path")
+            path = unquote(path)
+        payload = None
+        reservation = None
+        request_body = None
+        if (self.app_root is not None or self.additional_media_roots is not None) and not principal.owner and scope.get("query_string"):
+            from urllib.parse import parse_qs
+            validate_media_paths(
+                parse_qs(scope["query_string"].decode("utf-8")),
+                self.app_root,
+                additional_roots=self._trusted_additional_media_roots(),
+            )
+        request_content_type = headers.get(b"content-type", "")
+        media_type = request_content_type.split(";", 1)[0].strip().casefold()
+        is_json = "json" in media_type
+        is_multipart = media_type == "multipart/form-data"
+        multipart_spool = None
+        multipart_slot = False
+        multipart_receiver = None
+        context_tokens = None
+        try:
+            if is_json and method in MUTATIONS:
+                body = bytearray()
+                while True:
+                    message = await receive()
+                    if message["type"] == "http.disconnect":
+                        raise AuthError(400, "Request disconnected before submission")
+                    chunk = message.get("body", b"")
+                    if not isinstance(chunk, (bytes, bytearray, memoryview)):
+                        raise AuthError(400, "Invalid JSON request body")
+                    body.extend(chunk)
+                    if len(body) > MAX_JSON:
+                        raise AuthError(413, "The JSON request is too large; transfer media through the asset API")
+                    if not message.get("more_body", False):
+                        break
+                try:
+                    payload = json.loads(body or b"{}")
+                except (ValueError, RecursionError) as error:
+                    raise AuthError(400, "Request body must contain valid JSON") from error
+                request_body = bytes(body)
+                resolved_payload = payload
+                if not principal.owner:
+                    _reject_redacted_credentials(payload)
+                if self.asset_resolver is not None:
+                    try:
+                        resolved_payload = self.asset_resolver(principal.id, deepcopy(payload))
+                    except Exception as error:
+                        status = getattr(error, "status", None)
+                        message = getattr(error, "message", None)
+                        if isinstance(status, int) and 400 <= status <= 599 and isinstance(message, str):
+                            raise AuthError(status, message) from error
+                        raise AuthError(400, "A registered media asset could not be resolved") from error
+                    if not principal.owner:
+                        _reject_redacted_credentials(resolved_payload)
+                    try:
+                        request_body = json.dumps(
+                            resolved_payload,
+                            ensure_ascii=False,
+                            allow_nan=False,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    except (TypeError, ValueError, OverflowError, UnicodeEncodeError, RecursionError) as error:
+                        raise AuthError(400, "Resolved request payload must be JSON-safe") from error
+                    if len(request_body) > MAX_JSON:
+                        raise AuthError(413, "Resolved request payload exceeds the configured size limit")
+                    request_headers = [
+                        (key, value)
+                        for key, value in scope.get("headers", [])
+                        if key.lower() not in {b"content-length", b"transfer-encoding"}
+                    ]
+                    request_headers.append((b"content-length", str(len(request_body)).encode("ascii")))
+                    scope = {**scope, "headers": request_headers}
+                if (self.app_root is not None or self.additional_media_roots is not None) and not principal.owner:
+                    validate_media_paths(
+                        resolved_payload,
+                        self.app_root,
+                        additional_roots=self._trusted_additional_media_roots(),
+                    )
+                original_receive = receive
+                sent_body = False
+
+                async def replay_json_receive():
+                    nonlocal sent_body
+                    if not sent_body:
+                        sent_body = True
+                        return {"type": "http.request", "body": request_body or b"", "more_body": False}
+                    return await original_receive()
+
+                receive = replay_json_receive
+
+            if is_multipart and method in MUTATIONS and not principal.owner and self.journal is not None:
+                key = headers.get(b"idempotency-key")
+                if not key:
+                    raise AuthError(400, "Mutating agent multipart requests require a stable Idempotency-Key")
+                if not self._multipart_slots.acquire(blocking=False):
+                    raise AuthError(429, "Too many multipart uploads are already being processed")
+                multipart_slot = True
+                multipart_spool, body_size, body_sha256, content_type = await self._spool_multipart(scope, receive)
+                await self._validate_multipart(
+                    scope,
+                    multipart_spool,
+                    self.app_root,
+                    additional_roots=self._trusted_additional_media_roots(),
+                )
+                normalized_headers = [
+                    (key_name, value)
+                    for key_name, value in scope.get("headers", [])
+                    if key_name.lower() not in {b"content-length", b"transfer-encoding"}
+                ]
+                normalized_headers.append((b"content-length", str(body_size).encode("ascii")))
+                scope = {**scope, "headers": normalized_headers}
+                multipart_receiver = _file_receive(multipart_spool, upstream=receive)
+                receive = multipart_receiver
+                reservation = self.journal.reserve(
+                    principal.id,
+                    key,
+                    method,
+                    path,
+                    {
+                        "wire_body_sha256": body_sha256,
+                        "wire_body_bytes": body_size,
+                        "content_type": content_type,
+                    },
+                    query=scope.get("query_string", b"").decode("utf-8"),
+                )
+                if reservation["state"] == "complete":
+                    from starlette.responses import Response
+                    return await Response(
+                        reservation["body"],
+                        status_code=reservation["status_code"],
+                        headers=dict(reservation["headers"]),
+                    )(scope, receive, send)
+                if reservation["state"] != "new":
+                    return await JSONResponse({
+                        "detail": {
+                            "code": "submission_" + reservation["state"],
+                            "reservation_id": reservation["reservation_id"],
+                            "message": "Inspect this existing submission; do not submit it with a new key",
+                        }
+                    }, status_code=409)(scope, receive, send)
+
+            if method in MUTATIONS and self.journal is not None and reservation is None:
+                key = headers.get(b"idempotency-key")
+                if isinstance(payload, dict) and not principal.owner:
+                    key = key or payload.get("client_submission_id") or payload.get("_client_submission_id")
+                if not key and not principal.owner:
+                    raise AuthError(400, "Mutating agent requests require a stable Idempotency-Key")
+                if key:
+                    if not is_json and method not in {"DELETE"}:
+                        if not principal.owner and not path.startswith("/api/v1/agent-access/assets/"):
+                            raise AuthError(400, "Use the multipart API or asset upload API for binary transfers")
+                    else:
+                        reservation = self.journal.reserve(
+                            principal.id,
+                            key,
+                            method,
+                            path,
+                            payload,
+                            query=scope.get("query_string", b"").decode("utf-8"),
+                        )
+                        if reservation["state"] == "complete":
+                            from starlette.responses import Response
+                            return await Response(
+                                reservation["body"],
+                                status_code=reservation["status_code"],
+                                headers=dict(reservation["headers"]),
+                            )(scope, receive, send)
+                        if reservation["state"] != "new":
+                            return await JSONResponse({
+                                "detail": {
+                                    "code": "submission_" + reservation["state"],
+                                    "reservation_id": reservation["reservation_id"],
+                                    "message": "Inspect this existing submission; do not submit it with a new key",
+                                }
+                            }, status_code=409)(scope, receive, send)
+
+            # Keep JSON visible to the boundary even if the client requested gzip.
+            if not principal.owner or reservation:
+                scope = {**scope, "headers": [(k, v) for k, v in scope.get("headers", []) if k.lower() != b"accept-encoding"]}
+            response_start = None
+            chunks = []
+            size = 0
+            buffered = False
+            binary_receipt = False
+            response_complete = False
+            binary_receipt_body = None
+            binary_receipt_status = None
+            digest = hashlib.sha256()
+
+            async def capture(message):
+                nonlocal response_start, buffered, size, binary_receipt, response_complete
+                nonlocal binary_receipt_body, binary_receipt_status
+                if message["type"] == "http.response.start":
+                    response_start = message
+                    response_headers = dict(message.get("headers", []))
+                    content = response_headers.get(b"content-type", b"").lower()
+                    binary_receipt = bool(reservation) and b"json" not in content and (
+                        b"content-disposition" in response_headers or bool(content)
+                    )
+                    buffered = (bool(reservation) and not binary_receipt) or (not principal.owner and b"json" in content)
+                    if not buffered:
+                        await send(message)
+                elif message["type"] == "http.response.body" and binary_receipt:
+                    body_part = message.get("body", b"")
+                    size += len(body_part)
+                    digest.update(body_part)
+                    await send(message)
+                    if not message.get("more_body", False):
+                        binary_receipt_body = json.dumps({
+                            "kind": "binary_receipt",
+                            "delivery_verified": False,
+                            "bytes": size,
+                            "sha256": digest.hexdigest(),
+                            "content_type": dict(response_start.get("headers", [])).get(b"content-type", b"").decode("latin1"),
+                            "message": "The native binary response was delivered once; it cannot be regenerated with this idempotency key.",
+                        }, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                        binary_receipt_status = response_start["status"]
+                        response_complete = True
+                elif message["type"] == "http.response.body" and buffered:
+                    body_part = message.get("body", b"")
+                    size += len(body_part)
+                    if size > MAX_JSON:
+                        raise AuthError(413, "Response is too large; use a paginated operation or asset download")
+                    chunks.append(body_part)
+                    if not message.get("more_body", False):
+                        raw = b"".join(chunks)
+                        content = dict(response_start.get("headers", [])).get(b"content-type", b"")
+                        if not principal.owner and b"json" in content.lower() and raw:
+                            raw = json.dumps(redact(json.loads(raw)), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                        safe_headers = [(k, v) for k, v in response_start.get("headers", []) if k.lower() not in {b"content-length", b"content-encoding"}]
+                        safe_headers.append((b"content-length", str(len(raw)).encode("ascii")))
+                        if reservation:
+                            self.journal.complete(
+                                reservation["reservation_id"],
+                                response_start["status"],
+                                raw,
+                                [(k.decode("latin1"), v.decode("latin1")) for k, v in safe_headers],
+                            )
+                        await send({**response_start, "headers": safe_headers})
+                        await send({"type": "http.response.body", "body": raw})
+                        response_complete = True
+                else:
+                    await send(message)
+                    if message["type"] == "http.response.body" and not message.get("more_body", False):
+                        response_complete = True
+            context_tokens = (
+                principal_context.set(principal),
+                credential_context.set(token),
+                submission_context.set(reservation["reservation_id"] if reservation else None),
+            )
+            origin_token = public_origin_context.set(self.runtime.origin_for_scope(scope) if self.validate_controller_origin else None)
+            try:
+                await self.app(scope, receive, capture)
+                if reservation:
+                    if binary_receipt_body is not None and response_complete:
+                        self.journal.complete(
+                            reservation["reservation_id"],
+                            binary_receipt_status,
+                            binary_receipt_body,
+                            {"content-type": "application/json", "cache-control": "no-store"},
+                        )
+                    elif not response_complete:
+                        self.journal.fail_uncertain(
+                            reservation["reservation_id"],
+                            "The native operation ended before a complete response was recorded",
+                        )
+                route = scope.get("route")
+                route_template = getattr(route, "path", None)
+                if not isinstance(route_template, str) or not route_template.startswith("/"):
+                    route_template = "API request" if scope["path"].startswith("/api/v1/") else "media request"
+                self.runtime.audit(principal.id, f"{method} {route_template}", str((response_start or {}).get("status", "unknown")))
+            except BaseException:
+                if reservation:
+                    self.journal.fail_uncertain(reservation["reservation_id"], "The connection ended before a durable response was recorded")
+                raise
+        finally:
+            if context_tokens is not None:
+                principal_context.reset(context_tokens[0])
+                credential_context.reset(context_tokens[1])
+                submission_context.reset(context_tokens[2])
+                public_origin_context.reset(origin_token)
+            if multipart_receiver is not None:
+                multipart_receiver.close_spool()
+            if multipart_spool is not None:
+                multipart_spool.unlink(missing_ok=True)
+            if multipart_slot:
+                self._multipart_slots.release()

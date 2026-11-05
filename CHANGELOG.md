@@ -3,6 +3,125 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## Repository maintenance - 2026-10-31
+
+- Organize public integration records and testing guides under `docs/technical/`
+  and `docs/testing/`, with linked indexes.
+- Move optional developer launchers to `tests/pinokio/`, the shared profile helper
+  to `scripts/pinokio/`, contribution guidance to `.github/`, and the launcher
+  icon to `docs/images/`. Remove the unused legacy UI screenshot.
+- Archive maintainer working plans privately and remove them from the public
+  branch tree. Extend the repository guard to reject private notes, local
+  configuration and runtime artifacts without printing their contents.
+
+## [4.0.0] — 2026-11-04
+
+Public Main and Dev release. Experimental features and validation limits remain
+documented in the [release notes](docs/RELEASE_NOTES_V4.0.0.md).
+
+**4 November — Release preparation and reliability:** add optional ComfyUI
+model-folder reuse, typed API workflow imports, component pickers and explicit
+Native/Comfy routing, including supported Director paths. ComfyUI remains
+separately managed and off by default. Fix wrapped H3 encoder namespaces,
+Director scene-image handling with no image-generation model, selected join
+codecs/containers, suspended preview recovery and several runtime name errors.
+Reference enhancement now distinguishes character, motion and scene videos,
+keeps vocal IDs separate from Subject IDs, and preserves authored speech when
+repairing a rejected draft. Recover a narrowly identifiable final dialogue-tag
+typo, avoid shorter automatic word targets for supplied lines, keep named props
+from stealing dialogue ownership, and include actual failures in repair requests.
+Update the README image and release documentation.
+
+**2 November — Agent Access and testing updates:** built-in Local MCP and
+authenticated Remote MCP can be enabled independently. Add scoped clients,
+model-aware authoring guides, saved references, asset transfers and agent-authored
+Studio/Director plans, including native song analysis for music videos. Existing
+Pinokio and LAN browser access remains available. Pika References now accepts
+exact source-audio conditioning; fix independent-shot offsets, character-label
+bindings and native Director module identity. Add experimental FastH3 LoRAs,
+shared Turbo LoRA filters, failed-job settings/LoRA details, speech chunk status,
+shorter Editor tracks and an adjustable timeline divider. Keep checkpoint-table
+compatibility fitting on CPU even under a different global tensor device.
+
+Label public Dev v4.0.0 in preparation for the next public Main release.
+The first visit to v4 switches existing and new browser profiles to Graphite
+Studio in Dark mode. Apply that one-time change before the UI mounts, then
+retain any theme or appearance the user chooses afterward, including across
+reloads and v4 patch updates. Other preferences stay unchanged.
+
+Include the upgraded Editor, reviewable Auto-edit, animated titles in Studio
+and Editor, chroma key and transparent MOV export; compact pinned Studio
+controls, mobile/startup recovery and a resizable gallery thumbnail panel.
+Near-widescreen gallery videos retain native proportions without edge gaps.
+
+Add experimental Pika H3 Flex Frames/References to their default enabled
+lists, retaining explicit workflow visibility choices. Enable native H3
+sliding windows with generated motion/boundary/stereo-audio history and
+canonical References inputs, fixed six-evaluation sampling and exact joined
+frame totals. Preserve saved sequence geometry and native single-pass durations.
+
+The release also includes the post-Main v3.3 ports and fixes: MOSS reference
+editors/caches/HQ vision, Fibo 2.0, Qwen reference caches, H3 accelerators/PTD/
+two-pass generation, FlashVSR+ Turbo, optional kernels, Worlds and Profile 0.
+Image prompt guides preserve requested media/styles, model-switch validation
+is repaired, and successful HTTP access lines are quiet by default.
+
+See the [v4.0.0 release notes and limits](docs/RELEASE_NOTES_V4.0.0.md) for the
+reviewed three-workstation qualification and later regression coverage.
+
+**31 October — Reference enhancement fixes:** use the selected media's character
+and voice bindings consistently in Enhance Now, Enhance on generation, and H3
+generation. Scene and style references no longer shift character IDs; composition
+and object references remain separate from character identity. Reconcile older
+tagged prompts from explicit identity evidence, and reject conflicting speaker
+cues before voice selection. Accept harmless dialogue spacing and line wrapping
+without weakening checks for changed words, language, speaker ownership, turn
+order, or duplicated dialogue. Verified prompt attribution with Qwen and Gemma
+for both Scene and Composition; these checks do not certify rendered quality.
+
+## [3.3.0] - 2026-10-26
+
+**Gallery:** resize the thumbnail panel with a draggable, keyboard-accessible
+divider. Previews scale with its width, and the main gallery shares the available
+space. A gallery-toolbar button replaces the protruding tab and phone's floating
+opener; panel width and desktop visibility are remembered per browser.
+
+**Appearance:** add Graphite Studio, a matte charcoal theme with flat orange
+actions, quieter neutral borders and a matching light variant. It is the
+default for fresh browser profiles; saved theme choices remain unchanged.
+The header uses a flat rounded-square M mark that follows the selected theme's
+accent color.
+Dark, Light and Auto modes apply the same palette before the UI mounts.
+
+**27 October image and terminal fixes:** add Krea 2 generation/edit prompt guides;
+preserve requested image media and styles across Studio, raw image writers and
+Director image rules; distinguish FLUX 3 Base from the distilled variant. Remove
+forced photograph/static-pose wording and unconditional source-lighting rules.
+Fix FLUX 3 image generation rejecting unrelated model-mode settings. Quiet
+successful HTTP access logs while retaining failures, warnings and startup logs.
+
+**27 October Dev follow-up:** MOSS SFT/HQ reference editors and caching, HQ v5
+vision conditioning, model-switch validation and native reference geometry;
+Fibo 2.0 and rectangular VAE decoding; H3 PTD and optional two-pass refinement;
+experimental queued Worlds and opt-in VMM/Profile 0. Includes the integration
+fixes found during bounded three-workstation pilots and subsequent workstation
+01 user tests. These are functional checks, not matched speedup or general
+editing-quality claims. See the release notes for compatibility and limits.
+
+Public Dev testing release of the first October WanGP porting batch. Main
+remains v3.2.5. See the [v3.3.0 Dev release notes](docs/RELEASE_NOTES_V3.3.0.md).
+
+- Add optional WGPKernels 1.4.2 / GGUF CUDA 1.0.29 installers with supported-stack
+  checks, hash-pinned assets, stale-version upgrades and newer-manual-pin retention.
+- Add opt-in Qwen Image 2.1 INT8 VRAM/RAM reference caches with conservative
+  memory guards, independent CFG branches and scheduled-LoRA invalidation.
+- Add four pinned LightX2V H3 standard accelerator recipes and apply their
+  video flow shifts at runtime without changing fixed distilled schedules.
+- Add separate FlashVSR+ Turbo upscaling through Post Processing, Tools and
+  Editor, retaining saved FlashVSR v1.1 selections and model-specific caches.
+- These ports have CPU regression/build coverage; matched GPU speed, memory
+  and quality validation is pending. See [port scope](docs/WanGP-October-2026-Ports.md).
+
 ## [3.2.5] - 2026-10-24
 
 Public Main and Dev release of the 23–24 October Dev updates. See the

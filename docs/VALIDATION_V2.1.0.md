@@ -325,7 +325,7 @@ The final unittest and sidebar logs are retained locally as
 
 ## Prior model checks and remaining manual validation
 
-The [H3/media port record](development/wan2gp-12-71-port-plan.md) records earlier
+The [H3/media port record](technical/wan2gp-12-71-port.md) records earlier
 RTX 4090 queue tests for Full/Pruned VDN, 45-second and five-minute H3 audio,
 audio-refinement video preservation, H3 outpainting and RIFE x3. Those checks
 are historical evidence, not GPU runs repeated during this release preparation.

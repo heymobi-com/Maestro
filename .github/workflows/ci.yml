@@ -34,14 +34,14 @@ jobs:
           app/shared/preview_runtime.py app/shared/qtypes app/shared/sol_attn
           app/shared/attention.py app/shared/attention_kit.py app/shared/cuda_memory.py
           app/shared/sage2_core.py app/shared/utils/default_device.py
-          app/shared/llm_engines/nanovllm/layerwise.py app/scripts/install_wgp_kernels.py
+          app/shared/llm_engines/nanovllm/layerwise.py app/scripts/install_wgp_kernels.py app/scripts/install_gguf_kernels.py app/shared/reference_cache.py app/postprocessing/flashvsr
           app/shared/utils/conv_bands.py app/shared/utils/power_throttling.py scripts
       - name: Undefined Python names (our modules)
         # Syntax compilation cannot detect a missing import or a value read
         # before assignment on an infrequently exercised request path.
         run: |
           python -m pip install "ruff==0.16.2"
-          python -m ruff check --select F821,F823 app/services app/models/minimax_h3 app/models/qwen21 app/models/flux3 app/models/moss_image app/models/TTS/fish_audio app/launch.py app/shared/qtypes/int8_convrot.py app/shared/kernels app/shared/llm_engines/nanovllm/layerwise.py app/mmgp/experts.py app/mmgp/expert_compute.py app/scripts/install_wgp_kernels.py
+          python -m ruff check --select F821,F823 app/services app/models/minimax_h3 app/models/qwen21 app/models/flux3 app/models/moss_image app/models/TTS/fish_audio app/launch.py app/shared/qtypes/int8_convrot.py app/shared/kernels app/shared/llm_engines/nanovllm/layerwise.py app/mmgp/experts.py app/mmgp/expert_compute.py app/scripts/install_wgp_kernels.py app/scripts/install_gguf_kernels.py app/shared/reference_cache.py app/postprocessing/flashvsr
       - name: Install lightweight test dependencies
         run: >-
           python -m pip install
@@ -69,6 +69,7 @@ jobs:
           "librosa==0.11.0"
           "timm==1.0.24"
           "ftfy==6.3.1"
+          "loguru==0.7.3"
           "pytest==8.4.2"
       - name: Install CPU PyTorch test dependency
         run: >-
@@ -90,6 +91,7 @@ jobs:
           "psutil==7.2.2"
           "gguf==0.17.1"
           "triton==3.3.1"
+          "easydict==1.13"
       - name: Python unit tests
         # Native-library failures need an active test name and Python stack,
         # rather than an anonymous exit 139 after buffered progress dots.
@@ -98,6 +100,8 @@ jobs:
         # These are standalone test functions, so unittest discovery does not
         # execute them yet. Keep this explicit runner until they are migrated.
         run: python tests/test_call_llm_json_grammar.py
+      - name: Optional ComfyUI bridge regressions (CPU only)
+        run: python -m pytest -q tests/test_comfyui_*.py tests/test_director_comfyui_engine.py
       - name: Standalone preview, source-camera and media regressions
         # Plain unittest discovery omits pytest functions/fixtures in these
         # modules. CUDA-only checks retain their own skips.
@@ -107,10 +111,32 @@ jobs:
           tests/test_generation_preview_support.py
           tests/test_generation_preview_wiring.py
           tests/test_h3_scheduler_clean_preview.py
+          tests/test_pika_flex_timeline.py
+          tests/test_minimax_h3_pika_flex.py
           tests/test_h3_source_camera.py
           tests/test_media_flow.py
           tests/test_tinyvae.py
           tests/test_conv_bands.py
+          tests/test_pika_flex_attention.py
+          tests/test_pika_flex_handler.py
+          tests/test_pika_flex_options_compatibility.py
+          tests/test_launch_module_identity.py
+
+  agent-access:
+    name: Isolated Agent Access protocols and security
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: app
+      CUDA_VISIBLE_DEVICES: "-1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install CPU-only controller dependencies
+        run: python -m pip install -r app/requirements-agent-access.txt "pytest==8.4.2"
+      - name: Test authentication, ownership, transfers and both MCP protocols
+        run: python -m pytest -q tests/test_agent_access_*.py tests/test_pinokio_agent_access.py tests/test_pinokio_remote.py tests/test_server_startup.py
 
   ui-build:
     name: UI type-check + build
@@ -136,6 +162,39 @@ jobs:
         run: |
           node tests/ui/h3_checkpoint_import.cjs
           node tests/ui/h3_checkpoint_download_ui.cjs
-      - name: Type-check + build (tsc -b && vite build)
+      - name: FlashVSR versioned selection regressions
+        run: node tests/ui/flashvsr_options.cjs
+      - name: H3 LoRA settings roundtrip
+        run: node tests/ui/fused_h3_lora_roundtrip.cjs
+      - name: Pika Flex attention default regressions
+        run: |
+          node tests/ui/pika_attention.cjs
+          node tests/ui/h3_autotune_advice_unit.cjs
+      - name: v4 theme introduction and preference recovery
+        run: node tests/ui/theme_migration.cjs
+      - name: UI source and deployment safety regressions
+        run: node tests/ui/ui_build_safety.cjs
+      - name: Reference enhancement request manifest regressions
+        run: node tests/ui/reference_enhancement_manifest.cjs
+      - name: Agent Access settings and session recovery
+        run: |
+          node tests/ui/agent_access.cjs
+          node tests/ui/agent_access_local.cjs
+          node tests/ui/agent_access_onboarding.cjs
+          node tests/ui/pinokio_remote_access.cjs
+      - name: Install isolated browser test runner
+        working-directory: ui
+        run: |
+          npm install --no-save --package-lock=false playwright@1.64.1
+          npx playwright install --with-deps chromium
+      - name: ComfyUI setup, routing and mobile browser regressions
+        env:
+          MAESTRO_PLAYWRIGHT: ${{ github.workspace }}/ui/node_modules/playwright
+        run: |
+          node tests/ui/comfyui.cjs
+          node tests/ui/comfyui_engine.cjs
+      - name: Type-check and staged UI build
         working-directory: ui
         run: npm run build
+      - name: Verify built UI matches source and receipt
+        run: node ui/scripts/ui-build.mjs verify

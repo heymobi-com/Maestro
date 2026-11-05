@@ -3,7 +3,7 @@ const {
   isSolCapable,
   needsCuda13DriverUpdate,
   solRuntimeProfile,
-} = require("./launcher_profile")
+} = require("./scripts/pinokio/launcher_profile")
 
 module.exports = async (kernel) => {
   if (!isSolCapable(kernel)) {

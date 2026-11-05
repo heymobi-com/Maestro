@@ -1,6 +1,6 @@
 const {
   runtimeProfile,
-} = require("./launcher_profile")
+} = require("./scripts/pinokio/launcher_profile")
 
 module.exports = async (kernel) => {
   const runtime = runtimeProfile(kernel)
@@ -64,6 +64,16 @@ module.exports = async (kernel) => {
       message: "uv pip install pywebpush==2.3.0"
     }
   }, {
+    // Reconcile the independent CPU-only Agent Access environment on the
+    // fast path too, without touching the selected model runtime.
+    method: "shell.run",
+    params: {
+      venv: "env-agent",
+      venv_python: "3.11",
+      path: "app",
+      message: "uv pip install -r requirements-agent-access.txt"
+    }
+  }, {
     // Before halting, self-heal the seed-vc component if it's missing
     // (GPL-3.0, cloned from its own repo — see install.js): a failed earlier
     // clone shouldn't leave voice features broken until the next code update.
@@ -99,6 +109,16 @@ module.exports = async (kernel) => {
       message: "uv pip install -r requirements.txt"
     }
   }, {
+    // Keep the control plane's CPU-only dependencies out of every CUDA model
+    // environment; the sidecar starts separately from the selected engine.
+    method: "shell.run",
+    params: {
+      venv: "env-agent",
+      venv_python: "3.11",
+      path: "app",
+      message: "uv pip install -r requirements-agent-access.txt"
+    }
+  }, {
     // Existing installs may have the main runtime marker but still contain a
     // Windows FlashAttention wheel whose CUDA DLL cannot load. Repair only
     // that optional wheel once; a normal torch.js run writes both markers.
@@ -119,7 +139,7 @@ module.exports = async (kernel) => {
     // Saves ~60-120s + ~3 GB of redundant downloads on routine updates.
     //
     // Each hardware profile owns its marker. Bumping the marker in
-    // launcher_profile.js makes this gate reinstall that profile on Update;
+    // scripts/pinokio/launcher_profile.js makes this gate reinstall that profile on Update;
     // old markers remain harmless until Reset removes the environment.
     //
     // Recovery path: if torch ever ends up in a broken state (e.g. CPU

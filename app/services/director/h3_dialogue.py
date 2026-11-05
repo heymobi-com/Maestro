@@ -5201,6 +5201,58 @@ def _mapped_ref2va_subject(role: str, subjects: Sequence[Any]) -> int | None:
     return matches[0] if matches else None
 
 
+def _mapped_ref2va_reference_subject(
+    reference: Mapping[str, Any], subjects: Sequence[Any],
+) -> int | None:
+    """Resolve an identity picture through its role and canonical name fields.
+
+    Reference cards can use a generic relation such as ``character`` for
+    ``role`` while carrying the visible identity in ``label`` or ``name``.
+    Prefer a role that already maps, then use those canonical names as a
+    fallback. If explicit fields identify different cast members, fail closed
+    instead of silently choosing one.
+    """
+
+    role = _trim_sentence(_field(reference, "role", ""))
+    role_match = _mapped_ref2va_subject(role, subjects) if role else None
+    if (
+        str(_field(reference, "type", "") or "").strip().casefold() != "image"
+        or str(_field(reference, "image_intent", "identity") or "identity")
+        .strip()
+        .casefold()
+        != "identity"
+    ):
+        return role_match
+
+    role_key = _h3_anchor_key(role)
+    name_matches: dict[str, int] = {}
+    for key in ("character_name", "label", "name"):
+        name = _trim_sentence(_field(reference, key, ""))
+        if not name or _h3_anchor_key(name) == role_key:
+            continue
+        matched = _mapped_ref2va_subject(name, subjects)
+        if matched is not None:
+            name_matches[name] = matched
+
+    distinct_name_matches = set(name_matches.values())
+    if len(distinct_name_matches) > 1:
+        raise H3DialogueContractError(
+            "Reference identity carries conflicting canonical names that map "
+            "to multiple visible subjects."
+        )
+    name_match = next(iter(distinct_name_matches), None)
+    if (
+        role_match is not None
+        and name_match is not None
+        and role_match != name_match
+    ):
+        raise H3DialogueContractError(
+            f"Reference identity role '{role}' and canonical name "
+            f"'{next(iter(name_matches))}' map to different visible subjects."
+        )
+    return role_match if role_match is not None else name_match
+
+
 def _ref2va_cast_from_source(
     prompt: str, subjects: Sequence[Any],
 ) -> tuple[list[Any], dict[int, str]]:
@@ -5426,6 +5478,26 @@ def _reference_relationships(
             normalize=_normalized_space,
         )
 
+    def mapped_subject_index(
+        matched_index: int | None,
+    ) -> tuple[int, str, str] | None:
+        # Upstream resolves a reference by index; the planner-slot fix from our
+        # branch lives here too, so a one-person shot of S2 stays <Subject 2>.
+        if matched_index is None:
+            return None
+        subject = (subjects or [])[matched_index]
+        character_id = _normalized_space(_field(subject, "character_id", ""))
+        aliases = _ref2va_identity_aliases(subject)
+        subject_name = (
+            _h3_identity_label(_field(subject, "speaker_name", ""))
+            or _ref2va_inferred_visible_identity(subject)
+            or _h3_identity_label(character_id)
+            or (aliases[0] if aliases else f"visible subject {matched_index + 1}")
+        )
+        entry = _speaker_registry_entry(registry, character_id or subject_name)
+        slot, _ = _planner_subject_slot(subject, matched_index + 1)
+        return slot, subject_name, entry[0] if entry else ""
+
     def add_task_type(value: str) -> None:
         if value not in task_types:
             task_types.append(value)
@@ -5433,11 +5505,20 @@ def _reference_relationships(
     for reference in references or []:
         kind = str(reference.get("type") or "").strip().lower()
         role = _trim_sentence(reference.get("role", "")) or f"the supplied {kind} reference"
-        subject_match = (
-            mapped_subject(role)
-            if kind != "image" or str(reference.get("image_intent") or "identity").lower() == "identity"
-            else None
-        )
+        intent = str(reference.get("image_intent") or "identity").lower()
+        if kind == "image":
+            subject_match = (
+                mapped_subject_index(
+                    _mapped_ref2va_reference_subject(
+                        reference,
+                        subjects or [],
+                    )
+                )
+                if intent == "identity"
+                else None
+            )
+        else:
+            subject_match = mapped_subject(role)
         mapped_role = (
             f"<Subject {subject_match[0]}> ({subject_match[1]})"
             if subject_match else role
@@ -5445,7 +5526,6 @@ def _reference_relationships(
         if kind == "image":
             picture_no += 1
             label = f"<Picture {picture_no}>"
-            intent = str(reference.get("image_intent") or "identity").lower()
             if intent == "object":
                 from models.minimax_h3.reference_manifest import object_reference_prompt_contract
 
@@ -6707,7 +6787,10 @@ def validate_h3_prompt_contract(
             if str(reference.get("image_intent") or "identity").lower() != "identity":
                 continue
             try:
-                mapped = _mapped_ref2va_subject(str(reference.get("role") or ""), subjects or [])
+                mapped = _mapped_ref2va_reference_subject(
+                    reference,
+                    subjects or [],
+                )
             except H3DialogueContractError as exc:
                 errors.append(str(exc))
                 continue

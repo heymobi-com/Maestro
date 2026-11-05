@@ -1,0 +1,576 @@
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { Check, Copy, LoaderCircle, RefreshCw, ShieldCheck } from 'lucide-react'
+import {
+  createAgentAccessLocalClient,
+  fetchAgentAccessCreativeDefaults,
+  fetchAgentAccessLocalClientExtension,
+  fetchAgentAccessLocalClients,
+  formatLocalAgentClientClaudeCommand,
+  formatLocalAgentClientCodexConfig,
+  formatLocalAgentClientJson,
+  formatLocalAgentClientServerName,
+  updateAgentAccessCreativeDefaults,
+  type AgentAccessCreativeDefault,
+  type AgentAccessCreativeDefaults,
+  type AgentAccessLocalClient,
+  type AgentAccessScope,
+} from '../../api/agentAccess'
+
+const SCOPE_CHOICES: Array<{ id: AgentAccessScope; label: string; description: string }> = [
+  { id: 'observe', label: 'Observe', description: 'Read status and inspect Maestro data.' },
+  { id: 'generate', label: 'Generate', description: 'Start supported image, video, and audio generation.' },
+  { id: 'manage', label: 'Manage', description: 'Change supported settings and manage resources.' },
+  { id: 'admin', label: 'Admin', description: 'Use administrative Agent Access actions.' },
+]
+
+type LocalMcpTarget = 'chatgpt' | 'codex' | 'claude-desktop' | 'claude-code' | 'other'
+type LocalMcpCopyAction = LocalMcpTarget | 'chatgpt-server-name' | 'chatgpt-command' | 'chatgpt-toml' | `chatgpt-argument-${number}`
+
+const LOCAL_MCP_TARGETS: Array<{ id: LocalMcpTarget; label: string; suggestedName: string }> = [
+  { id: 'chatgpt', label: 'ChatGPT desktop', suggestedName: 'ChatGPT on this PC' },
+  { id: 'codex', label: 'Codex CLI or IDE', suggestedName: 'Codex on this PC' },
+  { id: 'claude-desktop', label: 'Claude Desktop', suggestedName: 'Claude Desktop on this PC' },
+  { id: 'claude-code', label: 'Claude Code', suggestedName: 'Claude Code on this PC' },
+  { id: 'other', label: 'Other MCP app', suggestedName: 'Other MCP app on this PC' },
+]
+
+function localMcpTargetLabel(target: LocalMcpTarget): string {
+  return LOCAL_MCP_TARGETS.find(option => option.id === target)?.label || 'MCP app'
+}
+
+export function LocalMcpSettings({ ownerSession, enabled, available, refreshKey }: {
+  ownerSession: boolean
+  enabled: boolean
+  available: boolean
+  refreshKey: number
+}) {
+  const [clients, setClients] = useState<AgentAccessLocalClient[]>([])
+  const [loading, setLoading] = useState(false)
+  const [loadError, setLoadError] = useState(false)
+  const [creating, setCreating] = useState(false)
+  const [name, setName] = useState('')
+  const [createTarget, setCreateTarget] = useState<LocalMcpTarget | ''>('')
+  const [clientTargets, setClientTargets] = useState<Record<string, LocalMcpTarget>>({})
+  const [openClientId, setOpenClientId] = useState<string | null>(null)
+  const [scopes, setScopes] = useState<AgentAccessScope[]>(['observe'])
+  const [error, setError] = useState<string | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
+  const [copied, setCopied] = useState<string | null>(null)
+  const [downloadingClientId, setDownloadingClientId] = useState<string | null>(null)
+  const setupGeneration = useRef(0)
+
+  const refresh = useCallback(async () => {
+    const generation = setupGeneration.current
+    if (!ownerSession) {
+      setClients([])
+      setLoading(false)
+      return
+    }
+    setLoading(true)
+    setLoadError(false)
+    setError(null)
+    try {
+      const next = await fetchAgentAccessLocalClients()
+      if (generation === setupGeneration.current) {
+        setClients(next)
+        setLoadError(false)
+      }
+    } catch (requestError) {
+      if (generation === setupGeneration.current) {
+        setLoadError(true)
+        setError(requestError instanceof Error ? requestError.message : 'Could not load local MCP clients.')
+      }
+    } finally {
+      if (generation === setupGeneration.current) setLoading(false)
+    }
+  }, [ownerSession])
+
+  const invalidateSetup = useCallback(() => {
+    setupGeneration.current += 1
+    setClients([])
+    setClientTargets({})
+    setOpenClientId(null)
+    setCopied(null)
+    setDownloadingClientId(null)
+    setLoadError(false)
+    setMessage(null)
+    setError(null)
+  }, [])
+
+  useEffect(() => {
+    invalidateSetup()
+    void refresh()
+  }, [invalidateSetup, refresh, refreshKey])
+
+  const selectCreateTarget = (value: string) => {
+    const target = LOCAL_MCP_TARGETS.find(option => option.id === value)
+    if (!target) {
+      setCreateTarget('')
+      return
+    }
+    const previousSuggestion = LOCAL_MCP_TARGETS.find(option => option.id === createTarget)?.suggestedName
+    setCreateTarget(target.id)
+    setName(current => !current.trim() || current === previousSuggestion ? target.suggestedName : current)
+  }
+
+  const handleCreate = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const target = createTarget
+    if (!ownerSession || !enabled || !available || !target || !name.trim() || scopes.length === 0) return
+    setCreating(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const client = await createAgentAccessLocalClient({ name: name.trim(), scopes })
+      setClientTargets(current => ({ ...current, [client.id]: target }))
+      setOpenClientId(client.id)
+      setClients(current => [client, ...current.filter(item => item.id !== client.id)])
+      setName('')
+      setMessage(`“${client.name}” was created with the selected scopes. Complete the setup below in ${localMcpTargetLabel(target)}; creation does not connect it.`)
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Could not create the local MCP client.')
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  const handleCopy = async (client: AgentAccessLocalClient, action: LocalMcpCopyAction) => {
+    if (!enabled || !available || client.revoked || !client.command || !client.args) return
+    const generation = setupGeneration.current
+    try {
+      const argumentMatch = /^chatgpt-argument-(\d+)$/.exec(action)
+      const value = action === 'chatgpt-server-name'
+        ? formatLocalAgentClientServerName(client)
+        : action === 'chatgpt-command'
+          ? client.command
+          : argumentMatch
+            ? client.args[Number(argumentMatch[1])]
+            : action === 'chatgpt-toml' || action === 'codex'
+              ? formatLocalAgentClientCodexConfig(client)
+              : action === 'claude-code'
+                ? formatLocalAgentClientClaudeCommand(client)
+                : formatLocalAgentClientJson(client)
+      if (value === undefined) return
+      await navigator.clipboard.writeText(value)
+      if (generation !== setupGeneration.current) return
+      const copiedKey = `${client.id}:${action}`
+      setCopied(copiedKey)
+      window.setTimeout(() => setCopied(current => current === copiedKey ? null : current), 1800)
+      const target: LocalMcpTarget = action === 'chatgpt-server-name' || action === 'chatgpt-command'
+        || action === 'chatgpt-toml' || action.startsWith('chatgpt-argument-') ? 'chatgpt' : action as LocalMcpTarget
+      setMessage(`${localMcpTargetLabel(target)} setup details copied. Finish the steps in that app; copying does not connect it.`)
+    } catch {
+      if (generation === setupGeneration.current) setError('Clipboard access is unavailable. Select the displayed setup value and copy it manually.')
+    }
+  }
+
+  const handleDownload = async (client: AgentAccessLocalClient) => {
+    if (!enabled || client.revoked || downloadingClientId) return
+    const generation = setupGeneration.current
+    setDownloadingClientId(client.id)
+    setError(null)
+    setMessage(null)
+    try {
+      const bundle = await fetchAgentAccessLocalClientExtension(client.id)
+      if (generation !== setupGeneration.current) return
+      const url = URL.createObjectURL(bundle)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `maestro-local-${client.id}.mcpb`
+      anchor.style.display = 'none'
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+      setMessage(`Extension downloaded for “${client.name}”. Install it in Claude Desktop on this same computer; downloading does not install or connect it.`)
+    } catch (requestError) {
+      if (generation === setupGeneration.current) setError(requestError instanceof Error ? requestError.message : 'Could not download the Claude Desktop extension.')
+    } finally {
+      if (generation === setupGeneration.current) setDownloadingClientId(null)
+    }
+  }
+
+  const activeClients = clients.filter(client => !client.revoked)
+  const revokedClients = clients.filter(client => client.revoked)
+
+  return (
+    <section className="space-y-3 rounded-xl border border-accent-blue/20 bg-accent-blue/5 p-4" aria-labelledby="agent-access-local-heading">
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 rounded-lg bg-accent-blue/10 p-2 text-accent-blue"><ShieldCheck size={16} /></div>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <h4 id="agent-access-local-heading" className="text-xs font-semibold text-text-primary">Local MCP client setup</h4>
+            <span className="rounded-full bg-accent-blue/10 px-2 py-0.5 text-[9px] font-semibold text-accent-blue">Recommended on this computer</span>
+          </div>
+          <p className="mt-1 text-[10px] leading-relaxed text-text-secondary">Runs Maestro’s MCP server directly on this computer over STDIO. It does not need Tailscale, a network URL, or certificate setup. An owner must approve each local client and its chosen scopes.</p>
+        </div>
+        <button type="button" onClick={() => void refresh()} disabled={loading || !ownerSession} className="rounded-lg p-2 text-text-muted hover:bg-bg-hover hover:text-text-primary disabled:opacity-40" aria-label="Refresh local MCP clients">
+          <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+        </button>
+      </div>
+
+      {!ownerSession ? (
+        <p className="rounded-lg bg-bg-primary p-3 text-[10px] leading-relaxed text-text-muted">Sign in as the owner to create or review local client identities.</p>
+      ) : !enabled ? (
+        <p className="rounded-lg bg-bg-primary p-3 text-[10px] leading-relaxed text-text-muted">Enable Local MCP above to create or use a local client. Remote MCP can stay off; local setup does not require Tailscale or a certificate.</p>
+      ) : !available ? (
+        <p className="rounded-lg bg-bg-primary p-3 text-[10px] leading-relaxed text-text-muted">Local MCP is unavailable on this installation.</p>
+      ) : null}
+
+      {ownerSession && (
+        <div className="space-y-2" aria-label="Existing local clients">
+          <div className="flex items-center justify-between gap-2">
+            <h5 className="text-[10px] font-semibold text-text-primary">Existing local clients</h5>
+            <span className="rounded-full bg-bg-primary px-2 py-1 text-[9px] text-text-muted">{activeClients.length} active</span>
+          </div>
+          {loading && clients.length === 0 ? <p className="text-[10px] text-text-muted" role="status">Loading local clients…</p> : loadError && clients.length === 0 ? <p className="rounded-lg bg-bg-primary p-3 text-[10px] text-text-muted">Could not load local clients. Refresh to try again.</p> : activeClients.length === 0 ? <p className="rounded-lg bg-bg-primary p-3 text-[10px] text-text-muted">{revokedClients.length > 0 ? 'No active local clients.' : 'No local clients have been created.'}</p> : (
+            <div className="space-y-2">
+              {activeClients.map(client => <LocalClientSetup key={client.id} client={client} target={clientTargets[client.id] || ''} open={openClientId === client.id} enabled={enabled && available} copied={copied} downloading={downloadingClientId === client.id} onTargetChange={target => {
+                if (!target) setClientTargets(current => {
+                  const next = { ...current }
+                  delete next[client.id]
+                  return next
+                })
+                else setClientTargets(current => ({ ...current, [client.id]: target }))
+              }} onCopy={target => void handleCopy(client, target)} onDownload={() => void handleDownload(client)} />)}
+            </div>
+          )}
+          {revokedClients.length > 0 && <p className="text-[9px] text-text-muted">{revokedClients.length} revoked local {revokedClients.length === 1 ? 'client is' : 'clients are'} hidden from setup.</p>}
+        </div>
+      )}
+
+      {ownerSession && enabled && available && (
+        <form className="space-y-3 rounded-lg border border-border bg-bg-primary p-3" onSubmit={event => void handleCreate(event)}>
+          <div>
+            <p className="text-[9px] font-semibold uppercase tracking-wide text-accent-blue">Create a new local client</p>
+            <h5 className="mt-1 text-[10px] font-semibold text-text-primary">Step 1 · Choose the app</h5>
+            <label htmlFor="agent-access-local-target" className="sr-only">App you are connecting</label>
+            <select id="agent-access-local-target" value={createTarget} disabled={creating} onChange={event => selectCreateTarget(event.target.value)} className="mt-1.5 min-h-10 w-full rounded-lg border border-border bg-bg-secondary px-3 text-xs text-text-primary disabled:opacity-50">
+              <option value="">Choose an app…</option>
+              {LOCAL_MCP_TARGETS.map(target => <option key={target.id} value={target.id}>{target.label}</option>)}
+            </select>
+          </div>
+
+          <div className="space-y-2">
+            <h5 className="text-[10px] font-semibold text-text-primary">Step 2 · Name the client and choose access</h5>
+            {!createTarget ? <p className="text-[9px] leading-relaxed text-text-muted">Choose an app first. Maestro will suggest a matching client name and show the scopes you can grant.</p> : (
+              <>
+                <div className="space-y-1.5">
+                  <label htmlFor="agent-access-local-client-name" className="text-[10px] font-medium text-text-secondary">Suggested local client name · editable</label>
+                  <input id="agent-access-local-client-name" value={name} maxLength={64} onChange={event => setName(event.target.value)} placeholder={LOCAL_MCP_TARGETS.find(target => target.id === createTarget)?.suggestedName} disabled={creating} className="min-h-10 w-full min-w-0 rounded-lg border border-border bg-bg-secondary px-3 py-2 text-xs text-text-primary outline-none focus:border-accent-blue disabled:opacity-50" />
+                </div>
+                <fieldset className="space-y-2">
+                  <legend className="text-[10px] font-medium text-text-secondary">Choose this client’s access scopes</legend>
+                  <div className="grid grid-cols-1 gap-2">
+                    {SCOPE_CHOICES.map(scope => (
+                      <label key={scope.id} className="flex min-w-0 items-start gap-2 rounded-lg border border-border bg-bg-secondary px-2.5 py-2">
+                        <input type="checkbox" checked={scopes.includes(scope.id)} disabled={creating} onChange={event => setScopes(current => event.target.checked ? [...current, scope.id] : current.filter(value => value !== scope.id))} className="mt-0.5 accent-blue-500" />
+                        <span className="min-w-0"><span className="block text-[10px] font-semibold text-text-primary">{scope.label}</span><span className="block text-[9px] leading-relaxed text-text-muted">{scope.description}</span></span>
+                      </label>
+                    ))}
+                  </div>
+                  <p className="text-[9px] leading-relaxed text-text-muted">Only checked scopes are granted. Observe is the only scope checked by default. You can revoke this client later in Agent grants.</p>
+                </fieldset>
+              </>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-[10px] font-semibold text-text-primary">Step 3 · Create the client</p>
+            <button type="submit" disabled={creating || !createTarget || !name.trim() || scopes.length === 0} className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 rounded-lg bg-accent-blue px-3 text-[10px] font-semibold text-bg-primary disabled:opacity-40">
+              {creating ? <LoaderCircle size={13} className="animate-spin" /> : null}{creating ? 'Creating…' : 'Create local client'}
+            </button>
+          </div>
+        </form>
+      )}
+
+      {error && <p className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-2.5 text-[10px] leading-relaxed text-amber-100" role="alert">{error}</p>}
+      {message && <p className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-2.5 text-[10px] leading-relaxed text-emerald-100" role="status">{message}</p>}
+    </section>
+  )
+}
+
+function LocalClientSetup({ client, target, open, enabled, copied, downloading, onTargetChange, onCopy, onDownload }: {
+  client: AgentAccessLocalClient
+  target: LocalMcpTarget | ''
+  open: boolean
+  enabled: boolean
+  copied: string | null
+  downloading: boolean
+  onTargetChange: (target: LocalMcpTarget | '') => void
+  onCopy: (action: LocalMcpCopyAction) => void
+  onDownload: () => void
+}) {
+  const codexConfig = formatLocalAgentClientCodexConfig(client)
+  const config = formatLocalAgentClientJson(client)
+  const command = formatLocalAgentClientClaudeCommand(client)
+  const chatgptServerName = formatLocalAgentClientServerName(client)
+  const chatgptArguments = client.args || []
+  const validCommand = Boolean(client.command && client.args && !client.revoked)
+  const copyTarget = target && target !== 'claude-desktop' ? `${client.id}:${target}` : null
+  return (
+    <details open={open} className="rounded-lg border border-border bg-bg-primary">
+      <summary className="flex min-h-11 cursor-pointer list-none flex-wrap items-center justify-between gap-2 px-3 py-2">
+        <span className="min-w-0"><span className="block truncate text-[10px] font-semibold text-text-primary">{client.name}</span><span className="mt-0.5 block text-[9px] text-text-muted">Scopes: {client.scopes.join(', ') || 'none'} · existing grant</span></span>
+        <span className="shrink-0 text-[9px] text-text-muted">Set up this client</span>
+      </summary>
+      <div className="space-y-2 border-t border-border p-3">
+        <div className="space-y-1.5">
+          <label htmlFor={`agent-access-local-target-${client.id}`} className="text-[10px] font-semibold text-text-primary">Step 1 · Choose the app for this client</label>
+          <select id={`agent-access-local-target-${client.id}`} aria-label={`${client.name} app setup target`} autoFocus={open} value={target} onChange={event => onTargetChange(LOCAL_MCP_TARGETS.some(option => option.id === event.target.value) ? event.target.value as LocalMcpTarget : '')} className="min-h-10 w-full rounded-lg border border-border bg-bg-secondary px-3 text-xs text-text-primary">
+            <option value="">Choose an app…</option>
+            {LOCAL_MCP_TARGETS.map(option => <option key={option.id} value={option.id}>{option.label}</option>)}
+          </select>
+        </div>
+
+        {!enabled && <p className="rounded-lg bg-bg-secondary p-2 text-[9px] leading-relaxed text-text-muted">Enable Local MCP above to use this client. Its existing grant is still here; you do not need to create another one.</p>}
+        {target && (
+          <>
+            <h6 className="pt-1 text-[10px] font-semibold text-text-primary">Step 2 · Add this client to {localMcpTargetLabel(target)}</h6>
+            {!validCommand && <p className="text-[9px] leading-relaxed text-text-muted">Maestro has not returned a safe launch command for this client. Refresh the client list before copying setup.</p>}
+
+            {target === 'chatgpt' && <>
+              <ol className="list-decimal space-y-1 pl-4 text-[9px] leading-relaxed text-text-secondary">
+                <li>On the computer running Maestro, open ChatGPT desktop → Settings → Plugins (or MCP servers) → Add MCP server → STDIO. If this client is already added, edit its existing Maestro entry instead.</li>
+                <li>Enter the Server name and Command to Launch values below. Keep Command in its own field. When repairing an existing entry, remove its old argument rows first.</li>
+                <li>In Arguments, click <strong>Add argument</strong> once for each numbered value, then copy each value into its matching row in order.</li>
+                <li>Save the server, then open a local Codex chat and use <code>/mcp</code> to confirm Maestro is listed.</li>
+              </ol>
+              <p className="rounded-lg bg-bg-primary p-2 text-[9px] leading-relaxed text-text-muted">Each argument is copied exactly as Maestro provides it. Do not add quotes or combine the values; a path with spaces stays one argument when you paste it into its own row.</p>
+              <div className="space-y-2 rounded-lg border border-border bg-bg-primary p-2.5">
+                <ChatGPTCopyField label="Server name" value={chatgptServerName} copyAction="chatgpt-server-name" clientId={client.id} copied={copied} disabled={!enabled || !validCommand} onCopy={onCopy} />
+                <ChatGPTCopyField label="Command to Launch" value={client.command || ''} copyAction="chatgpt-command" clientId={client.id} copied={copied} disabled={!enabled || !validCommand} onCopy={onCopy} />
+                <div className="space-y-2">
+                  <h6 className="text-[9px] font-semibold text-text-secondary">Arguments · add each item in order</h6>
+                  {chatgptArguments.length > 0 ? chatgptArguments.map((argument, index) => (
+                    <ChatGPTCopyField key={index} label={chatgptArgumentLabel(chatgptArguments, index)} value={argument} copyAction={`chatgpt-argument-${index}`} clientId={client.id} copied={copied} disabled={!enabled || !validCommand} onCopy={onCopy} />
+                  )) : <p className="text-[9px] text-text-muted">This client has no arguments.</p>}
+                </div>
+              </div>
+            </>}
+            {target === 'codex' && <ol className="list-decimal space-y-1 pl-4 text-[9px] leading-relaxed text-text-secondary"><li>Copy the Codex section below and add it to your Codex user config: <code>~/.codex/config.toml</code> (on Windows: <code>%USERPROFILE%\.codex\config.toml</code>).</li><li>Save the file, then restart or reload Codex CLI or IDE.</li><li>Check Codex’s MCP server list before using the tools. Copying the section does not configure Codex.</li></ol>}
+            {target === 'claude-desktop' && <ol className="list-decimal space-y-1 pl-4 text-[9px] leading-relaxed text-text-secondary"><li>Download the extension package below.</li><li>On the same computer where Maestro runs, open Claude Desktop → Settings → Extensions → Install Extension and select the downloaded <code>.mcpb</code> file.</li><li>Open the installed extension in Claude Desktop and confirm its tools are available. Downloading does not install or connect it.</li></ol>}
+            {target === 'claude-code' && <ol className="list-decimal space-y-1 pl-4 text-[9px] leading-relaxed text-text-secondary"><li>On the computer running Maestro, open PowerShell on Windows or a terminal on macOS/Linux.</li><li>Copy and run the command below to register this local STDIO server in Claude Code.</li><li>In Claude Code, run <code>/mcp</code> and confirm the Maestro server is listed.</li></ol>}
+            {target === 'other' && <ol className="list-decimal space-y-1 pl-4 text-[9px] leading-relaxed text-text-secondary"><li>Copy the JSON under Advanced / manual setup.</li><li>Add it to the other app’s local STDIO MCP configuration under <code>mcpServers</code>. Use this on the computer running Maestro.</li><li>Save or restart that app, then check its MCP server list. Copying JSON does not configure or connect it.</li></ol>}
+
+            {validCommand && target === 'codex' && <button type="button" onClick={() => onCopy(target)} disabled={!enabled} className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-3 text-[10px] font-semibold text-bg-primary disabled:opacity-40">{copied === copyTarget ? <Check size={13} /> : <Copy size={13} />}{copied === copyTarget ? 'Codex config copied' : 'Copy Codex config section'}</button>}
+            {validCommand && target === 'claude-desktop' && <button type="button" onClick={onDownload} disabled={!enabled || downloading} className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-3 text-[10px] font-semibold text-bg-primary disabled:opacity-40">{downloading ? <LoaderCircle size={13} className="animate-spin" /> : <Copy size={13} />}{downloading ? 'Preparing extension…' : 'Download Claude Desktop extension'}</button>}
+            {validCommand && target === 'claude-code' && <button type="button" onClick={() => onCopy(target)} disabled={!enabled} className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-3 text-[10px] font-semibold text-bg-primary disabled:opacity-40">{copied === copyTarget ? <Check size={13} /> : <Copy size={13} />}{copied === copyTarget ? 'Claude Code command copied' : 'Copy Claude Code command'}</button>}
+            {validCommand && target === 'other' && <button type="button" onClick={() => onCopy(target)} disabled={!enabled} className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-lg bg-accent-blue px-3 text-[10px] font-semibold text-bg-primary disabled:opacity-40">{copied === copyTarget ? <Check size={13} /> : <Copy size={13} />}{copied === copyTarget ? 'MCP JSON copied' : 'Copy MCP JSON'}</button>}
+
+            <div className="space-y-1 border-t border-border pt-2">
+              <h6 className="text-[10px] font-semibold text-text-primary">Step 3 · Verify in the app</h6>
+              {target === 'chatgpt' ? <p className="text-[9px] leading-relaxed text-text-muted">Start a local Codex chat in ChatGPT desktop on this computer, type <code>/mcp</code>, and confirm Maestro is enabled and its tools are listed. Hosted chats or other chat modes can show a different tool set. Copying the config does not prove the app connected. These settings work only on the computer running Maestro.</p> : <p className="text-[9px] leading-relaxed text-text-muted">Maestro confirms client creation or a file download only. The app must show the server as available before setup is complete. These local settings contain no token or credential path and work only on this computer.</p>}
+            </div>
+          </>
+        )}
+        {!target && <p className="text-[9px] leading-relaxed text-text-muted">Choose a target app to see its setup steps. Existing local clients can be reused; creating another grant is optional.</p>}
+
+        <details className="rounded-lg border border-border bg-bg-secondary">
+          <summary className="min-h-10 cursor-pointer list-none px-3 py-2 text-[9px] font-semibold text-text-secondary">Advanced / manual setup</summary>
+          <div className="space-y-2 border-t border-border p-3">
+            {!validCommand ? <p className="text-[9px] leading-relaxed text-text-muted">Maestro has not returned a safe launch command for this client. Refresh the client list before copying setup.</p> : <>
+              {target === 'chatgpt' && <section className="space-y-1">
+                <h6 className="text-[9px] font-semibold text-text-secondary">ChatGPT config.toml · manual file setup</h6>
+                <p className="text-[9px] leading-relaxed text-text-muted">Optional fallback for manually editing a config file. Do not paste this block into Add MCP server; use the separate fields above for normal setup.</p>
+                <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-primary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} ChatGPT config.toml`}>{codexConfig}</pre>
+                <button type="button" onClick={() => onCopy('chatgpt-toml')} disabled={!enabled} className="inline-flex min-h-9 w-full items-center justify-center gap-2 rounded-lg border border-border px-3 text-[9px] font-semibold text-text-secondary disabled:opacity-40">{copied === `${client.id}:chatgpt-toml` ? <Check size={12} /> : <Copy size={12} />}{copied === `${client.id}:chatgpt-toml` ? 'ChatGPT config.toml section copied' : 'Copy ChatGPT config.toml section'}</button>
+              </section>}
+              {target === 'codex' && <section className="space-y-1"><h6 className="text-[9px] font-semibold text-text-secondary">Codex config.toml</h6><pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-primary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} Codex config`}>{codexConfig}</pre></section>}
+              {(target === 'other' || !target) && <section className="space-y-1"><h6 className="text-[9px] font-semibold text-text-secondary">Generic MCP JSON</h6><pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-primary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} generic MCP JSON`}>{config}</pre></section>}
+              {target === 'claude-code' && <section className="space-y-1"><h6 className="text-[9px] font-semibold text-text-secondary">Claude Code command</h6><pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-bg-primary p-2 font-mono text-[9px] leading-relaxed text-text-secondary" aria-label={`${client.name} Claude Code command`}>{command}</pre></section>}
+              {target === 'claude-desktop' && <p className="text-[9px] leading-relaxed text-text-muted">Claude Desktop supplies the Node.js runtime for this extension. The package starts a local STDIO relay; it does not use a private HTTP connector URL.</p>}
+            </>}
+          </div>
+        </details>
+      </div>
+    </details>
+  )
+}
+
+function ChatGPTCopyField({ label, value, copyAction, clientId, copied, disabled, onCopy }: {
+  label: string
+  value: string
+  copyAction: Extract<LocalMcpCopyAction, `chatgpt-${string}`>
+  clientId: string
+  copied: string | null
+  disabled: boolean
+  onCopy: (action: LocalMcpCopyAction) => void
+}) {
+  const isCopied = copied === `${clientId}:${copyAction}`
+  return (
+    <div className="min-w-0 space-y-1">
+      <div className="flex flex-wrap items-center justify-between gap-1">
+        <span className="text-[9px] font-semibold text-text-secondary">{label}</span>
+        <button type="button" onClick={() => onCopy(copyAction)} disabled={disabled} aria-label={`Copy ${label}`} className="inline-flex min-h-7 shrink-0 items-center gap-1 rounded-md border border-border px-2 text-[9px] font-semibold text-text-secondary disabled:opacity-40">
+          {isCopied ? <Check size={11} /> : <Copy size={11} />}{isCopied ? 'Copied' : `Copy ${label}`}
+        </button>
+      </div>
+      <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all rounded-md bg-bg-secondary px-2 py-1.5 font-mono text-[9px] leading-relaxed text-text-primary" aria-label={`ChatGPT ${label}`}>{value}</pre>
+    </div>
+  )
+}
+
+function chatgptArgumentLabel(args: string[], index: number): string {
+  const number = index + 1
+  if (index === 0) return `Argument ${number} (script path)`
+  if (args[index] === '--client') return `Argument ${number} (--client)`
+  if (args[index - 1] === '--client') return `Argument ${number} (client ID)`
+  return `Argument ${number}`
+}
+
+export function AgentGenerationDefaults({ ownerSession }: { ownerSession: boolean }) {
+  const [data, setData] = useState<AgentAccessCreativeDefaults | null>(null)
+  const [draft, setDraft] = useState<Record<string, AgentAccessCreativeDefault>>({})
+  const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
+
+  const refresh = useCallback(async () => {
+    if (!ownerSession) {
+      setData(null)
+      setDraft({})
+      return
+    }
+    setLoading(true)
+    setError(null)
+    try {
+      const next = await fetchAgentAccessCreativeDefaults()
+      setData(next)
+      setDraft(cloneDefaults(next.defaults))
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Could not load agent generation defaults.')
+    } finally {
+      setLoading(false)
+    }
+  }, [ownerSession])
+
+  useEffect(() => { void refresh() }, [refresh])
+
+  const dirty = useMemo(() => Boolean(data && JSON.stringify(normalizeDefaults(draft)) !== JSON.stringify(normalizeDefaults(data.defaults))), [data, draft])
+
+  const save = async () => {
+    if (!ownerSession || !dirty || saving) return
+    setSaving(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const next = await updateAgentAccessCreativeDefaults(normalizeDefaults(draft))
+      setData(next)
+      setDraft(cloneDefaults(next.defaults))
+      setMessage('Saved. The values shown here are the defaults Maestro stored.')
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Could not save agent generation defaults.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const update = (workflowId: string, field: keyof AgentAccessCreativeDefault, value: string) => {
+    setDraft(current => {
+      const next = cloneDefaults(current)
+      const entry = { ...(next[workflowId] || {}) }
+      if (field === 'model_type') {
+        if (value) entry.model_type = value
+        else delete entry.model_type
+      } else if (field === 'duration_seconds') {
+        if (value.trim() === '') delete entry.duration_seconds
+        else {
+          const parsed = Number(value)
+          if (Number.isFinite(parsed) && parsed >= 0) entry.duration_seconds = parsed
+        }
+      } else if (field === 'resolution') {
+        if (value.trim()) entry.resolution = value.trim()
+        else delete entry.resolution
+      }
+      if (Object.keys(entry).length) next[workflowId] = entry
+      else delete next[workflowId]
+      return next
+    })
+    setMessage(null)
+  }
+
+  return (
+    <details className="rounded-xl border border-border bg-bg-secondary">
+      <summary className="flex min-h-12 cursor-pointer list-none items-center justify-between gap-3 px-4 text-left">
+        <span className="min-w-0"><span className="block text-xs font-semibold text-text-primary">Agent generation defaults</span><span className="mt-0.5 block text-[10px] text-text-muted">Optional model, duration, and resolution preferences</span></span>
+        <span className="shrink-0 text-[10px] text-text-muted">{loading ? 'Loading…' : 'Expand'}</span>
+      </summary>
+      <div className="space-y-3 border-t border-border p-3 sm:p-4">
+        {!ownerSession ? <p className="text-[10px] leading-relaxed text-text-muted">Sign in as the owner to view or edit agent generation defaults.</p> : loading && !data ? <p className="text-[10px] text-text-muted" role="status">Loading saved defaults…</p> : !data ? (
+          <div className="space-y-2"><p className="text-[10px] leading-relaxed text-text-muted">Agent generation defaults are unavailable. Refresh to try again.</p><button type="button" onClick={() => void refresh()} disabled={loading} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-border px-2.5 text-[9px] text-text-secondary disabled:opacity-50"><RefreshCw size={12} />Refresh</button></div>
+        ) : (
+          <>
+            <p className="text-[9px] leading-relaxed text-text-muted">Blank model inherits Maestro’s compatible choice. Blank duration and resolution use Maestro’s defaults. Speech duration 0 means Auto. These preferences apply to Agent requests only; saving here does not change Studio or Director selections.</p>
+            <div className="space-y-2">
+              {data.workflows.map(workflow => <WorkflowDefaultRow key={workflow.id} id={workflow.id} label={workflow.label} models={data.models} value={draft[workflow.id] || {}} savedValue={data.defaults[workflow.id] || {}} onChange={(field, value) => update(workflow.id, field, value)} />)}
+            </div>
+            {error && <p className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-2.5 text-[10px] leading-relaxed text-amber-100" role="alert">{error}</p>}
+            {message && <p className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-2.5 text-[10px] leading-relaxed text-emerald-100" role="status">{message}</p>}
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <button type="button" onClick={() => void refresh()} disabled={loading || saving} className="inline-flex min-h-9 items-center gap-1.5 self-start rounded-lg border border-border px-2.5 text-[9px] text-text-secondary disabled:opacity-50"><RefreshCw size={12} className={loading ? 'animate-spin' : ''} />Reload saved values</button>
+              <button type="button" onClick={() => void save()} disabled={!dirty || saving} className="inline-flex min-h-9 items-center justify-center gap-1.5 rounded-lg bg-accent-blue px-3 text-[10px] font-semibold text-bg-primary disabled:opacity-40">{saving ? <LoaderCircle size={12} className="animate-spin" /> : null}{saving ? 'Saving…' : 'Save defaults'}</button>
+            </div>
+          </>
+        )}
+      </div>
+    </details>
+  )
+}
+
+function WorkflowDefaultRow({ id, label, models, value, savedValue, onChange }: {
+  id: string
+  label: string
+  models: AgentAccessCreativeDefaults['models']
+  value: AgentAccessCreativeDefault
+  savedValue: AgentAccessCreativeDefault
+  onChange: (field: keyof AgentAccessCreativeDefault, value: string) => void
+}) {
+  const compatible = models.filter(model => model.workflows.includes(id))
+  const downloaded = compatible.filter(model => model.is_downloaded)
+  const savedModel = models.find(model => model.model_type === value.model_type)
+  const lastSavedModel = models.find(model => model.model_type === savedValue.model_type)
+  const options = [...(savedModel && !downloaded.some(model => model.model_type === savedModel.model_type) ? [savedModel] : []), ...downloaded]
+  const imageWorkflow = id.startsWith('image.')
+  return (
+    <div className="grid grid-cols-1 gap-2 rounded-lg border border-border bg-bg-primary p-3 sm:grid-cols-2">
+      <div className="min-w-0 sm:col-span-2"><h5 className="text-[10px] font-semibold text-text-primary">{label}</h5><p className="text-[9px] text-text-muted">{id}</p></div>
+      <label className="min-w-0 space-y-1 text-[9px] text-text-secondary">
+        <span>Model</span>
+        <select aria-label={`${label} model`} value={value.model_type || ''} onChange={event => onChange('model_type', event.target.value)} className="min-h-9 w-full min-w-0 rounded-lg border border-border bg-bg-secondary px-2 text-[10px] text-text-primary">
+          <option value="">Inherit compatible Maestro choice</option>
+          {options.map(model => <option key={model.model_type} value={model.model_type} disabled={!model.is_downloaded || !model.workflows.includes(id)}>{model.name}{!model.workflows.includes(id) ? ' (not compatible)' : model.is_downloaded ? '' : ' (not downloaded)'}</option>)}
+        </select>
+      </label>
+      {!imageWorkflow && (
+        <label className="min-w-0 space-y-1 text-[9px] text-text-secondary">
+          <span>Duration (seconds){id === 'audio.speech' ? ' · 0 = Auto' : ''}</span>
+          <input aria-label={`${label} duration seconds`} type="number" min="0" step="1" value={value.duration_seconds ?? ''} placeholder={id === 'audio.speech' ? 'Default; enter 0 for Auto' : 'Default / Auto'} onChange={event => onChange('duration_seconds', event.target.value)} className="min-h-9 w-full min-w-0 rounded-lg border border-border bg-bg-secondary px-2 text-[10px] text-text-primary" />
+        </label>
+      )}
+      <label className="min-w-0 space-y-1 text-[9px] text-text-secondary">
+        <span>Resolution</span>
+        <input aria-label={`${label} resolution`} type="text" value={value.resolution || ''} placeholder="Default" onChange={event => onChange('resolution', event.target.value)} className="min-h-9 w-full min-w-0 rounded-lg border border-border bg-bg-secondary px-2 text-[10px] text-text-primary" />
+      </label>
+      <p className="min-w-0 break-all text-[9px] leading-relaxed text-text-muted sm:col-span-2">Form value: {savedModel?.name || value.model_type || 'Inherit Maestro choice'} · duration: {value.duration_seconds === undefined ? 'Default / Auto' : `${value.duration_seconds} seconds${id === 'audio.speech' && value.duration_seconds === 0 ? ' (Auto)' : ''}`} · resolution: {value.resolution || 'Default'}</p>
+      <p className="min-w-0 break-all text-[9px] leading-relaxed text-text-muted sm:col-span-2">Last saved by Maestro: model_type {savedValue.model_type || 'unset (inherit)'}{lastSavedModel ? ` (${lastSavedModel.name})` : ''} · duration_seconds {savedValue.duration_seconds === undefined ? 'unset (default / Auto)' : `${savedValue.duration_seconds}${id === 'audio.speech' && savedValue.duration_seconds === 0 ? ' (Auto)' : ''}`} · resolution {savedValue.resolution || 'unset (default)'}</p>
+    </div>
+  )
+}
+
+function cloneDefaults(value: Record<string, AgentAccessCreativeDefault>): Record<string, AgentAccessCreativeDefault> {
+  return Object.fromEntries(Object.entries(value || {}).map(([key, entry]) => [key, { ...entry }]))
+}
+
+function normalizeDefaults(value: Record<string, AgentAccessCreativeDefault>): Record<string, AgentAccessCreativeDefault> {
+  return Object.fromEntries(
+    Object.entries(value)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, entry]) => [key, Object.fromEntries(
+        Object.entries(entry)
+          .filter(([, item]) => item !== undefined)
+          .sort(([a], [b]) => a.localeCompare(b)),
+      )]),
+  )
+}

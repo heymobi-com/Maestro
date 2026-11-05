@@ -124,7 +124,7 @@ and References also permit an explicit experimental Veda selection, retaining
 their default SLA recipe. Specialty checkpoints are excluded. CPU regressions cover dispatch, reference
 geometry, selection and asset handling. Selected user hardware tests have run,
 but no controlled release-wide speed or output-quality claim is made.
-[Integration and comparison guide](development/h3-veda-port.md).
+[Integration and comparison guide](technical/h3-veda-port.md).
 
 Maestro now includes an adaptation of WanGP 17 and MMGP 4 for its existing
 generation pipelines. It adds optional VRAM and RAM allocator choices, smarter
@@ -157,7 +157,7 @@ scribble, flow and audio-conditioning asset during unrelated setup. The first
 workflow that needs an asset still downloads it automatically.
 
 See [Performance Auto-Tune](Performance-auto-tune.md), the [WanGP 17 memory
-port](development/wan2gp-17-port.md), and the [memory test bench](development/memory-benchmark.md)
+port](technical/wan2gp-17-port.md), and the [memory test bench](testing/memory-benchmark.md)
 for available controls, measurement guidance and limitations.
 
 Bundled MMGP licensing, source revision and allocator binary hashes are recorded in
@@ -514,7 +514,7 @@ The manual **Developer tests** bench combines diagnostics, optional prompt
 regressions, a fixed H3 cold/warm baseline and a bounded memory-profile
 comparison. A manual full-suite action is available; installing the harness
 does not schedule it. Reports and bounded log bundles are kept in the local
-Test-Bench workspace. The [test-bench guide](development/test-bench.md)
+Test-Bench workspace. The [test-bench guide](testing/test-bench.md)
 documents the worker, supported modes and artifact API.
 
 An optional fleet controller runs tests serially on ready, idle Maestro

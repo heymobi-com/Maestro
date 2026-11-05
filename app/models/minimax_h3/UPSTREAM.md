@@ -186,7 +186,7 @@ The upstream rank-8 adapter map is pinned to the same Wan2GP commit and verified
 with SHA-256 `89081fd235e9deff56274ab76b1b01fa4d9aeebcbd0746295b0fd086cf0e0fec`.
 Maestro retains its own queue, media pipeline, MMGP offloading and continuation
 implementation. See `docs/Viggle-Animate.md` and
-`docs/development/Viggle-and-Studio-Controls.md` for usage and validation.
+`docs/Studio-controls.md` for usage.
 
 The September 2026 VDN, grouped-row masking/outpainting, audio-only voice
 preset, and six-step audio refinement additions adapt Wan2GP v12.71 at
@@ -201,8 +201,7 @@ remain valid. On 21 October 2026, all four replacement assets were checked
 anonymously against Hub LFS metadata and bounded download requests. Their
 size and SHA-256 identities are recorded in `vdn_assets.py`.
 See `THIRD_PARTY_NOTICES.md`, `app/LICENSES/WanGP-Community-2.0.txt`, and
-`docs/development/wan2gp-12-71-port-plan.md` for licensing, integration and
-local validation details.
+`docs/technical/wan2gp-12-71-port.md` for licensing and integration details.
 
 The H3 Voice Audio extension adapts `models/minimax_h3/dialogue.py` at that
 same revision, including Whisper medium loading and speech-boundary alignment.
@@ -428,4 +427,4 @@ It batches at most two VAE spatial tiles when the running CUDA device has
 sufficient memory, retaining the serial path on smaller or busy devices.
 The existing tile placement, temporal decoding and overlap blending are retained.
 See `THIRD_PARTY_NOTICES.md`, `app/LICENSES/WanGP-Community-2.0.txt` and
-`docs/development/h3-cross-app-benchmark.md` for provenance and validation scope.
+`docs/testing/h3-cross-app-benchmark.md` for provenance and validation scope.
