@@ -13312,6 +13312,40 @@ async def _prepare_generation_submission(
             validate_pika_flex_single_pass_request,
         )
 
+        # Resolve the Omni reference manifest before Pika Flex validates the
+        # request. A ``drive`` reference reaches generation as exact-drive AD.
+        if _generation_model_def.get("omni_reference"):
+            from models.minimax_h3.reference_manifest import (
+                split_exact_drive_audio_reference,
+            )
+
+            runtime_references, drive_audio_path, drive_audio_ordinal = (
+                await asyncio.to_thread(
+                    split_exact_drive_audio_reference,
+                    body.get("minimax_h3_references") or [],
+                )
+            )
+            # Typed video audio roles may add voice/style/effect references
+            # even when no exact target soundtrack is selected. Keep these
+            # runtime rows separate from the original saved UI manifest.
+            body["minimax_h3_runtime_references"] = runtime_references
+            if drive_audio_path:
+                # ``drive`` is not a creative Ref2VA audio reference. Route it
+                # through the same frozen target-audio path as Director while
+                # retaining the original manifest for Load Settings and UI.
+                body["minimax_h3_exact_drive_audio_ordinal"] = (
+                    drive_audio_ordinal
+                )
+                body["audio_prompt_type"] = "AD"
+                body["audio_guide"] = drive_audio_path
+                if int(body.get("multi_prompts_gen_type") or 0) == 3:
+                    body["multi_clip_concat_audio"] = drive_audio_path
+                print(
+                    "[MiniMax H3 Omni] Music / Performance timeline locked "
+                    "as exact target audio; voice/style references remain "
+                    "in the Omni manifest."
+                )
+
         try:
             # Reject unsupported explicit continuation requests before the
             # generic multi-clip schedule path can reinterpret them.
@@ -13856,37 +13890,38 @@ async def _prepare_generation_submission(
                 )
 
         if _generation_model_def.get("omni_reference"):
-            from models.minimax_h3.reference_manifest import (
-                split_exact_drive_audio_reference,
-            )
-
-            runtime_references, drive_audio_path, drive_audio_ordinal = (
-                await asyncio.to_thread(
+            # The exact target soundtrack is already routed through H3's
+            # frozen target-audio path above, before the Pika Flex request
+            # could see an ``audio_guide`` without its exact-drive AD mode.
+            # Rows the saved config omits (older projects, resized manifests)
+            # are resolved here so a clip never loses its reference set.
+            if not body.get("minimax_h3_runtime_references") and body.get(
+                "minimax_h3_references"
+            ):
+                from models.minimax_h3.reference_manifest import (
                     split_exact_drive_audio_reference,
-                    body.get("minimax_h3_references") or [],
                 )
-            )
-            # Typed video audio roles may add voice/style/effect references
-            # even when no exact target soundtrack is selected. Keep these
-            # runtime rows separate from the original saved UI manifest.
-            body["minimax_h3_runtime_references"] = runtime_references
-            if drive_audio_path:
-                # ``drive`` is not a creative Ref2VA audio reference. Route it
-                # through the same frozen target-audio path as Director while
-                # retaining the original manifest for Load Settings and UI.
+
+                runtime_references, drive_audio_path, drive_audio_ordinal = (
+                    await asyncio.to_thread(
+                        split_exact_drive_audio_reference,
+                        body.get("minimax_h3_references") or [],
+                    )
+                )
                 body["minimax_h3_runtime_references"] = runtime_references
-                body["minimax_h3_exact_drive_audio_ordinal"] = (
-                    drive_audio_ordinal
-                )
-                body["audio_prompt_type"] = "AD"
-                body["audio_guide"] = drive_audio_path
-                if int(body.get("multi_prompts_gen_type") or 0) == 3:
-                    body["multi_clip_concat_audio"] = drive_audio_path
-                print(
-                    "[MiniMax H3 Omni] Music / Performance timeline locked "
-                    "as exact target audio; voice/style references remain "
-                    "in the Omni manifest."
-                )
+                if drive_audio_path:
+                    body["minimax_h3_exact_drive_audio_ordinal"] = (
+                        drive_audio_ordinal
+                    )
+                    body["audio_prompt_type"] = "AD"
+                    body["audio_guide"] = drive_audio_path
+                    if int(body.get("multi_prompts_gen_type") or 0) == 3:
+                        body["multi_clip_concat_audio"] = drive_audio_path
+                    print(
+                        "[MiniMax H3 Omni] Music / Performance timeline locked "
+                        "as exact target audio; voice/style references remain "
+                        "in the Omni manifest."
+                    )
 
         # H3 First/Last continuation passes need genuinely different prompts.
         # A timing wrapper around one full-shot prompt still lets the model see
@@ -32472,15 +32507,19 @@ def _resolve_gallery_media_file(filename: str, workspace: str = "") -> str:
         filepath = _safe_join(requested_root, filename)
         if filepath and os.path.isfile(filepath):
             return filepath
-        raise HTTPException(status_code=404, detail="File not found")
-    # 1. Check active workspace
-    filepath = _safe_join(_workspace_dir(), filename)
-    if filepath and os.path.isfile(filepath):
-        return filepath
-    # 2. Check base save_path (pre-workspace files)
-    filepath = _safe_join(save_root, filename)
-    if filepath and os.path.isfile(filepath):
-        return filepath
+        # A gallery that switched workspaces still shows cards rendered from
+        # the previous one. Those cards keep the workspace they were created
+        # in, so failing here would 404 a file that plainly exists on disk.
+        # Fall through to the cross-workspace scan below instead of raising.
+    else:
+        # 1. Check active workspace
+        filepath = _safe_join(_workspace_dir(), filename)
+        if filepath and os.path.isfile(filepath):
+            return filepath
+        # 2. Check base save_path (pre-workspace files)
+        filepath = _safe_join(save_root, filename)
+        if filepath and os.path.isfile(filepath):
+            return filepath
     # 3. Search all workspace subdirectories (Director pipeline may have saved
     #    to a different workspace than the one currently active in the browser)
     if os.path.isdir(save_root):

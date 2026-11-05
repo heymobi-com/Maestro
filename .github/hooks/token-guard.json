@@ -1,0 +1,20 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "type": "command",
+        "windows": "powershell -NoProfile -ExecutionPolicy Bypass -File \".github\\hooks\\token-guard-brake.ps1\"",
+        "command": "pwsh -NoProfile -File .github/hooks/token-guard-brake.ps1",
+        "timeout": 10
+      }
+    ],
+    "PreToolUse": [
+      {
+        "type": "command",
+        "windows": "powershell -NoProfile -ExecutionPolicy Bypass -File \".github\\hooks\\token-guard-brake.ps1\"",
+        "command": "pwsh -NoProfile -File .github/hooks/token-guard-brake.ps1",
+        "timeout": 10
+      }
+    ]
+  }
+}

@@ -71,6 +71,12 @@ export function ReferenceCharacterPicker({ characters, addedIds, disabled, onAdd
           const added = addedIds.includes(character.id)
           const optionsOpen = optionsId === character.id
           const thumbnail = character.visual.thumbnail_url || character.visual.url
+          // The media URL is stable across edits, so without the record's own
+          // updated_at the browser keeps serving the picture the character
+          // had before the user replaced it.
+          const thumbnailUrl = thumbnail
+            ? `${thumbnail}${thumbnail.includes('?') ? '&' : '?'}v=${character.updated_at ?? ''}`
+            : thumbnail
           return <article key={character.id} ref={optionsOpen ? optionsCard : undefined}
             className={`relative min-w-0 rounded-xl ${optionsOpen ? 'z-10' : ''}`}>
             <button type="button" disabled={disabled || added}
@@ -82,7 +88,7 @@ export function ReferenceCharacterPicker({ characters, addedIds, disabled, onAdd
               } ${disabled ? 'opacity-50' : ''}`}>
               <span className="relative block aspect-[5/4] overflow-hidden bg-bg-tertiary">
                 <span className="absolute inset-0 flex items-center justify-center text-text-muted"><UserRound size={36} /></span>
-                <img key={thumbnail} src={thumbnail} alt="" loading="lazy"
+                <img key={thumbnailUrl} src={thumbnailUrl} alt="" loading="lazy"
                   onError={event => { event.currentTarget.style.visibility = 'hidden' }}
                   className="relative h-full w-full object-cover object-[50%_30%] transition-transform duration-300 motion-safe:group-enabled:group-hover:scale-[1.03]" />
                 <span className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-black/70 to-transparent" />
