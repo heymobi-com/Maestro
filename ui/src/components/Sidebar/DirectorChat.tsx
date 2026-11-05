@@ -1941,7 +1941,7 @@ function DirectorResolutionSelector({ disabled = false }: { disabled?: boolean }
     return () => { cancelled = true }
   }, [videoModel])
 
-  const fallbackOrder = ['480p', '540p', '720p', '1080p'] as const
+  const fallbackOrder = ['480p', '540p', '720p', '768p', '1080p'] as const
   const modelPresetOrder = (options?.resolution_preset_order || []).filter(
     value => value !== 'auto',
   )

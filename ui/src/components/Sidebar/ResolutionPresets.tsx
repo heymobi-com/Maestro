@@ -15,7 +15,7 @@ export function ResolutionPresets({ menu = false, onSelect }: { menu?: boolean; 
     ? modelOptions.resolution_preset_order
     : (isEdit || isImage)
       ? ['auto', '480p', '540p', '720p', '1080p']
-      : ['480p', '540p', '720p', '1080p']
+      : ['480p', '540p', '720p', '768p', '1080p']
   const selectedModelPreset = modelOptions?.resolution_presets?.[resolutionPreset]
 
   return (
