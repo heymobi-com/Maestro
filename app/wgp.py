@@ -8710,7 +8710,12 @@ def generate_video(
 
     if attn in _HALF_PRECISION_ATTENTION_MODES:
         _quant_label = _h3_checkpoint_quantization_label(model_type)
-        if _quant_label == "INT8 ConvRot":
+        # The fused checkpoint names itself INT8 ConvRot, but its baked kernels
+        # normalise to BF16 (shared.qtypes.int8_convrot), so SLA did run on it:
+        # 46 s of denoising here against 8 m 37 s once this guard took it away.
+        # A recipe that asks for SLA by default already knows its own dtype.
+        _fused_keeps_sparse = bool(model_def.get("minimax_h3_fused_turbo"))
+        if _quant_label == "INT8 ConvRot" and not _fused_keeps_sparse:
             # These kernels reject anything but FP16/BF16, and this checkpoint
             # keeps its activations in FP32. Refusing here costs a line in the
             # log; discovering it mid-render costs a full model load per clip.

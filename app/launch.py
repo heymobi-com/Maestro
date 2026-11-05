@@ -6964,11 +6964,18 @@ def get_model_options(model_type: str):
                 "reason": f"H3 Veda runtime detection failed: {error}",
             }
 
-    # Sol, SLA and Veda run FP16/BF16 kernels only, while an INT8 ConvRot H3
-    # checkpoint computes FP32 activations. Report the mix here so the sidebar
-    # cannot invite a combination that only fails after the model has loaded.
+    # Sol, SLA and Veda run FP16/BF16 kernels only, while a genuinely FP32 H3
+    # checkpoint cannot drive them. The fused INT8 ConvRot bundle keeps BF16
+    # activations and asks for SLA by default, so it stays fully listed.
+    # Sol, SLA and Veda run FP16/BF16 kernels only, while a genuinely FP32 H3
+    # checkpoint cannot drive them. The fused INT8 ConvRot bundle keeps BF16
+    # activations and asks for SLA by default, so it stays fully listed.
     try:
-        _dense_only_checkpoint = wgp._h3_checkpoint_quantization_label(model_type)
+        _fused_keeps_sparse = bool(md.get("minimax_h3_fused_turbo"))
+        _dense_only_checkpoint = (
+            "" if _fused_keeps_sparse
+            else wgp._h3_checkpoint_quantization_label(model_type)
+        )
     except Exception:
         _dense_only_checkpoint = ""
     if _dense_only_checkpoint:
