@@ -283,6 +283,11 @@ export async function planH3Windows(params: {
   custom_settings?: Record<string, unknown>
   sliding_window_memory_override?: boolean
   minimax_h3_extended_duration?: boolean
+  audio_guide?: string
+  audio_frame_offset?: number
+  audio_prompt_type?: string
+  source_audio_transcript_in_prompt?: boolean
+  source_audio_transcript_for_enhancement?: boolean
   has_start_image?: boolean
   has_end_image?: boolean
   image_paths?: string[]
@@ -379,6 +384,11 @@ export async function planH3Sequence(params: {
   minimax_h3_extended_duration?: boolean
   overlap_frames?: number
   sequence_continuity?: boolean
+  audio_guide?: string
+  audio_frame_offset?: number
+  audio_prompt_type?: string
+  source_audio_transcript_in_prompt?: boolean
+  source_audio_transcript_for_enhancement?: boolean
   camera_coverage?: 'auto' | 'continuous' | 'multi_shot'
   planning_style?: 'faithful' | 'creative' | 'adaptive'
 }): Promise<H3WindowPlan> {
@@ -742,6 +752,28 @@ export async function fetchEditorMediaPreview(
     throw new Error(error.detail || 'Unable to prepare Editor preview')
   }
   return res.json()
+}
+
+export async function previewEditorGraphic(params: {
+  graphic: import('../types').EditorGraphic
+  width: number
+  height: number
+  assets: Record<string, import('../types').EditorAsset>
+  workspace: string
+}, signal?: AbortSignal): Promise<Blob> {
+  const res = await fetch(`${BASE}/api/v1/editor/graphics/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+    signal,
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Unable to render this graphic overlay' }))
+    throw new Error(error.detail || error.error || 'Unable to render this graphic overlay')
+  }
+  const blob = await res.blob()
+  if (!blob.size) throw new Error('The graphic preview was empty. Check the layout and try again.')
+  return blob
 }
 
 /** Create a separate excerpt; the gallery original is never modified. */
@@ -2855,6 +2887,8 @@ export async function llmEnhancePrompt(params: {
   duration_seconds?: number
   window_count?: number
   window_size_seconds?: number
+  window_overlap_seconds?: number
+  window_discard_seconds?: number
   activated_loras?: string[]
   tts_enhance_mode?: string
   tts_writer_instructions?: string
@@ -2863,6 +2897,11 @@ export async function llmEnhancePrompt(params: {
   max_new_tokens?: number
   reference_context?: string
   minimax_h3_references?: MiniMaxH3Reference[]
+  audio_guide?: string
+  audio_frame_offset?: number
+  audio_prompt_type?: string
+  source_audio_transcript_in_prompt?: boolean
+  source_audio_transcript_for_enhancement?: boolean
   planning_style?: 'faithful' | 'creative' | 'adaptive'
 }): Promise<{
   original: string

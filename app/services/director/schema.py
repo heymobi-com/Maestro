@@ -6,6 +6,7 @@ Renderers consume ShotPlan to produce mode-specific prompts.
 """
 
 from __future__ import annotations
+import copy
 from dataclasses import dataclass, field
 from typing import Optional, Any
 
@@ -430,6 +431,9 @@ class ProductionPlan:
     reference_assets: Optional[ReferenceAssets] = None
     characters: Optional[list[CharacterProfile]] = None
     continuity_notes: Optional[list[str]] = None
+    # Editorial cards are project-level assets. Keep them outside ShotPlan so
+    # title copy never becomes visual prompt text or a character reference.
+    title_cards: Optional[list[dict[str, Any]]] = None
 
     def to_dict(self) -> dict:
         d = {
@@ -448,6 +452,8 @@ class ProductionPlan:
             d["characters"] = [c.to_dict() for c in self.characters]
         if self.continuity_notes:
             d["continuity_notes"] = self.continuity_notes
+        if self.title_cards is not None:
+            d["title_cards"] = copy.deepcopy(self.title_cards)
         return d
 
     @staticmethod
@@ -461,6 +467,7 @@ class ProductionPlan:
             reference_assets=None,  # reconstructed externally if needed
             characters=[CharacterProfile.from_dict(c) for c in d.get("characters", [])] if d.get("characters") else None,
             continuity_notes=d.get("continuity_notes"),
+            title_cards=copy.deepcopy(d.get("title_cards")) if d.get("title_cards") is not None else None,
         )
 
     def get_character(self, character_id: str) -> Optional[CharacterProfile]:

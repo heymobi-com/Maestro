@@ -1,5 +1,9 @@
 # Agent Access
 
+For title cards, agent-authored finishing, actual-media review and bounded
+Director retakes, see [Agent-led filmmaking](Agent-Filmmaking.md). Connected
+agents can also read the live `filmmaking` MCP guide.
+
 Agent Access provides two independent ways for an MCP client to use one Maestro
 installation:
 
@@ -365,6 +369,29 @@ unlike the authored tools, it may invoke the configured local writer for
 multi-window planning. Use `get_creation_context` →
 `prepare_authored_generation` → `submit_authored_generation` when the agent's
 own writing must be preserved.
+
+### H3 References voice diagnostics
+
+`prepare_authored_generation` returns a per-window review under
+`prepared.plan_metadata.h3_reference_handoffs`: the compiled native prompt,
+its hash, the reference labels and character IDs, speaker-to-voice bindings,
+and any voice references omitted for that window. Editorial contribution
+frames and the full rendered pass are recorded separately for continuation.
+Reference fields omit absolute media paths. The compiled creative prompt is
+preserved verbatim and may contain private user content.
+
+Preparation does not render audio. A diagnostic marked unknown or unavailable
+does not establish a valid voice assignment; normal generation validation
+still applies. A successful table describes conditioning, not a guarantee
+that the model will reproduce the assigned voice.
+
+Completed outputs save the actual per-window prompt and bindings in embedded
+metadata and in the sidecar's `model_details.h3_reference_handoffs`. Runtime
+records also identify each decoded voice waveform by hash and record its
+encoded reference row ranges. A joined output retains its completed windows;
+the first-window artifact contains only the handoffs available at that point.
+These diagnostics apply to the shared H3 References engine in Studio and
+agent-authored generation.
 
 ### Original songs and character-reference music videos
 

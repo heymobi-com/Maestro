@@ -596,6 +596,60 @@ _agent_creative_service = make_native_creative_service(
     probe_audio=lambda path: _probe_audio_duration(path),
 )
 
+class _AgentProductionRequest:
+    """Internal JSON adapter; authorization stays in native route helpers."""
+    def __init__(self, body):
+        self.payload = body
+
+    async def json(self):
+        return self.payload
+
+
+def _agent_production_snapshot(pid):
+    _agent_require_director_pipeline(pid)
+    _init_pipeline()
+    from services.director_pipeline import load_pipeline_state, _find_pipeline_file
+    root = _editor_save_root()
+    state = load_pipeline_state(root, pid)
+    path = _find_pipeline_file(root, pid)
+    if not state or not path:
+        raise HTTPException(404, "Director pipeline not found")
+    result = deepcopy(state)
+    for clip in result.get("clips", []):
+        filename = clip.get("video_filename")
+        if filename:
+            clip["video_path"] = os.path.join(os.path.dirname(path), os.path.basename(filename))
+    return result
+
+
+def _agent_production_rerun(pid, index, body):
+    _agent_require_director_pipeline(pid)
+    evidence = _agent_access_idle_probe()
+    if evidence.get("idle") is not True or evidence.get("certain") is not True:
+        raise HTTPException(409, "Maestro has active or uncertain work; defer polishing")
+    from contextvars import copy_context
+    context = copy_context()
+    job_id = uuid.uuid4().hex
+    _jobs[job_id] = {"id": job_id, "kind": "director_polish", "status": "running", "progress": 0,
+                     "message": "Revising selected Director take", "output_files": [], "error": None,
+                     "params": {"_director_pipeline_id": pid, "_director_detached_operation": True}}
+
+    def work():
+        try:
+            result = asyncio.run(rerun_pipeline_clip_video(pid, index, _AgentProductionRequest(body)))
+            if isinstance(result, JSONResponse) and result.status_code >= 400:
+                raise RuntimeError(result.body.decode("utf-8", errors="replace")[:1000])
+            files = [result["filename"]] if isinstance(result, dict) and result.get("filename") else []
+            _jobs[job_id].update(status="completed", progress=100, message="Selected take revision complete", result=result, output_files=files)
+        except Exception as error:
+            _jobs[job_id].update(status="failed", message=str(error)[:2000], error=str(error)[:2000])
+        finally:
+            _agent_access_backend.snapshot_job(job_id)
+
+    threading.Thread(target=lambda: context.run(work), name=f"agent-polish-{job_id}", daemon=False).start()
+    return {"job_id": job_id, "pipeline_id": pid, "clip_index": index, "status": "running"}
+
+
 api.include_router(_create_agent_access_router(
     _agent_access_backend,
     prepare_generation=lambda body, **kwargs: _prepare_generation_submission(body, **kwargs),
@@ -603,6 +657,13 @@ api.include_router(_create_agent_access_router(
     idle_probe=lambda: _agent_access_idle_probe(),
     creative=_agent_creative_service,
     native_director=lambda body: _start_director_pipeline_payload(body),
+    production_callbacks={
+        "output_root": lambda: _editor_save_root(),
+        "export_editor": lambda body: editor_export(_AgentProductionRequest(body)),
+        "rerun_director": _agent_production_rerun,
+        "director_snapshot": _agent_production_snapshot,
+        "idle_probe": lambda: _agent_access_idle_probe(),
+    },
 ))
 
 
@@ -2730,6 +2791,7 @@ def _minimax_h3_turbo_option(model_def: dict) -> dict | None:
         or (model_def or {}).get("minimax_h3_baked_turbo", False)
         or (model_def or {}).get("minimax_h3_fasth3", False)
         or (model_def or {}).get("minimax_h3_pika_flex", False)
+        or (model_def or {}).get("minimax_h3_regenerate_ic", False)
         or (model_def or {}).get("audio_only", False)
         or (model_def or {}).get("vdn", False)
     ):
@@ -7116,6 +7178,7 @@ def get_model_options(model_type: str):
         ),
         "resolution_presets": md.get("resolution_presets"),
         "resolution_preset_order": md.get("resolution_preset_order"),
+        "default_resolution_preset": md.get("default_resolution_preset"),
         "supports_auto_aspect": md.get("supports_auto_aspect", False),
 
         # Choice configs
@@ -9894,6 +9957,21 @@ def get_interactive_writer_drafts(history_id: str):
     return record
 
 
+async def _source_audio_enhancement_transcript(body: dict):
+    if body.get("source_audio_transcript_for_enhancement") is not True:
+        return None
+    from services.studio_audio_context import load_enhancement_transcript
+    try:
+        model = wgp.get_model_def(str(body.get("model_type") or "")) or {}
+        if not model.get("omni_reference"):
+            body = {**body, "references": [], "minimax_h3_references": []}
+        return await asyncio.to_thread(load_enhancement_transcript, {**body, "fps": model.get("fps") or 24})
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=500, detail=f"Source audio transcription failed: {error}") from error
+
+
 @api.post("/api/v1/llm/plan-h3-windows")
 @_interactive_enhancement_slot
 async def llm_plan_h3_windows(request: Request):
@@ -9902,7 +9980,8 @@ async def llm_plan_h3_windows(request: Request):
     from services.h3_plan_retry import H3PlanRetryError
 
     body = await request.json()
-    prompt = str(body.get("prompt") or "").strip()
+    from services.studio_audio_context import strip_window_transcript
+    prompt = strip_window_transcript(str(body.get("prompt") or ""))
     model_type = str(body.get("model_type") or "")
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
@@ -9954,6 +10033,8 @@ async def llm_plan_h3_windows(request: Request):
     if adjustment and adjustment.get("unsupported"):
         raise HTTPException(status_code=400, detail=adjustment["message"])
     normalize_h3_window_geometry(planning_inputs, model_def)
+    source_audio_transcript = (await _source_audio_enhancement_transcript(body)
+                               if body.get("source_audio_transcript_for_enhancement") is True else None)
 
     from services import llm_service
     from services.h3_window_planner import plan_h3_sliding_windows
@@ -10001,6 +10082,7 @@ async def llm_plan_h3_windows(request: Request):
             planning_style=str(body.get("planning_style") or "faithful"),
             lora_system_hint=_active_lora_hint(str(body.get("model_type") or ""), body.get("activated_loras")),
             retry_plan=body.get("retry_plan"),
+            source_audio_transcript=source_audio_transcript,
         )
         result["effective_window_frames"] = window_frames
         return result
@@ -10019,7 +10101,8 @@ async def llm_plan_h3_sequence(request: Request):
     from services.h3_plan_retry import H3PlanRetryError
 
     body = await request.json()
-    prompt = str(body.get("prompt") or "").strip()
+    from services.studio_audio_context import strip_window_transcript
+    prompt = strip_window_transcript(str(body.get("prompt") or ""))
     model_type = str(body.get("model_type") or "")
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
@@ -10082,6 +10165,8 @@ async def llm_plan_h3_sequence(request: Request):
         or 345
     )
     native_continuation = body.get("sequence_continuity", True) is not False
+    source_audio_transcript = (await _source_audio_enhancement_transcript({**body, "references": references})
+                               if body.get("source_audio_transcript_for_enhancement") is True else None)
     overlap_frames = (
         normalize_h3_overlap_frames(
             body.get(
@@ -10136,6 +10221,7 @@ async def llm_plan_h3_sequence(request: Request):
             planning_style=str(body.get("planning_style") or "faithful"),
             lora_system_hint=_active_lora_hint(str(body.get("model_type") or ""), body.get("activated_loras")),
             retry_plan=body.get("retry_plan"),
+            source_audio_transcript=source_audio_transcript,
         )
         result["effective_window_frames"] = effective_clip_frames
         if sequence_adjustment:
@@ -10170,6 +10256,10 @@ async def _llm_enhance_prompt_payload(body: dict):
     """
 
     prompt = body.get("prompt", "")
+    if "[BEGIN SUPPLIED SOURCE-AUDIO TRANSCRIPT CONTEXT]" in prompt:
+        from services.studio_audio_context import strip_window_transcript
+        prompt = strip_window_transcript(prompt)
+        body = {**body, "prompt": prompt}
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
 
@@ -10194,11 +10284,18 @@ async def _llm_enhance_prompt_payload(body: dict):
     needs_flux3_image_guide = (
         model_type.lower().startswith("flux3") and generation_mode == "image"
     )
-    from services.enhance_guides import moss_image_enhancement_kind
+    from services.enhance_guides import is_minimax_h3_image_model, moss_image_enhancement_kind
+    needs_h3_image_guide = generation_mode == "image" and is_minimax_h3_image_model(model_type)
     moss_enhancement_kind = moss_image_enhancement_kind(model_type, generation_mode)
     needs_moss_image_guide = moss_enhancement_kind == "layout"
     needs_moss_image_edit_guide = moss_enhancement_kind == "edit"
     needs_speech_writer = generation_mode == "audio" and bool(body.get("tts_enhance_mode"))
+    if generation_mode in ("video", "avatar") and body.get("source_audio_transcript_for_enhancement") is True:
+        transcript = await _source_audio_enhancement_transcript(body)
+        from services.studio_audio_context import generic_transcript_windows, transcript_plan_context
+        body = {**body, "reference_context": "\n\n".join(filter(None, [
+            body.get("reference_context"), transcript_plan_context(transcript, generic_transcript_windows(body)),
+        ]))}
     try:
         requested_window_count = max(1, int(body.get("window_count") or 1))
     except (TypeError, ValueError):
@@ -10221,9 +10318,11 @@ async def _llm_enhance_prompt_payload(body: dict):
         and not needs_h3_context_ir
         and not needs_ltx_window_plan
         and not needs_flux3_image_guide
+        and not needs_h3_image_guide
         and not needs_moss_image_guide
         and not needs_moss_image_edit_guide
         and not needs_speech_writer
+        and "SOURCE_AUDIO_TRANSCRIPT_CONTEXT" not in str(body.get("reference_context") or "")
     ):
         try:
             # Support both single image_path and array image_paths
@@ -10244,6 +10343,8 @@ async def _llm_enhance_prompt_payload(body: dict):
             )
         elif needs_flux3_image_guide:
             print("[Enhance] FLUX 3 uses native image captions and reference bindings; using Maestro's model-specific LLM guide")
+        elif needs_h3_image_guide:
+            print("[Enhance] MiniMax H3 Image uses its model-specific image guide")
         elif needs_moss_image_guide:
             print("[Enhance] MOSS Image uses native captions and centered-pixel layouts; using Maestro's model-specific LLM guide")
         elif needs_moss_image_edit_guide:
@@ -10257,7 +10358,7 @@ async def _llm_enhance_prompt_payload(body: dict):
 
     from services.h3_performance_audio import has_h3_performance_audio
     performance_audio = (
-        model_type.lower().startswith("minimax_h3_ref2va")
+        needs_h3_context_ir
         and has_h3_performance_audio(body.get("reference_context"))
     )
     if needs_h3_context_ir and not performance_audio:
@@ -12251,6 +12352,15 @@ def delete_director_preset_route(preset_id: str, workspace: str = ""):
 
 # ── Director Pipeline Dashboard ───────────────────────────────────────────
 
+from services.director_draft_final import create_director_draft_final_router
+
+api.include_router(create_director_draft_final_router(
+    authorize_pipeline=_agent_require_director_pipeline,
+    initialize_pipeline=_init_pipeline,
+    get_output_dir=lambda: wgp.server_config.get("save_path", "outputs"),
+))
+
+
 @api.get("/api/v1/director/pipelines")
 def list_saved_pipelines():
     """List saved pipeline states for the active workspace."""
@@ -12435,12 +12545,14 @@ async def rerun_pipeline_clip_video(pid: str, clip_index: int, request: Request)
     body = await request.json()
     base = wgp.server_config.get("save_path", "outputs")
     try:
+        expectation = {"expected_take": body["_expected_take"]} if body.get("_expected_take") is not None else {}
         result = await asyncio.to_thread(
             rerun_clip_video,
             base,
             pid,
             clip_index,
             prompt_override=body.get("prompt"),
+            **expectation,
         )
         return result
     except PipelineBusyError as e:
@@ -12698,11 +12810,12 @@ def _generation_request_uses_serial_auto_planner(body: dict) -> bool:
     lifecycle as generation; manual plans never need this detour.
     """
 
-    if body.get("_enhance_on_generation") is True:
-        return True
-
     model_type = str(body.get("model_type") or "")
     model_def = wgp.get_model_def(model_type) or {}
+    if model_def.get("minimax_h3_viggle_remake") or model_def.get("minimax_h3_regenerate_ic"):
+        return False
+    if body.get("_enhance_on_generation") is True:
+        return True
     architecture = str(model_def.get("architecture") or "")
     if architecture.startswith("minimax_h3"):
         if model_def.get("omni_reference"):
@@ -13058,10 +13171,17 @@ async def _prepare_generation_submission(
     body: dict,
     *,
     prepare_only: bool = False,
+    expected_editor_tool: str | None = None,
 ):
     """Normalize/plan a request, then submit it or return prepared params."""
 
     body = dict(body)
+    # Only the generation worker may supply recognized source text to the
+    # runtime. Clients select opt-in flags and a driver, never internal ASR data.
+    body.pop("source_audio_transcript_data", None)
+    if "[BEGIN SUPPLIED SOURCE-AUDIO TRANSCRIPT CONTEXT]" in str(body.get("prompt") or ""):
+        from services.studio_audio_context import strip_window_transcript
+        body["prompt"] = strip_window_transcript(body["prompt"])
     # Only the trusted provider adapter may attach an existing durable intent.
     body.pop("_comfyui_submission", None)
     principal = principal_context.get()
@@ -13069,7 +13189,7 @@ async def _prepare_generation_submission(
         # These IDs are written only by trusted Director route code. A grant
         # must not claim an existing pipeline or queue entry through JSON.
         body = _strip_private_director_fields(body)
-    correlation = _pop_editor_submission(body)
+    correlation = _pop_editor_submission(body, expected_tool=expected_editor_tool)
     editor_operation_id = (correlation or {}).get("editor_operation_id")
     if prepare_only and editor_operation_id:
         raise HTTPException(400, "An Editor operation cannot be attached to a preparation-only request.")
@@ -13114,23 +13234,31 @@ async def _prepare_generation_submission(
     is_sfx = body.get("sfx_mode")
     if not body.get("model_type"):
         raise HTTPException(status_code=400, detail="model_type is required")
-    if (wgp.get_model_def(body["model_type"]) or {}).get("minimax_h3_viggle"):
-        from models.minimax_h3.viggle import normalize_settings
-        try:
+    _generation_model_def = wgp.get_model_def(body["model_type"]) or {}
+    try:
+        if _generation_model_def.get("minimax_h3_viggle"):
+            from models.minimax_h3.viggle import normalize_settings
+
             normalize_settings(body, allow_preparation=True)
-        except (TypeError, ValueError) as error:
-            raise HTTPException(status_code=400, detail=str(error)) from error
+        elif _generation_model_def.get("minimax_h3_viggle_remake"):
+            from models.minimax_h3.viggle_remake import normalize_request
+
+            normalize_request(body)
+        elif _generation_model_def.get("minimax_h3_regenerate_ic"):
+            from models.minimax_h3.regenerate_ic import normalize_request
+
+            normalize_request(body)
+    except (TypeError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
     if not is_sfx and not body.get("prompt"):
         raise HTTPException(status_code=400, detail="prompt is required")
     # SFX virtual models (mmaudio_*) are frontend-only; skip backend model validation
     if not is_sfx and wgp.get_model_def(body["model_type"]) is None:
         raise HTTPException(status_code=400, detail=f"Unknown model: {body['model_type']}")
-
     try:
         _base_model_type = wgp.get_base_model_type(body["model_type"])
     except Exception:
         _base_model_type = body.get("model_type")
-    _generation_model_def = wgp.get_model_def(body["model_type"]) or {}
     if _generation_model_def.get("world_model"):
         from services.worlds_runtime import world_runtime_context
         try:
@@ -13196,6 +13324,8 @@ async def _prepare_generation_submission(
                 "[Audio Input] Repaired standalone soundtrack input to "
                 f"Audio-to-Video mode for {body['model_type']}."
             )
+    source_audio_transcript = (await _source_audio_enhancement_transcript(body)
+                               if body.get("source_audio_transcript_for_enhancement") is True else None)
     if _generation_model_def.get("omni_reference"):
         from models.minimax_h3.ref2va import (
             normalize_reference_detail,
@@ -13236,7 +13366,10 @@ async def _prepare_generation_submission(
                 )
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
-    if str(_generation_model_def.get("architecture") or "").startswith("minimax_h3"):
+    if (
+        str(_generation_model_def.get("architecture") or "").startswith("minimax_h3")
+        or _generation_model_def.get("minimax_h3_viggle_remake")
+    ):
         variants = _generation_model_def.get("minimax_h3_text_encoder_variants") or {}
         selected_encoder = str(
             body.get("minimax_h3_text_encoder")
@@ -13646,6 +13779,7 @@ async def _prepare_generation_submission(
                 native_continuation=h3_native_sequence,
                 planning_style=h3_sequence_planning_style,
                 lora_system_hint=h3_lora_hint,
+                source_audio_transcript=source_audio_transcript,
             )
             if h3_native_sequence:
                 h3_sequence_geometry = compute_h3_native_sequence_windows(
@@ -13816,6 +13950,7 @@ async def _prepare_generation_submission(
                     planning_style=h3_sequence_planning_style,
                     lora_system_hint=h3_lora_hint,
                     retry_plan=h3_retry_plan,
+                    source_audio_transcript=source_audio_transcript,
                 )
                 cached_prompts = h3_window_plan_response["window_prompts"]
                 if not llm_was_loaded and llm_service.is_loaded():
@@ -14052,6 +14187,7 @@ async def _prepare_generation_submission(
                 planning_style=h3_first_last_planning_style,
                 lora_system_hint=h3_lora_hint,
                 injected_keyframes=h3_injected_keyframes or None,
+                source_audio_transcript=source_audio_transcript,
             )
             h3_expected_boundaries = compute_h3_window_boundaries(
                 h3_total_frames,
@@ -14167,6 +14303,7 @@ async def _prepare_generation_submission(
                     planning_style=h3_first_last_planning_style,
                     lora_system_hint=h3_lora_hint,
                     retry_plan=h3_retry_plan,
+                    source_audio_transcript=source_audio_transcript,
                 )
                 cached_prompts = h3_window_plan_response["window_prompts"]
                 # A planner loaded only for this request should not compete
@@ -14372,6 +14509,9 @@ async def _prepare_generation_submission(
                         image_paths=ltx_images,
                         nsfw=bool(nsfw),
                         planning_style=ltx_planning_style,
+                        source_audio_transcript=source_audio_transcript,
+                        overlap_seconds=ltx_overlap_frames / ltx_fps,
+                        discard_seconds=ltx_discard_frames / ltx_fps,
                     )
                     ltx_prompts = list(
                         ltx_window_plan_response["window_prompts"]
@@ -25794,9 +25934,10 @@ def _apply_per_job_coefficient(job: dict, *, defer_h3_residency_reload: bool = F
             and str(reference.get("type") or reference.get("kind") or "").lower() == "video"
         )
         _is_viggle = bool(_job_model_def.get("minimax_h3_viggle"))
-        if _is_viggle:
+        _source_bound_h3 = bool(_job_model_def.get("preserve_guide_frame_count"))
+        if _is_viggle or _source_bound_h3:
             _h3_video_reference_count = 1
-        _is_h3 = _is_viggle or str(_job_model_def.get("architecture") or "").startswith(
+        _is_h3 = _is_viggle or _source_bound_h3 or str(_job_model_def.get("architecture") or "").startswith(
             "minimax_h3"
         )
         _is_music3 = (
@@ -25808,7 +25949,7 @@ def _apply_per_job_coefficient(job: dict, *, defer_h3_residency_reload: bool = F
             or str(_job_model_def.get("architecture") or "") == "longcat_avatar"
         )
         _h3_omni_video = bool(
-            (_job_model_def.get("omni_reference") or _is_viggle)
+            (_job_model_def.get("omni_reference") or _is_viggle or _source_bound_h3)
             and _h3_video_reference_count
         )
         # H3 itself is a single denoising pipeline. Treating the ordinary
@@ -25948,7 +26089,10 @@ def _apply_per_job_coefficient(job: dict, *, defer_h3_residency_reload: bool = F
                 # transformer's measured working set. The generic LoRA
                 # coefficient can be superseded by H3's stricter absolute
                 # cap, so carry the bytes into this budget explicitly.
-                additional_reserve_gb=adjustment.get("lora_total_gb", 0.0),
+                additional_reserve_gb=(
+                    adjustment.get("lora_total_gb", 0.0)
+                    + float(_job_model_def.get("minimax_h3_bundled_lora_reserve_gb") or 0)
+                ),
                 # Auto presets are symbolic at this point. Pass the model's
                 # authoritative pixel budget so residency is calculated for
                 # the same canvas H3 resolves immediately before generation.
@@ -26651,6 +26795,157 @@ def _chunked_flashvsr_upscale(video_path: str, method: str, *, job: dict = None,
                     pass
 
 
+def _chunked_relayvsr_upscale(video_path: str, method: str, *, job: dict = None, abort_check=None, progress_callback=None):
+    """Stream RelayVSR through aligned chunks and return a silent video file.
+
+    Every chunk after the first starts at the prior chunk's ending keyframe.
+    That one overlapping frame carries the model's keyframe and decoder state;
+    it is omitted from the next encoded segment. The output working set is
+    capped by chunk size rather than clip duration.
+    """
+    import gc
+    import math
+    import subprocess
+
+    import torch
+    from shared.utils.utils import get_video_info
+    from shared.utils.video_decode import probe_video_stream_metadata
+
+    fps, width, height, total_frames = get_video_info(video_path)
+    metadata = probe_video_stream_metadata(video_path) or {}
+    output_fps = float(metadata.get("fps_float") or fps or 0)
+    decode_fps = int(metadata.get("fps") or round(output_fps))
+    if output_fps <= 0 or decode_fps <= 0 or width <= 0 or height <= 0 or total_frames <= 0:
+        raise ValueError("Source video has invalid RelayVSR frame geometry or timing")
+
+    scale = wgp.relayvsr.scale_for_upsampling(method)
+    if scale is None:
+        raise ValueError(f"Unknown RelayVSR upscaling method: {method}")
+    output_height, output_width = max(1, int(height * scale)), max(1, int(width * scale))
+    bytes_per_frame = max(1, 3 * output_height * output_width)
+    max_frames = max(16, int((1 << 30) // bytes_per_frame))
+    chunk_frames = max(16, min(601, ((max_frames - 1) // 15) * 15 + 1))
+    n_chunks = max(1, math.ceil(max(1, total_frames - 1) / (chunk_frames - 1)))
+
+    if torch.cuda.is_available():
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def report(phase, step=None, total=None, unit=None):
+        if callable(progress_callback):
+            try:
+                progress_callback(phase, step, total, unit)
+            except TypeError:
+                progress_callback(phase, step, total)
+            return
+        if job is None:
+            return
+        changes = {"message": str(phase), "phase": str(phase)} if phase else {}
+        try:
+            if total:
+                changes.update(step=int(step or 0), total_steps=int(total))
+        except (TypeError, ValueError):
+            pass
+        if changes:
+            update_job(job, **changes)
+
+    container = wgp.server_config.get("video_container", "mp4")
+    codec = wgp.server_config.get("video_output_codec", None)
+    profile = wgp.loaded_profile if wgp.loaded_profile >= 0 else wgp.get_default_profile("video")
+
+    def save_segment(frames, path):
+        wgp.save_video(tensor=frames[None], save_file=path, fps=output_fps, nrow=1,
+                       normalize=False, codec_type=codec, container=container)
+
+    segment_paths = []
+    concat_list = None
+    tmp_video = None
+    try:
+        written = 0
+        segment_index = 0
+        stream = None
+        while written < total_frames:
+            if callable(abort_check) and abort_check():
+                return None
+            overlap = int(written > 0)
+            start = written - overlap
+            requested = min(chunk_frames, total_frames - start)
+            decoded = wgp.get_resampled_video(video_path, start, requested, decode_fps)
+            if decoded is None or len(decoded) <= overlap:
+                break
+            is_last = start + len(decoded) >= total_frames or len(decoded) < requested
+            if not is_last and (start + len(decoded) - 1) % 15:
+                raise RuntimeError("RelayVSR source chunk did not end on a 15-frame keyframe boundary")
+            if n_chunks > 1 and job is not None:
+                if not update_job(job, message=f"Upscaling chunk {segment_index + 1}/{n_chunks} (RelayVSR)..."):
+                    return None
+
+            sample = decoded.permute(-1, 0, 1, 2).contiguous()
+            decoded = None
+            result, stream = wgp.relayvsr.upscale(
+                sample, method, seed=-1, frame_offset=start,
+                continue_cache=stream, return_continue_cache=not is_last,
+                process_files=wgp.process_files_def, init_pipe=wgp.init_pipe,
+                profile=profile, abort_callback=abort_check,
+                progress_callback=report,
+            )
+            sample = None
+            if result is None:
+                if callable(abort_check) and abort_check():
+                    return None
+                raise RuntimeError("RelayVSR returned no frames")
+            if overlap:
+                result = result[:, overlap:]
+            new_frames = int(result.shape[1])
+            if new_frames <= 0:
+                raise RuntimeError("RelayVSR returned an empty video chunk")
+            segment_path = video_path + f".relayupseg{segment_index:03d}.{container}"
+            save_segment(result, segment_path)
+            segment_paths.append(segment_path)
+            result = None
+            written += new_frames
+            segment_index += 1
+            if is_last:
+                break
+
+        if callable(abort_check) and abort_check():
+            return None
+        if not segment_paths:
+            raise RuntimeError("No frames read from source video")
+        if len(segment_paths) == 1:
+            tmp_video = segment_paths[0]
+            segment_paths = []
+        else:
+            if job is not None and not update_job(job, message="Joining RelayVSR segments..."):
+                return None
+            concat_list = video_path + ".relayupconcat.txt"
+            with open(concat_list, "w", encoding="utf-8") as target:
+                for path in segment_paths:
+                    target.write("file '" + os.path.abspath(path).replace("\\", "/").replace("'", "'\\''") + "'\n")
+            tmp_video = video_path + f".relayup_tmp.{container}"
+            joined = subprocess.run(
+                ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list, "-c", "copy", tmp_video],
+                capture_output=True, text=True, timeout=600,
+            )
+            if joined.returncode != 0 or not os.path.isfile(tmp_video):
+                raise RuntimeError(f"ffmpeg RelayVSR concat failed: {joined.stderr[-400:]}")
+        if callable(abort_check) and abort_check():
+            return None
+        result_path, tmp_video = tmp_video, None
+        return result_path
+    finally:
+        try:
+            wgp.release_edit_spatial_upsampler(method)
+        except Exception:
+            pass
+        for leftover in segment_paths + [concat_list, tmp_video]:
+            if leftover and os.path.isfile(leftover):
+                try:
+                    os.remove(leftover)
+                except OSError:
+                    pass
+
+
 def _apply_spatial_upsampling_to_file(
     video_path: str,
     method: str,
@@ -26666,7 +26961,7 @@ def _apply_spatial_upsampling_to_file(
     video avoids that — and stops FlashVSR from competing with the
     diffusion model for VRAM between windows.
 
-    Thin wrapper over _chunked_flashvsr_upscale: re-muxes the original
+    Thin wrapper over the model-specific chunk engine: re-muxes the original
     audio (e.g. LTX-2's generated track) onto the upscaled video and
     replaces the file (same name) so gallery entries and sidecar metadata
     keep pointing at the right clip — mirroring
@@ -26680,15 +26975,18 @@ def _apply_spatial_upsampling_to_file(
         abort_check = (
             (lambda: is_cancel_requested(job)) if job is not None else None
         )
-        tmp_video = _chunked_flashvsr_upscale(
-            video_path,
-            method,
-            job=job,
-            abort_check=abort_check,
-            progress_callback=progress_callback,
-        )
+        if wgp.relayvsr.is_upsampling(method):
+            tmp_video = _chunked_relayvsr_upscale(
+                video_path, method, job=job, abort_check=abort_check,
+                progress_callback=progress_callback,
+            )
+        else:
+            tmp_video = _chunked_flashvsr_upscale(
+                video_path, method, job=job, abort_check=abort_check,
+                progress_callback=progress_callback,
+            )
         if tmp_video is None:
-            raise RuntimeError("FlashVSR upscale was aborted")
+            raise RuntimeError(f"{method} upscale was aborted")
         if callable(abort_check) and abort_check():
             raise RuntimeError("FlashVSR upscale was aborted")
         if audio_tracks:
@@ -26983,7 +27281,7 @@ def _run_tool_upscale(job_id: str):
                     "_upscaled",
                     force_extension=".png",
                 )
-                if wgp.flashvsr.is_upsampling(method):
+                if wgp.flashvsr.is_upsampling(method) or wgp.relayvsr.is_upsampling(method):
                     services = wgp.server_config.get("services", {})
                     for key in ("flashvsr_model", "flashvsr_mode", "flashvsr_topk_ratio", "flashvsr_backend"):
                         if key in services:
@@ -27007,21 +27305,31 @@ def _run_tool_upscale(job_id: str):
                             update_job(job, **changes)
 
                     profile = wgp.loaded_profile if wgp.loaded_profile >= 0 else wgp.get_default_profile("image")
-                    result, _ = wgp.flashvsr.upscale(
-                        frame,
-                        method,
-                        seed=int(params.get("seed", -1)),
-                        continue_cache=None,
-                        return_continue_cache=False,
-                        vae_tile_size=None,
-                        process_files=wgp.process_files_def,
-                        vae_config=wgp.vae_config,
-                        init_pipe=wgp.init_pipe,
-                        profile=profile,
-                        still_image=True,
-                        abort_callback=_abort,
-                        progress_callback=_image_progress,
-                    )
+                    if wgp.relayvsr.is_upsampling(method):
+                        result, _ = wgp.relayvsr.upscale(
+                            frame, method, seed=int(params.get("seed", -1)),
+                            frame_offset=0, continue_cache=None,
+                            return_continue_cache=False,
+                            process_files=wgp.process_files_def, init_pipe=wgp.init_pipe,
+                            profile=profile, still_image=True,
+                            abort_callback=_abort, progress_callback=_image_progress,
+                        )
+                    else:
+                        result, _ = wgp.flashvsr.upscale(
+                            frame,
+                            method,
+                            seed=int(params.get("seed", -1)),
+                            continue_cache=None,
+                            return_continue_cache=False,
+                            vae_tile_size=None,
+                            process_files=wgp.process_files_def,
+                            vae_config=wgp.vae_config,
+                            init_pipe=wgp.init_pipe,
+                            profile=profile,
+                            still_image=True,
+                            abort_callback=_abort,
+                            progress_callback=_image_progress,
+                        )
                     if result is None or _abort():
                         return False
                     output_frame = result[:, 0]
@@ -27116,13 +27424,11 @@ def _run_tool_upscale(job_id: str):
             codec = wgp.server_config.get("video_output_codec", None)
             final_path = wgp.get_available_filename(out_dir, source_name, "_upscaled", force_extension=f".{container}")
 
-            if wgp.flashvsr.is_upsampling(method):
-                # Chunked engine (shared with the post-generation pass) —
-                # bounds RAM on long clips. The previous unchunked path let
-                # FlashVSR allocate its float32 output buffer for the WHOLE
-                # video: a 4-minute 2x upscale tried 280+ GB and died in
-                # DefaultCPUAllocator.
-                tmp_path = _chunked_flashvsr_upscale(video_source, method, job=job, abort_check=_abort, progress_callback=_progress)
+            if wgp.flashvsr.is_upsampling(method) or wgp.relayvsr.is_upsampling(method):
+                if wgp.relayvsr.is_upsampling(method):
+                    tmp_path = _chunked_relayvsr_upscale(video_source, method, job=job, abort_check=_abort, progress_callback=_progress)
+                else:
+                    tmp_path = _chunked_flashvsr_upscale(video_source, method, job=job, abort_check=_abort, progress_callback=_progress)
                 if tmp_path is None or _abort():
                     if tmp_path and os.path.isfile(tmp_path):
                         try:
@@ -27205,7 +27511,7 @@ def _run_tool_upscale(job_id: str):
             except Exception:
                 pass
             try:
-                wgp.release_flashvsr_vram()
+                wgp.release_edit_spatial_upsampler(method)
             except Exception:
                 pass
             _cleanup_editor_operation_tool_source(editor_source_stage)
@@ -27621,6 +27927,9 @@ def _run_media_flow(job_id):
     job = _jobs[job_id]
     abort_state = {"abort": False}
     final_path = None
+    relay_intermediate = None
+    relay_video = None
+    relay_audio_tracks = []
     editor_source_stage = None
     original_source = None
     source_name = ""
@@ -27653,29 +27962,71 @@ def _run_media_flow(job_id):
                 "_media_flow", force_extension=".png" if is_image else ".mp4")
             def abort():
                 return bool(abort_state.get("abort")) or is_cancel_requested(job)
-            def progress(phase, step=None, total=None):
+            def progress(phase, step=None, total=None, *_extra):
                 update_job(job, phase=phase, message=phase, step=int(step or 0),
                     total_steps=int(total or 0), progress=min(95, int(100 * (step or 0) / max(1, total or 1))))
             wgp.release_model()
             if is_image:
                 from PIL import Image
                 import numpy as np
-                with Image.open(source) as original:
-                    frame = torch.from_numpy(np.array(original.convert("RGBA"))).permute(2, 0, 1).unsqueeze(1)
                 method = params["spatial_upsampling"]
+                with Image.open(source) as original:
+                    alpha = original.convert("RGBA").getchannel("A") if "A" in original.getbands() or "transparency" in original.info else None
+                    mode = "RGB" if method.startswith("relayvsr") else "RGBA"
+                    frame = torch.from_numpy(np.array(original.convert(mode))).permute(2, 0, 1).unsqueeze(1)
                 if method.startswith("dlss5*"):
                     output = neural_render(frame, method, options=params, still_image=True,
                                            abort_callback=abort, progress_callback=progress)
                     if output is None or abort():
                         return False
                     Image.fromarray(output[:, 0].permute(1, 2, 0).cpu().numpy()).save(final_path)
+                elif method.startswith("relayvsr"):
+                    profile = wgp.loaded_profile if wgp.loaded_profile >= 0 else wgp.get_default_profile("image")
+                    output, _ = wgp.relayvsr.upscale(
+                        frame, method, seed=int(params.get("seed", -1)), frame_offset=0,
+                        continue_cache=None, return_continue_cache=False,
+                        process_files=wgp.process_files_def, init_pipe=wgp.init_pipe,
+                        profile=profile, still_image=True, abort_callback=abort,
+                        progress_callback=progress,
+                    )
+                    if output is None or abort():
+                        return False
+                    pixels = output[:, 0].permute(1, 2, 0).cpu().numpy()
+                    image = Image.fromarray(pixels)
+                    if alpha is not None:
+                        alpha = alpha.resize(image.size, Image.Resampling.LANCZOS)
+                        image.putalpha(alpha)
+                    image.save(final_path)
                 else:
                     scale = float(method.removeprefix("lanczos"))
                     image = Image.fromarray(frame[:, 0].permute(1, 2, 0).numpy())
                     image.resize((round(image.width * scale), round(image.height * scale)), Image.Resampling.LANCZOS).save(final_path)
             else:
-                process_video(source, final_path, spatial=params["spatial_upsampling"],
-                    temporal=params["temporal_upsampling"], options=params, abort=abort, progress=progress)
+                method = params["spatial_upsampling"]
+                temporal = params["temporal_upsampling"]
+                if method.startswith("relayvsr"):
+                    relay_source = source
+                    if temporal:
+                        relay_intermediate = final_path + ".temporal.mp4"
+                        process_video(source, relay_intermediate, temporal=temporal, options=params,
+                            abort=abort, progress=progress)
+                        relay_source = relay_intermediate
+                    relay_audio_tracks, relay_audio_metadata = wgp.extract_audio_tracks(relay_source)
+                    relay_video = _chunked_relayvsr_upscale(
+                        relay_source, method, job=job, abort_check=abort,
+                        progress_callback=progress,
+                    )
+                    if relay_video is None or abort():
+                        return False
+                    if relay_audio_tracks:
+                        wgp.combine_video_with_audio_tracks(relay_video, relay_audio_tracks, final_path,
+                            audio_metadata=relay_audio_metadata)
+                    else:
+                        os.replace(relay_video, final_path)
+                        relay_video = None
+                else:
+                    process_video(source, final_path, spatial=method,
+                        temporal=temporal, options=params, abort=abort, progress=progress)
             if abort():
                 return False
             filename = os.path.basename(final_path)
@@ -27693,6 +28044,18 @@ def _run_media_flow(job_id):
         finally:
             unregister_abort_state(job_id, _active_gen_states, abort_state)
             _cleanup_editor_operation_tool_source(editor_source_stage)
+            for path in (relay_video, relay_intermediate):
+                if path and os.path.isfile(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+            if relay_audio_tracks:
+                wgp.cleanup_temp_audio_files(relay_audio_tracks)
+            try:
+                wgp.release_edit_spatial_upsampler(job.get("params", {}).get("spatial_upsampling", ""))
+            except Exception:
+                pass
             if job.get("status") != "completed" and final_path:
                 for path in (final_path, os.path.splitext(final_path)[0] + ".meta.json"):
                     if os.path.isfile(path):
@@ -27717,8 +28080,8 @@ def _enqueue_media_flow(body):
     temporal = str(body.get("temporal_upsampling") or "")
     if not spatial and not temporal:
         raise HTTPException(400, "Select Neural Rendering, a spatial scale, or temporal upsampling")
-    if spatial and not spatial.startswith(("dlss5*", "lanczos")):
-        raise HTTPException(400, "Media Flow supports DLSS Neural Rendering and Lanczos scaling")
+    if spatial and not spatial.startswith(("dlss5*", "lanczos", "relayvsr")):
+        raise HTTPException(400, "Media Flow supports RelayVSR, DLSS Neural Rendering and Lanczos scaling")
     resolved_files = []
     for item in files:
         path = item.get("path") if isinstance(item, dict) else item
@@ -27834,7 +28197,28 @@ async def tools_upscale(request: Request):
     existing_editor_job = _existing_editor_operation_job(body, expected_tool="upscale")
     if existing_editor_job:
         return {"job_id": existing_editor_job["id"], "status": existing_editor_job["status"]}
-    if str(body.get("method", "")).startswith("dlss5*") or body.get("temporal_upsampling"):
+    method = str(body.get("method") or "")
+    if method == "h3_regenerate_ic":
+        if body.get("media_type") == "image":
+            raise HTTPException(400, "H3 Regenerate 2K IC requires a video draft.")
+        workspace = body.get("workspace") or _get_active_workspace()
+        source = _resolve_tool_clip_path(body.get("media_path") or body.get("video_path"), workspace)
+        if not source:
+            raise HTTPException(400, "Choose an existing video draft.")
+        return await _prepare_generation_submission({
+            "model_type": "minimax_h3_regenerate_ic",
+            "generation_mode": "video",
+            "workspace": workspace,
+            "seed": body.get("seed", -1),
+            "video_guide": source,
+            "media_path": source,
+            "media_type": "video",
+            "method": method,
+            "edit_sub_mode": "upscale",
+            "_client_submission_id": body.get("_client_submission_id"),
+            "_editor_operation_id": body.get("_editor_operation_id"),
+        }, expected_editor_tool="upscale")
+    if method.startswith("dlss5*") or body.get("temporal_upsampling"):
         return _enqueue_media_flow({**body,
             "files": [body.get("media_path") or body.get("video_path")],
             "spatial_upsampling": body.get("method") or ""})
@@ -28415,10 +28799,20 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 "_reviewed_h3_runtime_geometry",
                 None,
             )
-            if (wgp.get_model_def(raw_params.get("model_type")) or {}).get("minimax_h3_viggle"):
-                from services.viggle_media import prepare_control_media
+            media_definition = wgp.get_model_def(raw_params.get("model_type")) or {}
+            prepare_media = None
+            if media_definition.get("minimax_h3_viggle"):
+                from services.viggle_media import prepare_control_media as prepare_media
+            elif media_definition.get("minimax_h3_viggle_remake"):
+                from functools import partial
+                from models.minimax_h3.viggle_remake import prepare_remake_media
+
+                prepare_media = partial(prepare_remake_media, mode=media_definition["minimax_h3_viggle_remake"])
+            elif media_definition.get("minimax_h3_regenerate_ic"):
+                from models.minimax_h3.regenerate_ic import prepare_media
+            if prepare_media is not None:
                 try:
-                    raw_params.update(media_resources.enter_context(prepare_control_media(
+                    raw_params.update(media_resources.enter_context(prepare_media(
                         raw_params,
                         resolve_media=lambda path: _resolve_tool_clip_path(path, job.get("workspace")),
                         aborted=lambda: is_cancel_requested(job),
@@ -28430,6 +28824,11 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 except Exception as error:
                     finish_job(job, "failed", error=str(error), message=str(error))
                     return False
+                if media_definition.get("minimax_h3_viggle_remake") or media_definition.get("minimax_h3_regenerate_ic"):
+                    # Store effective geometry but keep original, reusable media paths.
+                    for key in ("video_length", "resolution", "audio_prompt_type"):
+                        if key in raw_params:
+                            job["params"][key] = raw_params[key]
             try:
                 _apply_deferred_prompt_enhancement(job, raw_params)
             except Exception as error:
@@ -28591,11 +28990,9 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 pp_film_grain_intensity = 0
                 pp_film_grain_saturation = 0.5
 
-            # FlashVSR upscaling is deferred to a whole-file post-pass (below):
-            # one continuous temporal pass over the assembled video instead of
-            # per-sliding-window chunks — FlashVSR's temporal state no longer
-            # resets at window boundaries (detail "pop" at seams), and it stops
-            # competing with the diffusion model for VRAM between windows.
+            # Model-based temporal upscaling is deferred to a whole-file
+            # post-pass (below) so its state continues across generated windows
+            # and it does not compete with the diffusion model while sampling.
             # Lanczos/VAE methods keep the inline per-window path (cheap,
             # stateless), and images keep inline upsampling (single frame).
             pp_spatial_upsampling = ""
@@ -28615,7 +29012,7 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                 raw_params.pop("temporal_upsampling", None)
             elif gen_mode != "image":
                 _su_val = str(raw_params.get("spatial_upsampling") or "")
-                if "flashvsr" in _su_val:
+                if "flashvsr" in _su_val or _su_val.startswith("relayvsr"):
                     pp_spatial_upsampling = _su_val
                     raw_params.pop("spatial_upsampling", None)
                 elif _su_val.startswith("dlss5*"):
@@ -29716,6 +30113,18 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                         try:
                             expected_args = set(inspect.signature(wgp.generate_video).parameters.keys())
                             filtered_params = {k: v for k, v in params.items() if k in expected_args}
+                            if params.get("source_audio_transcript_in_prompt") is True:
+                                from services.studio_audio_context import source_audio_driver
+                                from services.source_audio_transcript import get_source_audio_transcript
+                                # Preparation already resolved Omni drive roles to
+                                # the exact waveform used by this runtime task.
+                                source_audio_path = source_audio_driver({
+                                    "audio_guide": params.get("audio_guide"),
+                                    "audio_prompt_type": params.get("audio_prompt_type"),
+                                })
+                                if source_audio_path:
+                                    send_cmd("progress", [0, "Transcribing source audio (cached after first use)..."])
+                                    filtered_params["source_audio_transcript_data"] = get_source_audio_transcript(source_audio_path)
                             plugin_data = task.get('plugin_data', {})
                             # The engine fetches a missing model on this worker
                             # thread before it can render. Own that transfer so
@@ -30929,7 +31338,7 @@ def _run_generation(job_id: str, *, finalize: bool = True, _slot_owned: bool = F
                         try:
                             if not update_job(
                                 job,
-                                message=f"Upscaling {fname} (FlashVSR)...",
+                                message=f"Upscaling {fname} ({pp_spatial_upsampling})...",
                                 phase="Upscaling",
                             ):
                                 return False
@@ -32024,10 +32433,10 @@ def get_status(job_id: str):
         "total_steps": j.get("total_steps", 0),
         "phase": j.get("phase", ""),
         "message": j["message"],
-        "output_files": j["output_files"],
+        "output_files": j.get("output_files", []),
         "finishing_warnings": j.get("finishing_warnings", []),
         "reconstruction_report": j.get("reconstruction_report"),
-        "error": j["error"],
+        "error": j.get("error"),
         "generation_details": public_generation_details(j),
         "viggle_preparation": j.get("viggle_preparation"),
         "enhancement": public_enhancement(j.get("enhancement"), summary=True),
@@ -33586,7 +33995,7 @@ def _run_editor_export(job_id: str) -> bool:
                         job,
                         progress=render_progress_ceiling,
                         phase="Upscaling",
-                        message="Upscaling export with FlashVSR...",
+                        message=f"Upscaling export with {spatial_upsampling}...",
                     ):
                         return False
                     _apply_spatial_upsampling_to_file(
@@ -33629,7 +34038,9 @@ def _run_editor_export(job_id: str) -> bool:
             )
             export_width, export_height, export_fps = editor_export_dimensions(project)
             upscale_factor = (
-                wgp.flashvsr.scale_for_upsampling(spatial_upsampling) or 1.0
+                wgp.flashvsr.scale_for_upsampling(spatial_upsampling)
+                or wgp.relayvsr.scale_for_upsampling(spatial_upsampling)
+                or 1.0
             )
             export_record = {
                 "id": f"export-{job_id}",
@@ -34003,6 +34414,30 @@ async def editor_media_status(request: Request):
             ),
         }
     except EditorProjectError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@api.post("/api/v1/editor/graphics/preview")
+async def editor_graphic_preview(request: Request):
+    from services.editor_graphic_preview import build_editor_graphic_preview
+    from starlette.responses import Response
+
+    raw = await request.body()
+    if len(raw) > 512 * 1024:
+        raise HTTPException(status_code=413, detail="Graphic preview request exceeds 512 KiB.")
+    try:
+        body = json.loads(raw)
+        if not isinstance(body, dict):
+            raise ValueError("Graphic preview requires a JSON object.")
+        workspace = body.get("workspace") or _get_active_workspace()
+        content = await asyncio.to_thread(
+            build_editor_graphic_preview, body,
+            save_root=_editor_save_root(), uploads_root=_editor_uploads_root(), workspace=workspace,
+        )
+        return Response(content=content, media_type="image/png", headers={"Cache-Control": "no-store"})
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Graphic image source not found.") from error
+    except (ValueError, EditorProjectError) as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 

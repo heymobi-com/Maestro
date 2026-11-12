@@ -3,6 +3,54 @@
 All notable changes to Maestro are documented here. The upstream WanGP
 pipeline's own history lives in [app/docs/CHANGELOG.md](app/docs/CHANGELOG.md).
 
+## [4.1.1] — 2026-11-10
+
+- Reserve GPU memory for reference-heavy MiniMax H3 Image renders. Auto-Tune
+  switches fully resident models to a streaming profile based on available
+  VRAM and RAM, retaining the requested canvas and all references.
+
+## [4.1.0] — 2026-11-10
+
+- Add experimental MiniMax H3 Image to Studio Image Generate. Generate from text
+  or edit with up to 16 ordered source images at native 1K, 2K and 4K.
+- Add H3 Remake for replacing people or editing a scene, Regenerate 2K, H3
+  accelerator options, Director final takes and RelayVSR 2× video upscaling.
+- Add exact-text CPU title cards to the agent creation workflow and optional
+  detached opening, intertitle and end cards in Director planning. Keep cards
+  separate from character references; wrap opening/end cards around the muxed
+  master to preserve soundtrack synchronization. Audio-locked intertitles need
+  an explicitly reserved Editor timeline.
+- Add agent-authored finishing into a new editable Editor project: ordered
+  clips/cards, narration, music and sound effects, gains, fades, declared speech
+  ducking and optional software export.
+- Add actual-media take inspection with software decoding, five sampled stills,
+  a contact sheet and optional audio preview delivered directly to MCP clients.
+  Creative judgments remain explicit agent observations, never an automatic pass.
+- Add durable, owner-scoped polish budgets for selected Director takes. Reuse
+  original request IDs after uncertain responses; source fingerprints and receipt
+  guards prevent stale or repeated retakes.
+- Accept the pinned PDD adapter's BF16 head tensors and fit them in FP32. Retain
+  PTD's separate format checks. Improve Director source-action actor/origin
+  validation without relaxing genuine ordering or object requirements.
+- Retain H3 reference voice handoff diagnostics without claiming that prompting
+  guarantees identity or voice matching.
+- Recover stale Agent Access registrations on Windows when complete OS process
+  enumeration proves the recorded PID is absent. Preserve conservative refusal
+  for live processes and incomplete or unavailable process checks.
+
+- Restore a recorded video's duration when loading MCP/API or older clip
+  settings without Studio's duration-planning hint. Do not reinterpret a saved
+  single clip as a new prompt-based Auto timeline; retain explicit saved
+  planning modes and continuation geometry.
+- Allow experimental 4–12 denoising steps for Pika H3 Flex Frames and References.
+  Keep the released six-step schedule as the recommended default, preserve the
+  selected count when reusing settings, and retain the managed adapter, guidance
+  and video/audio shifts. Other counts are sampling experiments, not trained
+  quality presets.
+
+See [v4.1.0 release notes](docs/RELEASE_NOTES_V4.1.0.md) and the
+[agent filmmaking guide](docs/Agent-Filmmaking.md).
+
 ## Repository maintenance - 2026-10-31
 
 - Organize public integration records and testing guides under `docs/technical/`
